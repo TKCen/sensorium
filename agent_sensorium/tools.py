@@ -12,6 +12,8 @@ from .gate import (
 from .schemas import normalize_signal, utc_now_iso, validate_signal
 from .store import SensoriumStore
 
+ARCHIVED_STATUSES = {"archived", "closed"}
+
 VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "cancel", "mark_reviewed"}
 
 
@@ -187,9 +189,76 @@ def handle_sensorium_candidate_update(
     })
 
 
+def handle_sensorium_compact(
+    *, instance: str = "default", state_dir: str | None = None
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+
+    now = utc_now_iso()
+    candidates = store.read_jsonl("candidates")
+    threads = store.read_jsonl("threads")
+
+    archived_candidates: list[str] = []
+    archived_threads: list[str] = []
+    receipts: list[dict] = []
+
+    for c in candidates:
+        status = c.get("status", "candidate")
+        if status in ARCHIVED_STATUSES:
+            continue
+        expires = c.get("expires_at", "")
+        is_expired = bool(expires) and expires <= now
+        is_terminal = status in ("suppressed", "cancelled")
+        if is_expired or is_terminal:
+            receipt = {
+                "ts": now,
+                "type": "compact.candidate_archived",
+                "candidate_id": c["id"],
+                "reason": "expired" if is_expired else f"terminal_status:{status}",
+                "previous_status": status,
+            }
+            c["status"] = "archived"
+            c["updated_at"] = now
+            archived_candidates.append(c["id"])
+            receipts.append(receipt)
+            store.append_jsonl("decisions", receipt)
+
+    for t in threads:
+        status = t.get("status", "dormant")
+        if status == "archived":
+            continue
+        if t.get("pinned"):
+            continue
+        expires = t.get("expires_at", "")
+        if expires and expires <= now:
+            receipt = {
+                "ts": now,
+                "type": "compact.thread_archived",
+                "thread_id": t["id"],
+                "reason": "expired",
+                "previous_status": status,
+            }
+            t["status"] = "archived"
+            t["updated_at"] = now
+            archived_threads.append(t["id"])
+            receipts.append(receipt)
+            store.append_jsonl("decisions", receipt)
+
+    if archived_candidates:
+        _rewrite_jsonl(store, "candidates", candidates)
+    if archived_threads:
+        _rewrite_jsonl(store, "threads", threads)
+
+    return _ok(instance, {
+        "archived_candidates": archived_candidates,
+        "archived_threads": archived_threads,
+        "receipts_written": len(receipts),
+    })
+
+
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
     path = store._resolve(name)
-    import json as _json
     with open(path, "w") as f:
         for item in items:
-            f.write(_json.dumps(item, separators=(",", ":")) + "\n")
+            f.write(json.dumps(item, separators=(",", ":")) + "\n")

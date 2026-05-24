@@ -1,0 +1,19 @@
+{
+  "instance": "sera",
+  "thresholds": {
+    "single_signal_strength": 0.75,
+    "important_kind_strength": 0.6,
+    "candidate_pressure": 0.65,
+    "dispatch_pressure": 0.5
+  },
+  "promote_kinds": [
+    "design_decision",
+    "user_correction",
+    "artifact_created",
+    "unresolved_question",
+    "task_result"
+  ],
+  "thread_ttl_hours": 168,
+  "sensitivity_default": "private",
+  "allowed_surfaces_default": ["local", "dashboard"]
+}
