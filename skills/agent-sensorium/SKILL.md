@@ -32,17 +32,21 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 | `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
 | `sensorium_candidate_update` | Suppress / hold / cancel / mark_reviewed a candidate |
 | `sensorium_attention_pointer` | Preview the small active-session pointer for a surface |
+| `sensorium_thread_open` | Open a compact conscious-thread capsule when the requested surface is allowed |
+| `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Command
 
 ```
-/sensorium [status|threads|pointer|dispatch|compact|help]
+/sensorium [status|threads|pointer|open|thread|dispatch|compact|help]
 ```
 
 - **status** (default) — compact overview with counts and top items
 - **threads** — visible dormant/held threads with origin info
 - **pointer [surface]** — preview the small doorway that may be injected into an active session when surface/privacy/cooldown gates allow it
+- **open [thread_id|latest] [surface]** — open a compact thread capsule if the requested surface is allowed
+- **thread <thread_id|latest> <close|hold|resume|archive|pin|unpin|mark_reviewed> [reason]** — update thread lifecycle/pin state with a receipt
 - **dispatch** — dry-run dispatch preview (never mutates via command)
 - **compact** — archive expired items
 - **help** — usage reference

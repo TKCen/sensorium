@@ -7,6 +7,8 @@ from .tools import (
     handle_sensorium_compact,
     handle_sensorium_dispatch_once,
     handle_sensorium_status,
+    handle_sensorium_thread_open,
+    handle_sensorium_thread_update,
 )
 
 
@@ -25,6 +27,12 @@ def handle_sensorium_command(
     elif sub == "pointer":
         surface = parts[1] if len(parts) > 1 else "local"
         return _fmt_pointer(surface=surface, **kw)
+    elif sub == "open":
+        thread_id = parts[1] if len(parts) > 1 else "latest"
+        surface = parts[2] if len(parts) > 2 else "local"
+        return _fmt_open(thread_id=thread_id, surface=surface, **kw)
+    elif sub == "thread":
+        return _fmt_thread_update(args=parts[1:], **kw)
     elif sub == "dispatch":
         return _fmt_dispatch(**kw)
     elif sub == "compact":
@@ -80,6 +88,50 @@ def _fmt_pointer(*, instance: str, state_dir: str | None, surface: str) -> str:
     )
 
 
+def _fmt_open(*, instance: str, state_dir: str | None, thread_id: str, surface: str) -> str:
+    raw = handle_sensorium_thread_open(
+        instance=instance, state_dir=state_dir, thread_id=thread_id, surface=surface
+    )
+    result = json.loads(raw)
+    if not result["success"]:
+        return f"Sensorium [{instance}] open: {result['error']}"
+    data = result["data"]
+    lines = [
+        f"Sensorium [{instance}] thread {data['thread_id']} [{data['status']}]",
+        f"  {data['title']}",
+        f"  why: {data['conscious_task'].get('why')}",
+    ]
+    if data.get("continuity_summary"):
+        lines.append("  continuity:")
+        for item in data["continuity_summary"][:4]:
+            lines.append(f"    - {item}")
+    if data.get("open_questions"):
+        lines.append("  open questions:")
+        for item in data["open_questions"][:3]:
+            lines.append(f"    - {item}")
+    if data.get("next_prompt_to_operator"):
+        lines.append(f"  next: {data['next_prompt_to_operator']}")
+    return "\n".join(lines)
+
+
+def _fmt_thread_update(*, instance: str, state_dir: str | None, args: list[str]) -> str:
+    if len(args) < 2:
+        return "Usage: /sensorium thread <thread_id|latest> <close|hold|resume|archive|pin|unpin|mark_reviewed> [reason]"
+    thread_id, action = args[0], args[1]
+    reason = " ".join(args[2:])
+    raw = handle_sensorium_thread_update(
+        instance=instance, state_dir=state_dir, thread_id=thread_id, action=action, reason=reason
+    )
+    result = json.loads(raw)
+    if not result["success"]:
+        return f"Sensorium [{instance}] thread update: {result['error']}"
+    data = result["data"]
+    return (
+        f"Sensorium [{instance}] thread {data['thread_id']}: {data['action']} "
+        f"({data['old_status']} -> {data['new_status']})"
+    )
+
+
 def _fmt_dispatch(*, instance: str, state_dir: str | None) -> str:
     raw = handle_sensorium_dispatch_once(
         instance=instance, state_dir=state_dir, dry_run=True
@@ -126,6 +178,8 @@ def _help() -> str:
         "  status         Compact status overview (default)\n"
         "  threads        Top visible dormant/held threads\n"
         "  pointer [surf] Show the active-session pointer for a surface\n"
+        "  open [id] [surf] Open a compact thread capsule if allowed on surface\n"
+        "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
         "  dispatch       Dry-run dispatch preview\n"
         "  compact        Archive expired items\n"
         "  help           This message"

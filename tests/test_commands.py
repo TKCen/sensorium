@@ -85,6 +85,8 @@ class TestHelpCommand:
         assert "status" in out
         assert "threads" in out
         assert "pointer" in out
+        assert "open" in out
+        assert "thread" in out
         assert "dispatch" in out
         assert "compact" in out
 

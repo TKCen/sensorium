@@ -40,6 +40,8 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_dispatch_once",
         "sensorium_candidate_update",
         "sensorium_attention_pointer",
+        "sensorium_thread_open",
+        "sensorium_thread_update",
         "sensorium_compact",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"agent-sensorium"}

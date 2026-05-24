@@ -54,6 +54,8 @@ def register(ctx) -> None:
         handle_sensorium_dispatch_once,
         handle_sensorium_ingest_signal,
         handle_sensorium_status,
+        handle_sensorium_thread_open,
+        handle_sensorium_thread_update,
     )
 
     common = {
@@ -187,6 +189,64 @@ def register(ctx) -> None:
         description="Preview a small Sensorium active-session pointer.",
     )
     ctx.register_tool(
+        name="sensorium_thread_open",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_thread_open",
+            "Open a compact conscious-thread capsule when the requested surface is allowed.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Thread ID to open, or 'latest'. Defaults to latest visible thread.",
+                },
+                "surface": {
+                    "type": "string",
+                    "description": "Surface requesting the capsule, e.g. local, dashboard, discord, telegram.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_thread_open(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            thread_id=args.get("thread_id") or "latest",
+            surface=args.get("surface") or "local",
+        ),
+        description="Open a compact conscious-thread capsule.",
+    )
+    ctx.register_tool(
+        name="sensorium_thread_update",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_thread_update",
+            "Update a conscious thread status or pin state with a decision receipt.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Thread ID to update, or 'latest'.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["close", "hold", "resume", "archive", "pin", "unpin", "mark_reviewed"],
+                    "description": "Thread lifecycle action.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Short human-readable reason for the decision receipt.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_thread_update(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            thread_id=args.get("thread_id") or "latest",
+            action=args.get("action") or "",
+            reason=args.get("reason") or "",
+        ),
+        description="Update a conscious thread with a decision receipt.",
+    )
+    ctx.register_tool(
         name="sensorium_compact",
         toolset=_TOOLSET,
         schema=_schema(
@@ -205,7 +265,7 @@ def register(ctx) -> None:
         "sensorium",
         lambda raw_args: handle_sensorium_command(raw_args, instance=_default_instance()),
         description="Pull-based sensorium status and review.",
-        args_hint="status|threads|pointer|dispatch|compact|help",
+        args_hint="status|threads|pointer|open|thread|dispatch|compact|help",
     )
 
     ctx.register_hook(

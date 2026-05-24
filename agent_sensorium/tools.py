@@ -16,6 +16,7 @@ from .store import SensoriumStore
 ARCHIVED_STATUSES = {"archived", "closed"}
 
 VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "cancel", "mark_reviewed"}
+VALID_THREAD_ACTIONS = {"close", "hold", "resume", "archive", "pin", "unpin", "mark_reviewed"}
 
 
 def _ok(instance: str, data: dict) -> str:
@@ -188,6 +189,120 @@ def handle_sensorium_candidate_update(
         "new_status": new_status,
         "receipt": receipt,
     })
+
+
+def _find_thread(threads: list[dict], thread_id: str | None = None) -> dict | None:
+    visible = [t for t in threads if t.get("status") in ("dormant", "held")]
+    visible.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    if not thread_id or thread_id == "latest":
+        return visible[0] if visible else None
+    for t in threads:
+        if t.get("id") == thread_id:
+            return t
+    return None
+
+
+def _thread_allowed_on_surface(thread: dict, surface: str) -> bool:
+    allowed = set(thread.get("allowed_surfaces") or [])
+    return bool(surface and surface in allowed)
+
+
+def _compact_thread_capsule(thread: dict) -> dict:
+    task = thread.get("conscious_task", {})
+    return {
+        "thread_id": thread.get("id"),
+        "status": thread.get("status"),
+        "title": task.get("title", ""),
+        "conscious_task": {
+            "id": task.get("id"),
+            "request_type": task.get("request_type"),
+            "why": task.get("why"),
+            "expected_decision": task.get("expected_decision"),
+        },
+        "origin_candidate_id": thread.get("origin_candidate_id"),
+        "continuity_summary": thread.get("continuity_summary", []),
+        "open_questions": thread.get("open_questions", []),
+        "next_prompt_to_operator": thread.get("next_prompt_to_operator", ""),
+        "summary_dirty": bool(thread.get("summary_dirty")),
+        "sensitivity": thread.get("sensitivity", "private"),
+        "allowed_surfaces": thread.get("allowed_surfaces", []),
+        "created_at": thread.get("created_at"),
+        "updated_at": thread.get("updated_at"),
+        "expires_at": thread.get("expires_at"),
+    }
+
+
+def handle_sensorium_thread_open(
+    *,
+    thread_id: str = "latest",
+    surface: str = "local",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    threads = store.read_jsonl("threads")
+    target = _find_thread(threads, thread_id)
+    if target is None:
+        return _err(instance, f"Thread '{thread_id or 'latest'}' not found.")
+    if not _thread_allowed_on_surface(target, surface):
+        return _err(instance, f"Thread '{target.get('id')}' is not allowed on surface '{surface}'.")
+    return _ok(instance, _compact_thread_capsule(target))
+
+
+def handle_sensorium_thread_update(
+    *,
+    thread_id: str,
+    action: str,
+    reason: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    if action not in VALID_THREAD_ACTIONS:
+        return _err(instance, f"Invalid action '{action}'. Must be one of: {sorted(VALID_THREAD_ACTIONS)}")
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    threads = store.read_jsonl("threads")
+    target = _find_thread(threads, thread_id)
+    if target is None:
+        return _err(instance, f"Thread '{thread_id}' not found.")
+
+    old_status = target.get("status", "dormant")
+    old_pinned = bool(target.get("pinned"))
+    now = utc_now_iso()
+
+    if action == "close":
+        target["status"] = "closed"
+    elif action == "hold":
+        target["status"] = "held"
+    elif action == "resume":
+        target["status"] = "dormant"
+    elif action == "archive":
+        target["status"] = "archived"
+    elif action == "mark_reviewed":
+        target["status"] = "closed"
+    elif action == "pin":
+        target["pinned"] = True
+    elif action == "unpin":
+        target["pinned"] = False
+
+    target["updated_at"] = now
+    receipt = {
+        "ts": now,
+        "type": "thread.updated",
+        "thread_id": target.get("id"),
+        "action": action,
+        "old_status": old_status,
+        "new_status": target.get("status", old_status),
+        "old_pinned": old_pinned,
+        "new_pinned": bool(target.get("pinned")),
+        "reason": reason,
+    }
+    target.setdefault("decision_log", []).append(receipt)
+    store.append_jsonl("decisions", receipt)
+    _rewrite_jsonl(store, "threads", threads)
+    return _ok(instance, receipt)
 
 
 def handle_sensorium_attention_pointer(
