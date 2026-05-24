@@ -1,0 +1,14 @@
+[project]
+name = "agent-sensorium"
+version = "0.1.0"
+description = "Bounded autonomous inner lifecycle plugin for Hermes agents."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
