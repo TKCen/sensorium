@@ -8,6 +8,29 @@ from typing import Any
 _TOOLSET = "agent-sensorium"
 
 
+def _default_instance() -> str:
+    """Return configured default instance for commands/tools without explicit instance."""
+    try:
+        from importlib import import_module
+
+        config_mod = import_module("hermes_cli.config")
+        value = config_mod.cfg_get(
+            config_mod.load_config(), "agent_sensorium", "default_instance", default="default"
+        )
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+    return "default"
+
+
+def _arg_instance(args: dict[str, Any]) -> str:
+    value = args.get("instance")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return _default_instance()
+
+
 def _schema(name: str, description: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "name": name,
@@ -34,7 +57,7 @@ def register(ctx) -> None:
     common = {
         "instance": {
             "type": "string",
-            "description": "Sensorium instance name. Defaults to 'default'.",
+            "description": "Sensorium instance name. Defaults to agent_sensorium.default_instance or 'default'.",
         },
         "state_dir": {
             "type": "string",
@@ -51,7 +74,7 @@ def register(ctx) -> None:
             common,
         ),
         handler=lambda args, **kw: handle_sensorium_status(
-            instance=args.get("instance", "default"),
+            instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
         ),
         description="Read-only snapshot of Agent Sensorium state.",
@@ -72,7 +95,7 @@ def register(ctx) -> None:
         ),
         handler=lambda args, **kw: handle_sensorium_ingest_signal(
             signal=args.get("signal") or {},
-            instance=args.get("instance", "default"),
+            instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
         ),
         description="Ingest a low-level signal and promote if threshold is met.",
@@ -96,7 +119,7 @@ def register(ctx) -> None:
             },
         ),
         handler=lambda args, **kw: handle_sensorium_dispatch_once(
-            instance=args.get("instance", "default"),
+            instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
             dry_run=bool(args.get("dry_run", False)),
             config=args.get("config"),
@@ -130,7 +153,7 @@ def register(ctx) -> None:
             candidate_id=args.get("candidate_id", ""),
             action=args.get("action", ""),
             reason=args.get("reason", ""),
-            instance=args.get("instance", "default"),
+            instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
         ),
         description="Update candidate status with a decision receipt.",
@@ -144,7 +167,7 @@ def register(ctx) -> None:
             common,
         ),
         handler=lambda args, **kw: handle_sensorium_compact(
-            instance=args.get("instance", "default"),
+            instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
         ),
         description="Archive expired candidates and threads with decision receipts.",
@@ -152,7 +175,7 @@ def register(ctx) -> None:
 
     ctx.register_command(
         "sensorium",
-        handle_sensorium_command,
+        lambda raw_args: handle_sensorium_command(raw_args, instance=_default_instance()),
         description="Pull-based sensorium status and review.",
         args_hint="status|threads|dispatch|compact|help",
     )
