@@ -28,7 +28,8 @@ Explicitly out of scope for MVP:
 ## Docs
 
 - `docs/agent-sensorium-plugin-mvp.md` — architecture/spec working doc.
-- `docs/agent-sensorium-mvp-implementation-plan.md` — build plan and acceptance gates.
+- `docs/agent-sensorium-mvp-implementation-plan.md` — original MVP build plan and acceptance gates.
+- `docs/agent-sensorium-buildout-plan-2026-05-25.md` — post-MVP full build-out backlog and phase gates.
 
 ## Development shape
 

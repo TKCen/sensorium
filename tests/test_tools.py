@@ -7,6 +7,7 @@ import pytest
 from agent_sensorium.tools import (
     handle_sensorium_candidate_update,
     handle_sensorium_dispatch_once,
+    handle_sensorium_ingest_event,
     handle_sensorium_ingest_signal,
     handle_sensorium_status,
     handle_sensorium_thread_update,
@@ -103,6 +104,57 @@ class TestSensoriumIngestSignal:
         assert result["data"]["counts"]["signals"] == 3
         assert result["data"]["counts"]["events"] == 3
         assert result["data"]["counts"]["candidates"] == 3
+
+
+class TestSensoriumIngestEvent:
+    def test_valid_event_ingested_and_candidate_created(self, state_dir):
+        event = {
+            "id": "evt_trusted",
+            "ts": "2026-05-25T00:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "task_result",
+            "summary": "Trusted sensor already promoted this event",
+            "source_signal_ids": ["sig_external"],
+            "signal_count": 2,
+            "strength": 0.88,
+            "correlation_keys": ["trusted-import"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local", "discord"],
+        }
+
+        raw = handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["data"]["event_id"] == "evt_trusted"
+        assert result["data"]["candidate_id"].startswith("cand_")
+
+        status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
+        assert status["counts"]["signals"] == 0
+        assert status["counts"]["events"] == 1
+        assert status["counts"]["candidates"] == 1
+        assert status["top_candidates"][0]["kind"] == "task_result"
+
+    def test_invalid_event_returns_error(self, state_dir):
+        raw = handle_sensorium_ingest_event(
+            event={"kind": "task_result"}, instance="test", state_dir=state_dir
+        )
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Event missing required fields" in result["error"]
+
+    def test_invalid_event_sensitivity_returns_error(self, state_dir):
+        event = {
+            "id": "evt_bad_scope",
+            "ts": "2026-05-25T00:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "task_result",
+            "summary": "Bad sensitivity should fail",
+            "sensitivity": "world-readable",
+        }
+        raw = handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Invalid sensitivity" in result["error"]
 
 
 class TestSensoriumDispatchOnce:

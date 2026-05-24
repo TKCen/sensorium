@@ -37,6 +37,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert set(ctx.tools) == {
         "sensorium_status",
         "sensorium_ingest_signal",
+        "sensorium_ingest_event",
         "sensorium_dispatch_once",
         "sensorium_candidate_update",
         "sensorium_attention_pointer",

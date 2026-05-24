@@ -64,6 +64,10 @@ def validate_event(event: dict) -> None:
     missing = required - event.keys()
     if missing:
         raise ValueError(f"Event missing required fields: {missing}")
+    if event.get("sensitivity") and event["sensitivity"] not in VALID_SENSITIVITIES:
+        raise ValueError(
+            f"Invalid sensitivity: {event['sensitivity']}. Must be one of {VALID_SENSITIVITIES}"
+        )
 
 
 def merge_sensitivity(values: list[str]) -> str:

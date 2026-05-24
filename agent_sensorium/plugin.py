@@ -52,6 +52,7 @@ def register(ctx) -> None:
         handle_sensorium_candidate_update,
         handle_sensorium_compact,
         handle_sensorium_dispatch_once,
+        handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
         handle_sensorium_status,
         handle_sensorium_thread_open,
@@ -103,6 +104,32 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="Ingest a low-level signal and promote if threshold is met.",
+    )
+    ctx.register_tool(
+        name="sensorium_ingest_event",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_ingest_event",
+            "Ingest an already-promoted trusted event and create a candidate.",
+            {
+                **common,
+                "event": {
+                    "type": "object",
+                    "description": "Trusted Event object with id, ts, type, kind, summary, strength, sensitivity, and allowed_surfaces.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional candidate scoring config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_ingest_event(
+            event=args.get("event") or {},
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            config=args.get("config"),
+        ),
+        description="Ingest a trusted event and create a candidate.",
     )
     ctx.register_tool(
         name="sensorium_dispatch_once",

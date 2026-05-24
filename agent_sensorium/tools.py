@@ -10,7 +10,7 @@ from .gate import (
     should_promote_signal,
 )
 from .pointers import select_attention_pointer
-from .schemas import normalize_signal, truncate_text, utc_now_iso, validate_signal
+from .schemas import normalize_signal, truncate_text, utc_now_iso, validate_event, validate_signal
 from .store import SensoriumStore
 
 ARCHIVED_STATUSES = {"archived", "closed"}
@@ -136,6 +136,46 @@ def handle_sensorium_ingest_signal(
         result["candidate_id"] = candidate["id"]
 
     return _ok(instance, result)
+
+
+def handle_sensorium_ingest_event(
+    *,
+    event: dict,
+    instance: str = "default",
+    state_dir: str | None = None,
+    config: dict | None = None,
+) -> str:
+    """Ingest an already-promoted trusted event and create a candidate."""
+    try:
+        validate_event(event)
+    except ValueError as e:
+        return _err(instance, str(e))
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+
+    incoming = dict(event)
+    incoming.setdefault("source_signal_ids", [])
+    incoming.setdefault("signal_count", len(incoming.get("source_signal_ids") or []))
+    incoming.setdefault("strength", 0.5)
+    incoming.setdefault("correlation_keys", [])
+    incoming.setdefault("sensitivity", "private")
+    incoming.setdefault("allowed_surfaces", ["local"])
+    incoming.setdefault("expires_at", "")
+
+    try:
+        validate_event(incoming)
+    except ValueError as e:
+        return _err(instance, str(e))
+
+    store.append_jsonl("events", incoming)
+    candidate = event_to_candidate(incoming, config)
+    store.append_jsonl("candidates", candidate)
+
+    return _ok(instance, {
+        "event_id": incoming["id"],
+        "candidate_id": candidate["id"],
+    })
 
 
 def handle_sensorium_dispatch_once(

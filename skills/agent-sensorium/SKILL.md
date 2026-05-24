@@ -23,12 +23,17 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 - **No external task creation** — no Kanban/research/media tasks.
 - **No scheduled automation** — tick runs manually or via explicit invocation.
 
+## Trusted event imports
+
+Use `sensorium_ingest_signal` for low-level observations that still need deterministic thresholding. Use `sensorium_ingest_event` only when an upstream sensor/importer has already done the first filtering step and produced a compact promoted event. Trusted event imports still validate required event fields and sensitivity, then create one candidate for dispatcher review. They do not create raw signal records.
+
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `sensorium_status` | Read-only state snapshot: counts, top candidates, visible threads |
+| `sensorium_status` | Read-only state snapshot: counts, top candidates, and visible threads |
 | `sensorium_ingest_signal` | Ingest a signal and promote if threshold met |
+| `sensorium_ingest_event` | Ingest an already-promoted trusted event and create a candidate |
 | `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
 | `sensorium_candidate_update` | Suppress / hold / cancel / mark_reviewed a candidate |
 | `sensorium_attention_pointer` | Preview the small active-session pointer for a surface; read-only and non-mutating |
