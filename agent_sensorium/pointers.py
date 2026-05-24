@@ -75,11 +75,20 @@ def select_attention_pointer(
     ]
     threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
+    cooldown_blocked: dict | None = None
     for thread in threads:
         if not _surface_allowed(thread, surface):
             continue
         open_, reason = _cooldown_open(store, thread.get("id", ""), int(cfg.get("cooldown_minutes", 120)))
         if not open_:
+            cooldown_blocked = {
+                "action": "no_pointer",
+                "reason": reason,
+                "thread_id": thread.get("id"),
+                "task_id": thread.get("conscious_task", {}).get("id"),
+                "origin_candidate_id": thread.get("origin_candidate_id"),
+                "surface": surface or "local",
+            }
             continue
         title = thread.get("conscious_task", {}).get("title") or thread.get("next_prompt_to_operator") or "Sensorium thread"
         title = truncate_text(title, int(cfg.get("max_title_chars", 96)))
@@ -97,6 +106,8 @@ def select_attention_pointer(
             "invitation": f"Sensorium has a pending thread: {title}. Say ‘take it up’ if you want me to open it.",
         }
 
+    if cooldown_blocked:
+        return cooldown_blocked
     return {"action": "no_pointer", "reason": "no_visible_thread_for_surface", "surface": surface or "local"}
 
 
@@ -123,12 +134,18 @@ def record_pointer_presented(
 
 def pointer_context_for_llm(pointer: dict) -> str:
     """Render the minimal injected context for the active turn."""
+    thread_id = pointer.get("thread_id")
+    surface = pointer.get("surface") or "local"
+    title = pointer.get("title") or "Sensorium thread"
     return (
-        "Sensorium active-session pointer:\n"
-        f"- Thread: {pointer.get('thread_id')} — {pointer.get('title')}\n"
-        "- Do not dump the full thread capsule into this chat.\n"
-        "- If relevant, mention only this doorway: "
-        f"{pointer.get('invitation')}"
+        "[Sensorium Pointer]\n"
+        f"Pending thread: {thread_id} — {title}\n"
+        f"Human-facing doorway: {pointer.get('invitation')}\n"
+        "Internal instruction: If the user says “open it”, “take it up”, "
+        "“what’s pending”, or similar, call "
+        f"sensorium_thread_open(surface=\"{surface}\", thread_id=\"{thread_id}\").\n"
+        "Do not reveal capsule content unless opened. Do not include private capsule fields "
+        "in the pointer itself."
     )
 
 

@@ -31,10 +31,27 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 | `sensorium_ingest_signal` | Ingest a signal and promote if threshold met |
 | `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
 | `sensorium_candidate_update` | Suppress / hold / cancel / mark_reviewed a candidate |
-| `sensorium_attention_pointer` | Preview the small active-session pointer for a surface |
+| `sensorium_attention_pointer` | Preview the small active-session pointer for a surface; read-only and non-mutating |
 | `sensorium_thread_open` | Open a compact conscious-thread capsule when the requested surface is allowed |
 | `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
+
+## Pointer vs capsule boundary
+
+The active-session pointer is a doorway, not awareness itself. It may reveal only:
+
+- that one eligible dormant/held Sensorium thread exists;
+- the thread id and short title;
+- the operator phrase for opening it, such as “take it up”.
+
+The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium_thread_open` after the requested surface passes the thread’s `allowed_surfaces` gate.
+
+There are two pointer paths:
+
+- `sensorium_attention_pointer` is a **preview tool**. It does not mutate state or write cooldown receipts.
+- The `pre_llm_call` hook is the **presentation path**. When it injects a pointer into the active turn, it writes a `pointer.presented` receipt so cooldown can suppress repeats.
+
+The injected pointer context is model-facing validation scaffolding. It can include explicit instructions such as “if the user says take it up, call `sensorium_thread_open`.” Final user-facing UX should stay smaller and more natural.
 
 ## Command
 

@@ -64,8 +64,13 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
         state_dir=str(tmp_path),
     )
     assert first is not None
-    assert "Sensorium active-session pointer" in first["context"]
-    assert "Do not dump the full thread capsule" in first["context"]
+    assert "[Sensorium Pointer]" in first["context"]
+    assert "Pending thread: sth_testpointer" in first["context"]
+    assert "If the user says" in first["context"]
+    assert "sensorium_thread_open" in first["context"]
+    assert "surface=\"discord\"" in first["context"]
+    assert "thread_id=\"sth_testpointer\"" in first["context"]
+    assert "Do not reveal capsule content unless opened" in first["context"]
 
     receipts = store.read_jsonl("decisions")
     assert len(receipts) == 1
@@ -91,6 +96,27 @@ def test_pointer_context_is_door_handle_not_capsule():
     assert "continuity_summary" not in context
     assert "decision_log" not in context
     assert "take it up" in context
+    assert "sensorium_thread_open" in context
+    assert "sth_x" in context
+
+
+def test_pointer_preview_reports_cooldown_reason(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+
+    first = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-1",
+        state_dir=str(tmp_path),
+    )
+    assert first is not None
+
+    preview = select_attention_pointer(store, surface="discord")
+    assert preview["action"] == "no_pointer"
+    assert preview["thread_id"] == "sth_testpointer"
+    assert preview["reason"].startswith("cooldown_until:")
 
 
 def test_truncate_text_avoids_mid_word_guillotine():
