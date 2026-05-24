@@ -17,6 +17,11 @@ ARCHIVED_STATUSES = {"archived", "closed"}
 
 VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "cancel", "mark_reviewed"}
 VALID_THREAD_ACTIONS = {"close", "hold", "resume", "archive", "pin", "unpin", "mark_reviewed"}
+_VISIBLE_STATUSES = {"dormant", "held"}
+_ALLOWED_THREAD_TRANSITIONS: dict[str, set[str]] = {
+    "dormant": {"close", "hold", "archive", "mark_reviewed", "pin", "unpin"},
+    "held": {"close", "resume", "archive", "mark_reviewed", "pin", "unpin"},
+}
 
 
 def _ok(instance: str, data: dict) -> str:
@@ -261,6 +266,8 @@ def handle_sensorium_thread_open(
     target = _find_thread(threads, thread_id)
     if target is None:
         return _err(instance, f"Thread '{thread_id or 'latest'}' not found.")
+    if target.get("status") not in _VISIBLE_STATUSES:
+        return _err(instance, f"Thread '{target.get('id')}' is {target.get('status')} and cannot be opened.")
     if not _thread_allowed_on_surface(target, surface):
         return _err(instance, f"Thread '{target.get('id')}' is not allowed on surface '{surface}'.")
     return _ok(instance, _compact_thread_capsule(target))
@@ -286,6 +293,17 @@ def handle_sensorium_thread_update(
 
     old_status = target.get("status", "dormant")
     old_pinned = bool(target.get("pinned"))
+
+    allowed = _ALLOWED_THREAD_TRANSITIONS.get(old_status)
+    if allowed is None:
+        return _err(instance, f"Thread '{target.get('id')}' is {old_status} and cannot be updated.")
+    if action not in allowed:
+        return _err(instance, f"Action '{action}' is not allowed on a {old_status} thread.")
+    if action == "pin" and old_pinned:
+        return _err(instance, f"Thread '{target.get('id')}' is already pinned.")
+    if action == "unpin" and not old_pinned:
+        return _err(instance, f"Thread '{target.get('id')}' is not pinned.")
+
     now = utc_now_iso()
 
     if action == "close":

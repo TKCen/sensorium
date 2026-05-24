@@ -126,3 +126,131 @@ def test_thread_update_supports_hold_resume_and_pin(tmp_path):
     thread = store.read_jsonl("threads")[0]
     assert thread["status"] == "dormant"
     assert thread["pinned"] is False
+
+
+def test_open_closed_thread_by_explicit_id_refused(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(status="closed"))
+
+    result = json.loads(
+        handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", surface="local"
+        )
+    )
+    assert result["success"] is False
+    assert "closed" in result["error"]
+    assert "cannot be opened" in result["error"]
+
+
+def test_open_archived_thread_by_explicit_id_refused(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(status="archived"))
+
+    result = json.loads(
+        handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", surface="local"
+        )
+    )
+    assert result["success"] is False
+    assert "archived" in result["error"]
+
+
+def test_resume_closed_thread_refused_no_receipt(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(status="closed"))
+
+    result = json.loads(
+        handle_sensorium_thread_update(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="resume"
+        )
+    )
+    assert result["success"] is False
+    assert "closed" in result["error"]
+    assert store.read_jsonl("decisions") == []
+
+
+def test_resume_archived_thread_refused_no_receipt(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(status="archived"))
+
+    result = json.loads(
+        handle_sensorium_thread_update(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="resume"
+        )
+    )
+    assert result["success"] is False
+    assert "archived" in result["error"]
+    assert store.read_jsonl("decisions") == []
+
+
+def test_repeated_close_refused_no_receipt(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread())
+
+    handle_sensorium_thread_update(
+        instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="close"
+    )
+    receipts_after_close = len(store.read_jsonl("decisions"))
+
+    result = json.loads(
+        handle_sensorium_thread_update(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="close"
+        )
+    )
+    assert result["success"] is False
+    assert "cannot be updated" in result["error"]
+    assert len(store.read_jsonl("decisions")) == receipts_after_close
+
+
+def test_hold_from_held_refused_no_receipt(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread())
+
+    handle_sensorium_thread_update(
+        instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="hold"
+    )
+    receipts_after_hold = len(store.read_jsonl("decisions"))
+
+    result = json.loads(
+        handle_sensorium_thread_update(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="hold"
+        )
+    )
+    assert result["success"] is False
+    assert "not allowed" in result["error"]
+    assert len(store.read_jsonl("decisions")) == receipts_after_hold
+
+
+def test_allowed_transitions_still_work(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread())
+
+    for action, expected_status in [("hold", "held"), ("resume", "dormant"), ("close", "closed")]:
+        result = json.loads(
+            handle_sensorium_thread_update(
+                instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action=action
+            )
+        )
+        assert result["success"] is True, f"{action} should succeed"
+        assert result["data"]["new_status"] == expected_status
+
+
+def test_pin_already_pinned_refused(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", _thread(pinned=True))
+
+    result = json.loads(
+        handle_sensorium_thread_update(
+            instance="test", state_dir=str(tmp_path), thread_id="sth_lifecycle", action="pin"
+        )
+    )
+    assert result["success"] is False
+    assert "already pinned" in result["error"]

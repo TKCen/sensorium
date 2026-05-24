@@ -58,6 +58,43 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert status["data"]["counts"]["signals"] == 0
 
 
+def test_pre_llm_hook_forwards_state_dir(tmp_path):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    store = SensoriumStore(instance="default", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", {
+        "id": "sth_hooktest",
+        "status": "dormant",
+        "origin": "candidate",
+        "conscious_task": {"id": "ct_1", "request_type": "THINK", "title": "Hook test"},
+        "origin_candidate_id": "cand_1",
+        "continuity_summary": [],
+        "decision_log": [],
+        "interaction_refs": [],
+        "summary_dirty": False,
+        "open_questions": [],
+        "next_prompt_to_operator": "test",
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+        "created_at": "2026-05-24T10:00:00Z",
+        "updated_at": "2026-05-24T10:00:00Z",
+        "expires_at": "2026-05-31T10:00:00Z",
+    })
+
+    ctx = FakePluginContext()
+    register(ctx)
+    hook = ctx.hooks["pre_llm_call"]["handler"]
+
+    result = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
+    assert result is not None
+    assert "Sensorium active-session pointer" in result["context"]
+
+    result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
+    assert result2 is None
+
+
 def test_root_plugin_entrypoint_reexports_register():
     root_init = Path(__file__).resolve().parents[1] / "__init__.py"
     spec = importlib.util.spec_from_file_location(

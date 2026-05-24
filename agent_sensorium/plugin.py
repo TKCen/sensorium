@@ -274,6 +274,7 @@ def register(ctx) -> None:
             instance=_default_instance(),
             platform=kw.get("platform") or "local",
             session_id=kw.get("session_id") or "",
+            state_dir=kw.get("state_dir"),
         ),
     )
 
