@@ -2,6 +2,7 @@
 
 import json
 
+from .dispatcher import dispatch_once as _dispatch_once
 from .gate import (
     DEFAULT_CONFIG,
     event_to_candidate,
@@ -10,6 +11,8 @@ from .gate import (
 )
 from .schemas import normalize_signal, utc_now_iso, validate_signal
 from .store import SensoriumStore
+
+VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "cancel", "mark_reviewed"}
 
 
 def _ok(instance: str, data: dict) -> str:
@@ -34,6 +37,9 @@ def handle_sensorium_status(
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
     active_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
 
+    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
+    visible_threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+
     data = {
         "instance": instance,
         "state_dir": str(store.root),
@@ -43,6 +49,8 @@ def handle_sensorium_status(
             "candidates": len(candidates),
             "active_candidates": len(active_candidates),
             "threads": len(threads),
+            "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
+            "held_threads": len([t for t in threads if t.get("status") == "held"]),
         },
         "top_candidates": [
             {
@@ -52,6 +60,16 @@ def handle_sensorium_status(
                 "summary": c.get("summary", "")[:120],
             }
             for c in active_candidates[:5]
+        ],
+        "top_threads": [
+            {
+                "id": t["id"],
+                "status": t.get("status"),
+                "title": t.get("conscious_task", {}).get("title", "")[:120],
+                "origin_candidate_id": t.get("origin_candidate_id"),
+                "created_at": t.get("created_at"),
+            }
+            for t in visible_threads[:5]
         ],
         "ts": utc_now_iso(),
     }
@@ -93,3 +111,85 @@ def handle_sensorium_ingest_signal(
         result["candidate_id"] = candidate["id"]
 
     return _ok(instance, result)
+
+
+def handle_sensorium_dispatch_once(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    dry_run: bool = True,
+    config: dict | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    result = _dispatch_once(store, dry_run=dry_run, config=config)
+    return _ok(instance, result)
+
+
+def handle_sensorium_candidate_update(
+    *,
+    candidate_id: str,
+    action: str,
+    reason: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    if action not in VALID_CANDIDATE_ACTIONS:
+        return _err(instance, f"Invalid action '{action}'. Must be one of: {sorted(VALID_CANDIDATE_ACTIONS)}")
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+
+    candidates = store.read_jsonl("candidates")
+    target = None
+    for c in candidates:
+        if c.get("id") == candidate_id:
+            target = c
+            break
+
+    if target is None:
+        return _err(instance, f"Candidate '{candidate_id}' not found.")
+
+    old_status = target.get("status", "candidate")
+    if action == "suppress":
+        new_status = "suppressed"
+    elif action == "hold":
+        new_status = "held"
+    elif action == "cancel":
+        new_status = "cancelled"
+    elif action == "mark_reviewed":
+        new_status = "reviewed"
+    else:
+        new_status = old_status
+
+    target["status"] = new_status
+    target["updated_at"] = utc_now_iso()
+
+    receipt = {
+        "ts": utc_now_iso(),
+        "type": "candidate.updated",
+        "candidate_id": candidate_id,
+        "action": action,
+        "old_status": old_status,
+        "new_status": new_status,
+        "reason": reason,
+    }
+    store.append_jsonl("decisions", receipt)
+
+    _rewrite_jsonl(store, "candidates", candidates)
+
+    return _ok(instance, {
+        "candidate_id": candidate_id,
+        "action": action,
+        "old_status": old_status,
+        "new_status": new_status,
+        "receipt": receipt,
+    })
+
+
+def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
+    path = store._resolve(name)
+    import json as _json
+    with open(path, "w") as f:
+        for item in items:
+            f.write(_json.dumps(item, separators=(",", ":")) + "\n")
