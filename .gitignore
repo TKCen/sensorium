@@ -10,6 +10,7 @@ venv/
 # Local runtime state
 .agent-sensorium-state/
 *.local.json
+.omc/
 
 # Editor/OS
 .DS_Store
