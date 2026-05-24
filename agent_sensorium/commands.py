@@ -51,7 +51,9 @@ def _fmt_status(*, instance: str, state_dir: str | None) -> str:
         f"Sensorium [{instance}]",
         f"  signals: {counts['signals']}  events: {counts['events']}",
         f"  candidates: {counts['active_candidates']}/{counts['candidates']}"
-        f"  threads: {counts['dormant_threads']}d {counts['held_threads']}h",
+        f" ({counts.get('archived_candidates', 0)} archived)"
+        f"  threads: {counts['dormant_threads']}d {counts['held_threads']}h"
+        f" {counts.get('closed_threads', 0)}c {counts.get('archived_threads', 0)}a",
     ]
     if data["top_candidates"]:
         lines.append("  Top candidates:")
@@ -61,6 +63,11 @@ def _fmt_status(*, instance: str, state_dir: str | None) -> str:
         lines.append("  Visible threads:")
         for t in data["top_threads"]:
             lines.append(f"    [{t['status']}] {t['id']}: {t['title']}")
+    if data.get("latest_decision"):
+        d = data["latest_decision"]
+        ref = d.get("thread_id") or d.get("candidate_id") or ""
+        reason = f" — {d['reason']}" if d.get("reason") else ""
+        lines.append(f"  Latest decision: {d['type']} {ref} [{d.get('action', '')}]{reason}")
     return "\n".join(lines)
 
 

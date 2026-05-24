@@ -8,6 +8,7 @@ from agent_sensorium.commands import handle_sensorium_command
 from agent_sensorium.tools import (
     handle_sensorium_dispatch_once,
     handle_sensorium_ingest_signal,
+    handle_sensorium_thread_update,
 )
 
 
@@ -94,3 +95,26 @@ class TestHelpCommand:
         out = handle_sensorium_command("foobar", instance="test", state_dir=state_dir)
         assert "Unknown subcommand: foobar" in out
         assert "Usage:" in out
+
+
+class TestStatusTerminalDisplay:
+    def test_status_shows_terminal_counts(self, state_dir):
+        _ingest_strong(state_dir)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        thread_id = json.loads(raw)["data"]["thread_id"]
+        handle_sensorium_thread_update(
+            thread_id=thread_id, action="close", reason="resolved",
+            instance="test", state_dir=state_dir,
+        )
+        out = handle_sensorium_command("status", instance="test", state_dir=state_dir)
+        assert "1c" in out
+        assert "0a" in out
+        assert "Latest decision:" in out
+        assert "thread.updated" in out
+        assert "close" in out
+
+    def test_empty_status_shows_zero_terminal_counts(self, state_dir):
+        out = handle_sensorium_command("status", instance="test", state_dir=state_dir)
+        assert "0c" in out
+        assert "0a" in out
+        assert "Latest decision:" not in out

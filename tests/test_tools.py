@@ -9,6 +9,7 @@ from agent_sensorium.tools import (
     handle_sensorium_dispatch_once,
     handle_sensorium_ingest_signal,
     handle_sensorium_status,
+    handle_sensorium_thread_update,
 )
 
 
@@ -228,3 +229,63 @@ class TestSensoriumCandidateUpdate:
         raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
         result = json.loads(raw)
         assert result["data"]["action"] == "no_candidate"
+
+
+class TestStatusTerminalCounts:
+    def test_empty_status_has_zero_terminal_counts(self, state_dir):
+        raw = handle_sensorium_status(instance="test", state_dir=state_dir)
+        counts = json.loads(raw)["data"]["counts"]
+        assert counts["closed_threads"] == 0
+        assert counts["archived_threads"] == 0
+        assert counts["archived_candidates"] == 0
+
+    def test_closed_thread_counted(self, state_dir):
+        signal = {
+            "sensor": "test",
+            "source": "manual",
+            "kind": "design_decision",
+            "summary": "Thread for close counting",
+            "strength_hint": 0.9,
+        }
+        handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        thread_id = json.loads(raw)["data"]["thread_id"]
+
+        handle_sensorium_thread_update(
+            thread_id=thread_id, action="close", reason="done",
+            instance="test", state_dir=state_dir,
+        )
+
+        raw = handle_sensorium_status(instance="test", state_dir=state_dir)
+        data = json.loads(raw)["data"]
+        assert data["counts"]["closed_threads"] == 1
+        assert data["counts"]["dormant_threads"] == 0
+
+    def test_latest_decision_in_status(self, state_dir):
+        signal = {
+            "sensor": "test",
+            "source": "manual",
+            "kind": "design_decision",
+            "summary": "Thread for decision receipt",
+            "strength_hint": 0.9,
+        }
+        handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        thread_id = json.loads(raw)["data"]["thread_id"]
+
+        handle_sensorium_thread_update(
+            thread_id=thread_id, action="close", reason="guardrail installed",
+            instance="test", state_dir=state_dir,
+        )
+
+        raw = handle_sensorium_status(instance="test", state_dir=state_dir)
+        data = json.loads(raw)["data"]
+        assert "latest_decision" in data
+        assert data["latest_decision"]["type"] == "thread.updated"
+        assert data["latest_decision"]["action"] == "close"
+        assert data["latest_decision"]["reason"] == "guardrail installed"
+
+    def test_no_latest_decision_when_empty(self, state_dir):
+        raw = handle_sensorium_status(instance="test", state_dir=state_dir)
+        data = json.loads(raw)["data"]
+        assert "latest_decision" not in data

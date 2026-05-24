@@ -55,6 +55,9 @@ def handle_sensorium_status(
             "threads": len(threads),
             "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
             "held_threads": len([t for t in threads if t.get("status") == "held"]),
+            "closed_threads": len([t for t in threads if t.get("status") == "closed"]),
+            "archived_threads": len([t for t in threads if t.get("status") == "archived"]),
+            "archived_candidates": len([c for c in candidates if c.get("status") == "archived"]),
         },
         "top_candidates": [
             {
@@ -77,6 +80,19 @@ def handle_sensorium_status(
         ],
         "ts": utc_now_iso(),
     }
+
+    decisions = store.read_jsonl("decisions")
+    if decisions:
+        latest = decisions[-1]
+        data["latest_decision"] = {
+            "ts": latest.get("ts"),
+            "type": latest.get("type"),
+            "thread_id": latest.get("thread_id"),
+            "candidate_id": latest.get("candidate_id"),
+            "action": latest.get("action"),
+            "reason": truncate_text(latest.get("reason", ""), 80),
+        }
+
     return _ok(instance, data)
 
 
