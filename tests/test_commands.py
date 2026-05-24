@@ -84,6 +84,7 @@ class TestHelpCommand:
         assert "Usage:" in out
         assert "status" in out
         assert "threads" in out
+        assert "pointer" in out
         assert "dispatch" in out
         assert "compact" in out
 

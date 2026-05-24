@@ -9,7 +9,8 @@ from .gate import (
     promote_signal_to_event,
     should_promote_signal,
 )
-from .schemas import normalize_signal, utc_now_iso, validate_signal
+from .pointers import select_attention_pointer
+from .schemas import normalize_signal, truncate_text, utc_now_iso, validate_signal
 from .store import SensoriumStore
 
 ARCHIVED_STATUSES = {"archived", "closed"}
@@ -59,7 +60,7 @@ def handle_sensorium_status(
                 "id": c["id"],
                 "kind": c.get("kind"),
                 "pressure": c.get("pressure"),
-                "summary": c.get("summary", "")[:120],
+                "summary": truncate_text(c.get("summary", ""), 120),
             }
             for c in active_candidates[:5]
         ],
@@ -67,7 +68,7 @@ def handle_sensorium_status(
             {
                 "id": t["id"],
                 "status": t.get("status"),
-                "title": t.get("conscious_task", {}).get("title", "")[:120],
+                "title": truncate_text(t.get("conscious_task", {}).get("title", ""), 120),
                 "origin_candidate_id": t.get("origin_candidate_id"),
                 "created_at": t.get("created_at"),
             }
@@ -187,6 +188,18 @@ def handle_sensorium_candidate_update(
         "new_status": new_status,
         "receipt": receipt,
     })
+
+
+def handle_sensorium_attention_pointer(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    surface: str = "local",
+    config: dict | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    return _ok(instance, select_attention_pointer(store, surface=surface, config=config))
 
 
 def handle_sensorium_compact(

@@ -19,6 +19,20 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
+def truncate_text(text: str, max_chars: int = 120) -> str:
+    """Truncate at a word boundary when possible, avoiding mid-word guillotines."""
+    value = " ".join(str(text or "").split())
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 1:
+        return value[:max_chars]
+    cut = value[: max_chars - 1].rstrip()
+    boundary = max(cut.rfind(" "), cut.rfind("—"), cut.rfind(":"), cut.rfind(";"), cut.rfind(","))
+    if boundary >= max(12, int(max_chars * 0.55)):
+        cut = cut[:boundary].rstrip(" —:;,")
+    return cut + "…"
+
+
 def normalize_signal(raw: dict) -> dict:
     sig = dict(raw)
     if "id" not in sig:

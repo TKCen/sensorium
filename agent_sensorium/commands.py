@@ -3,6 +3,7 @@
 import json
 
 from .tools import (
+    handle_sensorium_attention_pointer,
     handle_sensorium_compact,
     handle_sensorium_dispatch_once,
     handle_sensorium_status,
@@ -21,6 +22,9 @@ def handle_sensorium_command(
         return _fmt_status(**kw)
     elif sub == "threads":
         return _fmt_threads(**kw)
+    elif sub == "pointer":
+        surface = parts[1] if len(parts) > 1 else "local"
+        return _fmt_pointer(surface=surface, **kw)
     elif sub == "dispatch":
         return _fmt_dispatch(**kw)
     elif sub == "compact":
@@ -62,6 +66,18 @@ def _fmt_threads(*, instance: str, state_dir: str | None) -> str:
         lines.append(f"  [{t['status']}] {t['id']}: {t['title']}")
         lines.append(f"    origin: {t['origin_candidate_id']}  created: {t['created_at']}")
     return "\n".join(lines)
+
+
+def _fmt_pointer(*, instance: str, state_dir: str | None, surface: str) -> str:
+    raw = handle_sensorium_attention_pointer(instance=instance, state_dir=state_dir, surface=surface)
+    data = json.loads(raw)["data"]
+    if data.get("action") != "pointer_available":
+        return f"Sensorium [{instance}] pointer: none for {surface} ({data.get('reason')})."
+    return (
+        f"Sensorium [{instance}] pointer for {surface}:\n"
+        f"  {data['thread_id']}: {data['title']}\n"
+        f"  {data['invitation']}"
+    )
 
 
 def _fmt_dispatch(*, instance: str, state_dir: str | None) -> str:
@@ -109,6 +125,7 @@ def _help() -> str:
         "Subcommands:\n"
         "  status         Compact status overview (default)\n"
         "  threads        Top visible dormant/held threads\n"
+        "  pointer [surf] Show the active-session pointer for a surface\n"
         "  dispatch       Dry-run dispatch preview\n"
         "  compact        Archive expired items\n"
         "  help           This message"

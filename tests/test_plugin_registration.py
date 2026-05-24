@@ -8,6 +8,7 @@ class FakePluginContext:
         self.tools = {}
         self.commands = {}
         self.skills = {}
+        self.hooks = {}
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         self.tools[name] = {
@@ -23,6 +24,9 @@ class FakePluginContext:
     def register_skill(self, name, path, **kwargs):
         self.skills[name] = {"path": path, **kwargs}
 
+    def register_hook(self, name, handler, **kwargs):
+        self.hooks[name] = {"handler": handler, **kwargs}
+
 
 def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     from agent_sensorium.plugin import register
@@ -35,10 +39,12 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_ingest_signal",
         "sensorium_dispatch_once",
         "sensorium_candidate_update",
+        "sensorium_attention_pointer",
         "sensorium_compact",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"agent-sensorium"}
     assert ctx.commands["sensorium"]["handler"]("help").startswith("Usage: /sensorium")
+    assert "pre_llm_call" in ctx.hooks
     assert "agent-sensorium" in ctx.skills
 
     status = json.loads(

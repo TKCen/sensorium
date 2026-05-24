@@ -46,7 +46,9 @@ def _schema(name: str, description: str, properties: dict[str, Any] | None = Non
 def register(ctx) -> None:
     """Register Agent Sensorium plugin tools, command, and bundled skill."""
     from .commands import handle_sensorium_command
+    from .pointers import handle_pointer_pre_llm
     from .tools import (
+        handle_sensorium_attention_pointer,
         handle_sensorium_candidate_update,
         handle_sensorium_compact,
         handle_sensorium_dispatch_once,
@@ -159,6 +161,32 @@ def register(ctx) -> None:
         description="Update candidate status with a decision receipt.",
     )
     ctx.register_tool(
+        name="sensorium_attention_pointer",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_attention_pointer",
+            "Preview the small active-session Sensorium pointer for a surface without dumping thread capsules.",
+            {
+                **common,
+                "surface": {
+                    "type": "string",
+                    "description": "Surface to check, e.g. local, dashboard, discord, telegram.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional pointer config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_attention_pointer(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            surface=args.get("surface") or "local",
+            config=args.get("config"),
+        ),
+        description="Preview a small Sensorium active-session pointer.",
+    )
+    ctx.register_tool(
         name="sensorium_compact",
         toolset=_TOOLSET,
         schema=_schema(
@@ -177,7 +205,16 @@ def register(ctx) -> None:
         "sensorium",
         lambda raw_args: handle_sensorium_command(raw_args, instance=_default_instance()),
         description="Pull-based sensorium status and review.",
-        args_hint="status|threads|dispatch|compact|help",
+        args_hint="status|threads|pointer|dispatch|compact|help",
+    )
+
+    ctx.register_hook(
+        "pre_llm_call",
+        lambda **kw: handle_pointer_pre_llm(
+            instance=_default_instance(),
+            platform=kw.get("platform") or "local",
+            session_id=kw.get("session_id") or "",
+        ),
     )
 
     skill_path = Path(__file__).resolve().parents[1] / "skills" / "agent-sensorium" / "SKILL.md"

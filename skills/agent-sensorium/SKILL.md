@@ -12,7 +12,7 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 2. A deterministic **Gate** promotes strong signals to **Events** based on strength and kind thresholds.
 3. Events create **Candidates** with weighted pressure scores.
 4. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
-5. An operator reviews threads via pull-based status — no proactive delivery.
+5. A tiny active-session pointer can mention that an eligible thread exists when the current surface is allowed and cooldown is open. The pointer is only a doorway, not the capsule.
 
 ## MVP Limitations
 
@@ -31,16 +31,18 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 | `sensorium_ingest_signal` | Ingest a signal and promote if threshold met |
 | `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
 | `sensorium_candidate_update` | Suppress / hold / cancel / mark_reviewed a candidate |
+| `sensorium_attention_pointer` | Preview the small active-session pointer for a surface |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Command
 
 ```
-/sensorium [status|threads|dispatch|compact|help]
+/sensorium [status|threads|pointer|dispatch|compact|help]
 ```
 
 - **status** (default) — compact overview with counts and top items
 - **threads** — visible dormant/held threads with origin info
+- **pointer [surface]** — preview the small doorway that may be injected into an active session when surface/privacy/cooldown gates allow it
 - **dispatch** — dry-run dispatch preview (never mutates via command)
 - **compact** — archive expired items
 - **help** — usage reference

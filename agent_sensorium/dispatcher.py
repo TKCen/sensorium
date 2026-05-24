@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone, timedelta
 
-from .schemas import new_id, utc_now_iso
+from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 DEFAULT_DISPATCH_CONFIG: dict = {
@@ -43,7 +43,7 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
         "conscious_task": {
             "id": new_id("ctask"),
             "request_type": "THINK",
-            "title": f"Review {kind}: {summary[:80]}",
+            "title": f"Review {kind}: {truncate_text(summary, 80)}",
             "why": f"Candidate pressure {candidate.get('pressure', 0)} crossed dispatch threshold.",
             "expected_decision": "Suppress, hold for later, save as workflow guidance, or create bounded follow-up.",
         },

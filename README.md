@@ -11,6 +11,7 @@ Build the sensorium spine first:
 - signal ingest;
 - deterministic signal/event/candidate promotion;
 - dormant thread capsules;
+- active-session pointer doorways gated by surface/privacy/cooldown;
 - pull-based status;
 - tests and dry-run smoke.
 
