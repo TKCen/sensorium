@@ -4,6 +4,7 @@ import json
 
 from agent_sensorium.tools import (
     handle_sensorium_attention_pointer,
+    handle_sensorium_status,
     handle_sensorium_thread_open,
     handle_sensorium_thread_update,
 )
@@ -108,6 +109,45 @@ def test_thread_update_closes_thread_and_removes_pointer_eligibility(tmp_path):
     receipts = store.read_jsonl("decisions")
     assert receipts[-1]["type"] == "thread.updated"
     assert receipts[-1]["reason"] == "guardrail installed"
+
+
+def test_thread_close_marks_origin_candidate_reviewed_and_clears_active_status(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("candidates", {
+        "id": "cand_lifecycle",
+        "status": "candidate",
+        "kind": "validation",
+        "pressure": 0.8,
+        "summary": "Validation candidate should stop being active when its thread closes.",
+        "updated_at": "2026-05-24T10:00:00Z",
+    })
+    store.append_jsonl("threads", _thread())
+
+    update = json.loads(
+        handle_sensorium_thread_update(
+            instance="test",
+            state_dir=str(tmp_path),
+            thread_id="sth_lifecycle",
+            action="close",
+            reason="validation complete",
+        )
+    )
+
+    assert update["success"] is True
+    candidate = store.read_jsonl("candidates")[0]
+    assert candidate["status"] == "reviewed"
+
+    status = json.loads(handle_sensorium_status(instance="test", state_dir=str(tmp_path)))
+    assert status["data"]["counts"]["active_candidates"] == 0
+    assert status["data"]["top_candidates"] == []
+
+    receipts = store.read_jsonl("decisions")
+    candidate_receipts = [receipt for receipt in receipts if receipt["type"] == "candidate.updated"]
+    assert candidate_receipts[-1]["candidate_id"] == "cand_lifecycle"
+    assert candidate_receipts[-1]["action"] == "mark_reviewed"
+    assert candidate_receipts[-1]["thread_id"] == "sth_lifecycle"
+    assert receipts[-1]["type"] == "thread.updated"
 
 
 def test_thread_update_supports_hold_resume_and_pin(tmp_path):

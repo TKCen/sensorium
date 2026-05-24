@@ -322,6 +322,14 @@ def handle_sensorium_thread_update(
         target["pinned"] = False
 
     target["updated_at"] = now
+    if target.get("status") in {"closed", "archived"}:
+        _mark_origin_candidate_reviewed(
+            store,
+            origin_candidate_id=target.get("origin_candidate_id"),
+            thread_id=target.get("id"),
+            now=now,
+            reason=reason,
+        )
     receipt = {
         "ts": now,
         "type": "thread.updated",
@@ -337,6 +345,48 @@ def handle_sensorium_thread_update(
     store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "threads", threads)
     return _ok(instance, receipt)
+
+
+def _mark_origin_candidate_reviewed(
+    store: SensoriumStore,
+    *,
+    origin_candidate_id: str | None,
+    thread_id: str | None,
+    now: str,
+    reason: str,
+) -> dict | None:
+    """Mark the originating candidate reviewed when its conscious thread terminates."""
+    if not origin_candidate_id:
+        return None
+
+    candidates = store.read_jsonl("candidates")
+    target = None
+    for candidate in candidates:
+        if candidate.get("id") == origin_candidate_id:
+            target = candidate
+            break
+    if target is None:
+        return None
+
+    old_status = target.get("status", "candidate")
+    if old_status != "candidate":
+        return None
+
+    target["status"] = "reviewed"
+    target["updated_at"] = now
+    receipt = {
+        "ts": now,
+        "type": "candidate.updated",
+        "candidate_id": origin_candidate_id,
+        "thread_id": thread_id,
+        "action": "mark_reviewed",
+        "old_status": old_status,
+        "new_status": "reviewed",
+        "reason": reason or "origin thread closed",
+    }
+    store.append_jsonl("decisions", receipt)
+    _rewrite_jsonl(store, "candidates", candidates)
+    return receipt
 
 
 def handle_sensorium_attention_pointer(
