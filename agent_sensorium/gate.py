@@ -40,6 +40,21 @@ def signal_fingerprint(signal: dict) -> str:
     return hashlib.sha256(key_material.encode()).hexdigest()[:16]
 
 
+def event_fingerprint(event: dict) -> str:
+    key_material = json.dumps(
+        {
+            "type": event.get("type", ""),
+            "kind": event.get("kind", ""),
+            "source_signal_ids": sorted(event.get("source_signal_ids", [])),
+            "correlation_keys": sorted(event.get("correlation_keys", [])),
+            "summary": event.get("summary", ""),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(key_material.encode()).hexdigest()[:16]
+
+
 def should_promote_signal(signal: dict, config: dict | None = None) -> tuple[bool, str]:
     cfg = config or DEFAULT_CONFIG
     thresholds = cfg.get("thresholds", DEFAULT_CONFIG["thresholds"])
@@ -58,7 +73,7 @@ def should_promote_signal(signal: dict, config: dict | None = None) -> tuple[boo
 
 def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:
     now = utc_now_iso()
-    return {
+    event = {
         "id": new_id("evt"),
         "ts": now,
         "type": "sensor.event.promoted",
@@ -72,6 +87,8 @@ def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:
         "allowed_surfaces": signal.get("allowed_surfaces", ["local"]),
         "expires_at": "",
     }
+    event["fingerprint"] = event_fingerprint(event)
+    return event
 
 
 def event_to_candidate(event: dict, config: dict | None = None) -> dict:
@@ -79,7 +96,7 @@ def event_to_candidate(event: dict, config: dict | None = None) -> dict:
     strength = event.get("strength", 0.5)
     pressure = round(strength * 0.6 + 0.2 * 0.5 + 0.2 * 0.5, 3)
 
-    return {
+    candidate = {
         "id": new_id("cand"),
         "status": "candidate",
         "kind": event.get("kind", ""),
@@ -99,6 +116,8 @@ def event_to_candidate(event: dict, config: dict | None = None) -> dict:
         "updated_at": now,
         "expires_at": "",
     }
+    candidate["fingerprint"] = candidate_fingerprint(candidate)
+    return candidate
 
 
 def candidate_fingerprint(candidate: dict) -> str:

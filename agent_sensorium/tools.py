@@ -5,12 +5,23 @@ import json
 from .dispatcher import dispatch_once as _dispatch_once
 from .gate import (
     DEFAULT_CONFIG,
+    candidate_fingerprint,
+    event_fingerprint,
     event_to_candidate,
     promote_signal_to_event,
     should_promote_signal,
+    signal_fingerprint,
 )
 from .pointers import select_attention_pointer
-from .schemas import normalize_signal, truncate_text, utc_now_iso, validate_event, validate_signal
+from .schemas import (
+    intersect_allowed_surfaces,
+    merge_sensitivity,
+    normalize_signal,
+    truncate_text,
+    utc_now_iso,
+    validate_event,
+    validate_signal,
+)
 from .store import SensoriumStore
 
 ARCHIVED_STATUSES = {"archived", "closed"}
@@ -101,6 +112,194 @@ def handle_sensorium_status(
     return _ok(instance, data)
 
 
+def _stored_signal_fingerprint(signal: dict) -> str:
+    return signal.get("fingerprint") or signal_fingerprint(signal)
+
+
+def _stored_event_fingerprint(event: dict) -> str:
+    return event.get("fingerprint") or event_fingerprint(event)
+
+
+def _stored_candidate_fingerprint(candidate: dict) -> str:
+    return candidate.get("fingerprint") or candidate_fingerprint(candidate)
+
+
+def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | None:
+    for candidate in candidates:
+        if event_id in (candidate.get("event_ids") or []):
+            return candidate
+    return None
+
+
+def _candidate_for_event_fingerprint(candidates: list[dict], event: dict) -> dict | None:
+    event_candidate = event_to_candidate(event)
+    event_candidate_fp = event_candidate.get("fingerprint") or candidate_fingerprint(event_candidate)
+    for candidate in candidates:
+        if _stored_candidate_fingerprint(candidate) == event_candidate_fp:
+            return candidate
+    return None
+
+
+def _find_existing_signal(signals: list[dict], normalized: dict) -> dict | None:
+    incoming_fp = normalized.get("fingerprint") or signal_fingerprint(normalized)
+    incoming_id = normalized.get("id")
+    for existing in signals:
+        if incoming_id and existing.get("id") == incoming_id:
+            return existing
+        if _stored_signal_fingerprint(existing) == incoming_fp:
+            return existing
+    return None
+
+
+def _find_existing_event(events: list[dict], incoming: dict) -> dict | None:
+    incoming_fp = incoming.get("fingerprint") or event_fingerprint(incoming)
+    incoming_id = incoming.get("id")
+    for existing in events:
+        if incoming_id and existing.get("id") == incoming_id:
+            return existing
+        if _stored_event_fingerprint(existing) == incoming_fp:
+            return existing
+    return None
+
+
+def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
+    for event in events:
+        if signal_id in (event.get("source_signal_ids") or []):
+            return event
+    return None
+
+
+def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
+    incoming_keys = set(event.get("correlation_keys") or [])
+    if not incoming_keys:
+        return None
+    for candidate in candidates:
+        if candidate.get("status", "candidate") != "candidate":
+            continue
+        if candidate.get("kind") != event.get("kind"):
+            continue
+        if incoming_keys & set(candidate.get("correlation_keys") or []):
+            return candidate
+    return None
+
+
+def _event_to_existing_result(event: dict, candidates: list[dict]) -> dict:
+    candidate = (
+        _candidate_for_event_id(candidates, event.get("id", ""))
+        or _candidate_for_event_fingerprint(candidates, event)
+    )
+    result = {
+        "event_id": event.get("id"),
+        "duplicate": True,
+    }
+    if candidate:
+        result["candidate_id"] = candidate.get("id")
+    return result
+
+
+def _promoted_signal_existing_result(signal: dict, events: list[dict], candidates: list[dict]) -> dict:
+    event = _find_event_for_signal(events, signal.get("id", ""))
+    result: dict = {
+        "signal_id": signal.get("id"),
+        "promoted": bool(event),
+        "duplicate": True,
+        "reason": "duplicate_signal",
+    }
+    if event:
+        result["event_id"] = event.get("id")
+        candidate = _candidate_for_event_id(candidates, event.get("id", ""))
+        if candidate:
+            result["candidate_id"] = candidate.get("id")
+    return result
+
+
+def _coalesce_candidate_with_event(
+    store: SensoriumStore,
+    *,
+    candidate: dict,
+    candidates: list[dict],
+    event: dict,
+    incoming_candidate: dict,
+) -> dict:
+    now = utc_now_iso()
+    event_ids = list(candidate.get("event_ids") or [])
+    if event.get("id") not in event_ids:
+        event_ids.append(event.get("id"))
+    candidate["event_ids"] = event_ids
+
+    keys = sorted(set(candidate.get("correlation_keys") or []) | set(event.get("correlation_keys") or []))
+    candidate["correlation_keys"] = keys
+    candidate["repetition"] = round(min(1.0, max(candidate.get("repetition", 0.0), (len(event_ids) - 1) * 0.25)), 3)
+    candidate["pressure"] = round(
+        min(1.0, max(candidate.get("pressure", 0.0), incoming_candidate.get("pressure", 0.0)) + 0.05 * (len(event_ids) - 1)),
+        3,
+    )
+    candidate["sensitivity"] = merge_sensitivity([candidate.get("sensitivity", "private"), event.get("sensitivity", "private")])
+    candidate["allowed_surfaces"] = intersect_allowed_surfaces([
+        candidate.get("allowed_surfaces") or [],
+        event.get("allowed_surfaces") or [],
+    ])
+    candidate["updated_at"] = now
+    candidate.setdefault("related_event_fingerprints", [])
+    event_fp = event.get("fingerprint") or event_fingerprint(event)
+    if event_fp not in candidate["related_event_fingerprints"]:
+        candidate["related_event_fingerprints"].append(event_fp)
+
+    receipt = {
+        "ts": now,
+        "type": "candidate.coalesced",
+        "candidate_id": candidate.get("id"),
+        "event_id": event.get("id"),
+        "event_count": len(event_ids),
+        "pressure": candidate.get("pressure"),
+        "repetition": candidate.get("repetition"),
+    }
+    store.append_jsonl("decisions", receipt)
+    _rewrite_jsonl(store, "candidates", candidates)
+    return receipt
+
+
+def _append_event_and_create_or_update_candidate(
+    store: SensoriumStore,
+    *,
+    event: dict,
+    config: dict | None = None,
+) -> dict:
+    events = store.read_jsonl("events")
+    candidates = store.read_jsonl("candidates")
+
+    existing_event = _find_existing_event(events, event)
+    if existing_event:
+        return _event_to_existing_result(existing_event, candidates)
+
+    store.append_jsonl("events", event)
+    candidate = event_to_candidate(event, config)
+    related = _find_related_candidate(candidates, event)
+    if related:
+        receipt = _coalesce_candidate_with_event(
+            store,
+            candidate=related,
+            candidates=candidates,
+            event=event,
+            incoming_candidate=candidate,
+        )
+        return {
+            "event_id": event["id"],
+            "candidate_id": related["id"],
+            "duplicate": False,
+            "coalesced": True,
+            "receipt": receipt,
+        }
+
+    store.append_jsonl("candidates", candidate)
+    return {
+        "event_id": event["id"],
+        "candidate_id": candidate["id"],
+        "duplicate": False,
+        "coalesced": False,
+    }
+
+
 def handle_sensorium_ingest_signal(
     *,
     signal: dict,
@@ -117,23 +316,32 @@ def handle_sensorium_ingest_signal(
     store.ensure_dirs()
 
     normalized = normalize_signal(signal)
+    normalized["fingerprint"] = signal_fingerprint(normalized)
+
+    signals = store.read_jsonl("signals")
+    existing_signal = _find_existing_signal(signals, normalized)
+    if existing_signal:
+        events = store.read_jsonl("events")
+        candidates = store.read_jsonl("candidates")
+        return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
+
     store.append_jsonl("signals", normalized)
 
     promoted, reason = should_promote_signal(normalized, config)
     result: dict = {
         "signal_id": normalized["id"],
         "promoted": promoted,
+        "duplicate": False,
         "reason": reason,
     }
 
     if promoted:
         event = promote_signal_to_event(normalized, config)
-        store.append_jsonl("events", event)
-        result["event_id"] = event["id"]
-
-        candidate = event_to_candidate(event, config)
-        store.append_jsonl("candidates", candidate)
-        result["candidate_id"] = candidate["id"]
+        event_result = _append_event_and_create_or_update_candidate(store, event=event, config=config)
+        result["event_id"] = event_result["event_id"]
+        if "candidate_id" in event_result:
+            result["candidate_id"] = event_result["candidate_id"]
+        result["coalesced"] = event_result.get("coalesced", False)
 
     return _ok(instance, result)
 
@@ -145,7 +353,7 @@ def handle_sensorium_ingest_event(
     state_dir: str | None = None,
     config: dict | None = None,
 ) -> str:
-    """Ingest an already-promoted trusted event and create a candidate."""
+    """Ingest an already-promoted trusted event and create or update a candidate."""
     try:
         validate_event(event)
     except ValueError as e:
@@ -162,20 +370,15 @@ def handle_sensorium_ingest_event(
     incoming.setdefault("sensitivity", "private")
     incoming.setdefault("allowed_surfaces", ["local"])
     incoming.setdefault("expires_at", "")
+    incoming["fingerprint"] = event_fingerprint(incoming)
 
     try:
         validate_event(incoming)
     except ValueError as e:
         return _err(instance, str(e))
 
-    store.append_jsonl("events", incoming)
-    candidate = event_to_candidate(incoming, config)
-    store.append_jsonl("candidates", candidate)
-
-    return _ok(instance, {
-        "event_id": incoming["id"],
-        "candidate_id": candidate["id"],
-    })
+    result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
+    return _ok(instance, result)
 
 
 def handle_sensorium_dispatch_once(

@@ -12,6 +12,7 @@ from agent_sensorium.tools import (
     handle_sensorium_status,
     handle_sensorium_thread_update,
 )
+from agent_sensorium.store import SensoriumStore
 
 
 @pytest.fixture
@@ -105,6 +106,61 @@ class TestSensoriumIngestSignal:
         assert result["data"]["counts"]["events"] == 3
         assert result["data"]["counts"]["candidates"] == 3
 
+    def test_duplicate_strong_signal_is_idempotent_by_fingerprint(self, state_dir):
+        signal = {
+            "sensor": "test",
+            "source": "manual",
+            "kind": "design_decision",
+            "summary": "Same observation should not create repeated work",
+            "strength_hint": 0.9,
+            "correlation_keys": ["dedupe"],
+        }
+
+        first = json.loads(handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir))
+        second = json.loads(handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir))
+
+        assert first["success"] is True
+        assert second["success"] is True
+        assert second["data"]["duplicate"] is True
+        assert second["data"]["signal_id"] == first["data"]["signal_id"]
+        assert second["data"]["event_id"] == first["data"]["event_id"]
+        assert second["data"]["candidate_id"] == first["data"]["candidate_id"]
+
+        status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
+        assert status["counts"]["signals"] == 1
+        assert status["counts"]["events"] == 1
+        assert status["counts"]["candidates"] == 1
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        signal_record = store.read_jsonl("signals")[0]
+        event_record = store.read_jsonl("events")[0]
+        candidate_record = store.read_jsonl("candidates")[0]
+        assert signal_record["fingerprint"]
+        assert event_record["fingerprint"]
+        assert candidate_record["fingerprint"]
+
+    def test_duplicate_weak_signal_remains_noise_without_extra_records(self, state_dir):
+        signal = {
+            "sensor": "test",
+            "source": "manual",
+            "kind": "note",
+            "summary": "Same weak observation",
+            "strength_hint": 0.1,
+            "correlation_keys": ["noise"],
+        }
+
+        first = json.loads(handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir))
+        second = json.loads(handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir))
+
+        assert first["data"]["promoted"] is False
+        assert second["data"]["duplicate"] is True
+        assert second["data"]["promoted"] is False
+
+        status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
+        assert status["counts"]["signals"] == 1
+        assert status["counts"]["events"] == 0
+        assert status["counts"]["candidates"] == 0
+
 
 class TestSensoriumIngestEvent:
     def test_valid_event_ingested_and_candidate_created(self, state_dir):
@@ -155,6 +211,79 @@ class TestSensoriumIngestEvent:
         result = json.loads(raw)
         assert result["success"] is False
         assert "Invalid sensitivity" in result["error"]
+
+    def test_duplicate_event_import_is_idempotent(self, state_dir):
+        event = {
+            "id": "evt_dup",
+            "ts": "2026-05-25T00:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "task_result",
+            "summary": "Trusted duplicate event",
+            "source_signal_ids": ["sig_external"],
+            "strength": 0.9,
+            "correlation_keys": ["trusted-dedupe"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+        }
+
+        first = json.loads(handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir))
+        second = json.loads(handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir))
+
+        assert second["success"] is True
+        assert second["data"]["duplicate"] is True
+        assert second["data"]["event_id"] == first["data"]["event_id"]
+        assert second["data"]["candidate_id"] == first["data"]["candidate_id"]
+
+        status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
+        assert status["counts"]["events"] == 1
+        assert status["counts"]["candidates"] == 1
+
+    def test_related_event_updates_existing_candidate(self, state_dir):
+        first_event = {
+            "id": "evt_rel_1",
+            "ts": "2026-05-25T00:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "task_result",
+            "summary": "First related result",
+            "strength": 0.8,
+            "correlation_keys": ["same-thread"],
+            "sensitivity": "public_safe",
+            "allowed_surfaces": ["local", "discord"],
+        }
+        second_event = {
+            "id": "evt_rel_2",
+            "ts": "2026-05-25T00:05:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "task_result",
+            "summary": "Second related result",
+            "strength": 0.95,
+            "correlation_keys": ["same-thread", "new-key"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+        }
+
+        first = json.loads(handle_sensorium_ingest_event(event=first_event, instance="test", state_dir=state_dir))
+        second = json.loads(handle_sensorium_ingest_event(event=second_event, instance="test", state_dir=state_dir))
+
+        assert second["success"] is True
+        assert second["data"]["coalesced"] is True
+        assert second["data"]["candidate_id"] == first["data"]["candidate_id"]
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        events = store.read_jsonl("events")
+        candidates = store.read_jsonl("candidates")
+        decisions = store.read_jsonl("decisions")
+        assert len(events) == 2
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate["event_ids"] == ["evt_rel_1", "evt_rel_2"]
+        assert candidate["repetition"] > 0
+        assert candidate["pressure"] > 0.78
+        assert candidate["updated_at"] >= candidate["created_at"]
+        assert candidate["sensitivity"] == "private"
+        assert candidate["allowed_surfaces"] == ["local"]
+        assert decisions[0]["type"] == "candidate.coalesced"
+        assert decisions[0]["candidate_id"] == first["data"]["candidate_id"]
 
 
 class TestSensoriumDispatchOnce:

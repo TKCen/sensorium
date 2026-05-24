@@ -25,7 +25,11 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 
 ## Trusted event imports
 
-Use `sensorium_ingest_signal` for low-level observations that still need deterministic thresholding. Use `sensorium_ingest_event` only when an upstream sensor/importer has already done the first filtering step and produced a compact promoted event. Trusted event imports still validate required event fields and sensitivity, then create one candidate for dispatcher review. They do not create raw signal records.
+Use `sensorium_ingest_signal` for low-level observations that still need deterministic thresholding. Use `sensorium_ingest_event` only when an upstream sensor/importer has already done the first filtering step and produced a compact promoted event. Trusted event imports still validate required event fields and sensitivity, then create or update one candidate for dispatcher review. They do not create raw signal records.
+
+## Dedupe and correlation
+
+Signal, event, and candidate records persist deterministic fingerprints. Re-importing the same signal or event is idempotent: the tool returns the existing ids and does not append duplicate JSONL records. Related promoted events with the same kind and overlapping `correlation_keys` coalesce into the existing active candidate by extending `event_ids`, raising repetition/pressure deterministically, narrowing sensitivity/surface scope, and writing a local decision receipt. This is still local-only and deterministic; no model-backed semantic clustering runs in MVP.
 
 ## Tools
 

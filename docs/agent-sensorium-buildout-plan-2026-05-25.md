@@ -20,7 +20,9 @@ As of this plan, the plugin has:
 - active-session pointer preview/hook;
 - visibility gates and thread transition guards;
 - origin candidate marked reviewed when a thread closes;
-- 114 passing tests.
+- trusted event import surface;
+- persisted signal/event/candidate fingerprints, idempotent duplicate signal/event imports, and deterministic related-event candidate coalescing;
+- 121 passing tests.
 
 The repo has no Beads DB, so backlog lives in this checked-in plan until a board is deliberately initialized.
 
@@ -57,6 +59,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - duplicate signal/event imports are idempotent;
 - related events can update an existing candidate with `event_ids`, repetition, pressure, and `updated_at`;
 - tests cover duplicate/noise/coalescing paths.
+
+**Status:** Implemented in the Phase 2 slice. Remaining refinement for later phases: migrate/repair old JSONL records that predate fingerprints if needed; strengthen correlation beyond exact kind plus overlapping `correlation_keys` only after the deterministic spine is observable.
 
 ### Phase 3 — Dispatcher lock, leases, budgets, and state.latest
 
@@ -149,15 +153,13 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 1 now: `sensorium_ingest_event`.
+Implement Phase 3 next: dispatcher lock, leases, budgets, and `state.latest`.
 
 Files:
 
-- Modify `agent_sensorium/tools.py`.
-- Modify `agent_sensorium/plugin.py`.
-- Modify `tests/test_tools.py`.
-- Modify `tests/test_plugin_registration.py`.
-- Update bundled skill docs.
+- Modify `agent_sensorium/dispatcher.py` and supporting store/tool surfaces as needed.
+- Add focused tests for local lock acquisition, stale lock recovery, budget visibility, and duplicate-thread prevention.
+- Update bundled skill/docs with the dispatcher scheduling boundary.
 
 Gate:
 
