@@ -54,6 +54,7 @@ def register(ctx) -> None:
         handle_sensorium_dispatch_once,
         handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
+        handle_sensorium_service_threads,
         handle_sensorium_status,
         handle_sensorium_thread_open,
         handle_sensorium_thread_update,
@@ -262,6 +263,10 @@ def register(ctx) -> None:
                     "type": "string",
                     "description": "Short human-readable reason for the decision receipt.",
                 },
+                "resume_trigger": {
+                    "type": "string",
+                    "description": "Optional trigger condition to resume a held thread.",
+                },
             },
         ),
         handler=lambda args, **kw: handle_sensorium_thread_update(
@@ -270,6 +275,7 @@ def register(ctx) -> None:
             thread_id=args.get("thread_id") or "latest",
             action=args.get("action") or "",
             reason=args.get("reason") or "",
+            resume_trigger=args.get("resume_trigger") or "",
         ),
         description="Update a conscious thread with a decision receipt.",
     )
@@ -286,6 +292,32 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="Archive expired candidates and threads with decision receipts.",
+    )
+    ctx.register_tool(
+        name="sensorium_service_threads",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_service_threads",
+            "Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports.",
+            {
+                **common,
+                "config": {
+                    "type": "object",
+                    "description": "Optional service config overrides (starvation_hours, expiring_window_hours).",
+                },
+                "now": {
+                    "type": "string",
+                    "description": "Optional ISO timestamp override for deterministic testing.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_service_threads(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            config=args.get("config"),
+            now=args.get("now"),
+        ),
+        description="Thread service pass: archive expired, report starved/dirty/expiring.",
     )
 
     ctx.register_command(

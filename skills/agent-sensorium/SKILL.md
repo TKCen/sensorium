@@ -35,6 +35,19 @@ Signal, event, and candidate records persist deterministic fingerprints. Re-impo
 
 Mutating dispatch is guarded by one local dispatcher lock/lease under the instance state directory. An active unexpired lock returns `lock_unavailable` and creates no thread; an expired lock is recovered with a `dispatch.lock_recovered` decision receipt before dispatch continues. Dispatch state is written to `state.latest.json` with `state_version`, `last_dispatch_result`, `budgets`, and lock status. Status exposes those fields so dashboards and operators can observe the attention scheduler without owning it. Token buckets are currently enforced for mutating dispatch and visible for dispatch/pointer/conscious/advisory lanes; pointer/conscious/advisory consumption remains deferred until those services exist.
 
+## Thread service boundary
+
+Threads carry lifecycle fields: `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, and `source_refs`. The `sensorium_service_threads` tool runs a deterministic service pass that:
+
+- Archives threads past their TTL (unless pinned)
+- Identifies starved threads (no interaction for >72h by default)
+- Reports dirty threads (needing re-summarization)
+- Reports expiring threads (within 24h of TTL)
+
+All archival decisions write `service.thread_archived` receipts. Thread closure writes `thread.settlement` receipts containing correlation keys and fingerprint from the origin candidate, enabling downstream suppression without model-backed learning.
+
+Hold/resume preserves `hold_reason` and `resume_trigger` fields. Every thread update stamps `last_interaction_at`.
+
 ## Tools
 
 | Tool | Description |
@@ -47,6 +60,7 @@ Mutating dispatch is guarded by one local dispatcher lock/lease under the instan
 | `sensorium_attention_pointer` | Preview the small active-session pointer for a surface; read-only and non-mutating |
 | `sensorium_thread_open` | Open a compact conscious-thread capsule when the requested surface is allowed |
 | `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
+| `sensorium_service_threads` | Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Pointer vs capsule boundary

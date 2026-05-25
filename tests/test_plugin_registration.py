@@ -44,6 +44,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_thread_open",
         "sensorium_thread_update",
         "sensorium_compact",
+        "sensorium_service_threads",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"agent-sensorium"}
     assert ctx.commands["sensorium"]["handler"]("help").startswith("Usage: /sensorium")
@@ -57,6 +58,52 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     )
     assert status["success"] is True
     assert status["data"]["counts"]["signals"] == 0
+
+
+def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    store.append_jsonl("threads", {
+        "id": "sth_holdtest",
+        "status": "dormant",
+        "origin": "candidate",
+        "conscious_task": {"id": "ct_1", "request_type": "THINK", "title": "Hold test"},
+        "origin_candidate_id": "cand_1",
+        "continuity_summary": [],
+        "decision_log": [],
+        "interaction_refs": [],
+        "summary_dirty": False,
+        "open_questions": [],
+        "next_prompt_to_operator": "test",
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+        "created_at": "2026-05-24T10:00:00Z",
+        "updated_at": "2026-05-24T10:00:00Z",
+        "expires_at": "2026-05-31T10:00:00Z",
+    })
+
+    ctx = FakePluginContext()
+    register(ctx)
+
+    thread_update_schema = ctx.tools["sensorium_thread_update"]["schema"]
+    assert "resume_trigger" in thread_update_schema["parameters"]["properties"]
+
+    result = json.loads(ctx.tools["sensorium_thread_update"]["handler"]({
+        "instance": "plugin-test",
+        "state_dir": str(tmp_path),
+        "thread_id": "sth_holdtest",
+        "action": "hold",
+        "reason": "waiting",
+        "resume_trigger": "new_evidence",
+    }))
+    assert result["success"] is True
+
+    thread = store.read_jsonl("threads")[0]
+    assert thread["hold_reason"] == "waiting"
+    assert thread["resume_trigger"] == "new_evidence"
 
 
 def test_pre_llm_hook_forwards_state_dir(tmp_path):

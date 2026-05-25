@@ -87,6 +87,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - service pass updates TTL/held/archival decisions deterministically;
 - closed threads create settlement/suppression hints for fingerprints/correlation keys.
 
+**Status:** Implemented in the Phase 4 slice. Thread records now carry `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, and `source_refs`. Status reports include `dirty_threads`, `starved_threads`, and `expiring_threads` counts. A deterministic `sensorium_service_threads` tool archives expired threads, identifies starved/dirty/expiring threads, and writes `service.thread_archived` receipts. Thread close/archive writes `thread.settlement` decision receipts with correlation keys and fingerprint from the origin candidate. Hold/resume actions store and clear `hold_reason`/`resume_trigger`. Remaining refinement for later phases: dirty-summary re-summarization trigger; configurable starvation thresholds via instance config (Phase 6).
+
 ### Phase 5 — Feedback lane and loop breakers
 
 **Why:** Actions and operator evaluations need to re-enter as signals without becoming self-loop fuel.
@@ -155,13 +157,13 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 4 next: thread service queue.
+Implement Phase 5 next: feedback lane and loop breakers.
 
 Files:
 
-- Modify `agent_sensorium/tools.py`, `agent_sensorium/dispatcher.py`, and store/supporting surfaces as needed.
-- Add focused tests for `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, starved/expiring/dirty status counts, deterministic service pass decisions, and closed-thread settlement hints.
-- Update bundled skill/docs with the thread-service boundary.
+- Modify `agent_sensorium/tools.py`, `agent_sensorium/schemas.py`, and store as needed.
+- Add focused tests for feedback signal validation (`caused_by`, `outcome`, `feedback_scope`), thread close/update feedback emission, and dispatcher self-loop rejection.
+- Update bundled skill/docs with the feedback lane boundary.
 
 Gate:
 

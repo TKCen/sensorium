@@ -1,6 +1,7 @@
 """Tool handlers for Agent Sensorium — callable without live Hermes runtime."""
 
 import json
+from datetime import datetime, timezone, timedelta
 
 from .dispatcher import dispatch_once as _dispatch_once
 from .gate import (
@@ -61,6 +62,31 @@ def handle_sensorium_status(
     visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
     visible_threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
+    active_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
+    now_ts = utc_now_iso()
+    dirty_count = sum(1 for t in active_threads if t.get("dirty_since"))
+    expiring_count = 0
+    starved_count = 0
+    for t in active_threads:
+        expires = t.get("expires_at", "")
+        if expires:
+            try:
+                exp_dt = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                now_dt = datetime.strptime(now_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                if timedelta(0) < (exp_dt - now_dt) <= timedelta(hours=24):
+                    expiring_count += 1
+            except (ValueError, TypeError):
+                pass
+        last_interaction = t.get("last_interaction_at") or t.get("created_at", "")
+        if last_interaction:
+            try:
+                last_dt = datetime.strptime(last_interaction, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                now_dt = datetime.strptime(now_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                if (now_dt - last_dt) > timedelta(hours=72):
+                    starved_count += 1
+            except (ValueError, TypeError):
+                pass
+
     data = {
         "instance": instance,
         "state_dir": str(store.root),
@@ -75,6 +101,9 @@ def handle_sensorium_status(
             "closed_threads": len([t for t in threads if t.get("status") == "closed"]),
             "archived_threads": len([t for t in threads if t.get("status") == "archived"]),
             "archived_candidates": len([c for c in candidates if c.get("status") == "archived"]),
+            "dirty_threads": dirty_count,
+            "starved_threads": starved_count,
+            "expiring_threads": expiring_count,
         },
         "top_candidates": [
             {
@@ -499,8 +528,13 @@ def _compact_thread_capsule(thread: dict) -> dict:
         "open_questions": thread.get("open_questions", []),
         "next_prompt_to_operator": thread.get("next_prompt_to_operator", ""),
         "summary_dirty": bool(thread.get("summary_dirty")),
+        "dirty_since": thread.get("dirty_since"),
+        "source_refs": thread.get("source_refs", []),
         "sensitivity": thread.get("sensitivity", "private"),
         "allowed_surfaces": thread.get("allowed_surfaces", []),
+        "hold_reason": thread.get("hold_reason", ""),
+        "resume_trigger": thread.get("resume_trigger", ""),
+        "last_interaction_at": thread.get("last_interaction_at"),
         "created_at": thread.get("created_at"),
         "updated_at": thread.get("updated_at"),
         "expires_at": thread.get("expires_at"),
@@ -532,6 +566,7 @@ def handle_sensorium_thread_update(
     thread_id: str,
     action: str,
     reason: str = "",
+    resume_trigger: str = "",
     instance: str = "default",
     state_dir: str | None = None,
 ) -> str:
@@ -564,8 +599,13 @@ def handle_sensorium_thread_update(
         target["status"] = "closed"
     elif action == "hold":
         target["status"] = "held"
+        target["hold_reason"] = reason
+        if resume_trigger:
+            target["resume_trigger"] = resume_trigger
     elif action == "resume":
         target["status"] = "dormant"
+        target["hold_reason"] = ""
+        target["resume_trigger"] = ""
     elif action == "archive":
         target["status"] = "archived"
     elif action == "mark_reviewed":
@@ -575,6 +615,7 @@ def handle_sensorium_thread_update(
     elif action == "unpin":
         target["pinned"] = False
 
+    target["last_interaction_at"] = now
     target["updated_at"] = now
     if target.get("status") in {"closed", "archived"}:
         _mark_origin_candidate_reviewed(
@@ -584,6 +625,7 @@ def handle_sensorium_thread_update(
             now=now,
             reason=reason,
         )
+        _write_settlement_hint(store, thread=target, now=now)
     receipt = {
         "ts": now,
         "type": "thread.updated",
@@ -641,6 +683,28 @@ def _mark_origin_candidate_reviewed(
     store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "candidates", candidates)
     return receipt
+
+
+def _write_settlement_hint(store: SensoriumStore, *, thread: dict, now: str) -> None:
+    origin_id = thread.get("origin_candidate_id")
+    if not origin_id:
+        return
+    candidates = store.read_jsonl("candidates")
+    origin = None
+    for c in candidates:
+        if c.get("id") == origin_id:
+            origin = c
+            break
+    receipt = {
+        "ts": now,
+        "type": "thread.settlement",
+        "thread_id": thread.get("id"),
+        "origin_candidate_id": origin_id,
+        "correlation_keys": (origin.get("correlation_keys") or []) if origin else [],
+        "fingerprint": (origin.get("fingerprint") or "") if origin else "",
+        "settlement_type": thread.get("status", "closed"),
+    }
+    store.append_jsonl("decisions", receipt)
 
 
 def handle_sensorium_attention_pointer(
@@ -721,6 +785,91 @@ def handle_sensorium_compact(
         "archived_threads": archived_threads,
         "receipts_written": len(receipts),
     })
+
+
+def handle_sensorium_service_threads(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    config: dict | None = None,
+    now: str | None = None,
+) -> str:
+    """Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+
+    now_ts = now or utc_now_iso()
+    threads = store.read_jsonl("threads")
+
+    cfg = config or {}
+    starvation_hours = cfg.get("starvation_hours", 72)
+    expiring_window_hours = cfg.get("expiring_window_hours", 24)
+
+    active_statuses = {"dormant", "held"}
+    archived_ids: list[str] = []
+    starved_ids: list[str] = []
+    dirty_ids: list[str] = []
+    expiring_ids: list[str] = []
+    receipts: list[dict] = []
+    changed = False
+
+    for t in threads:
+        status = t.get("status", "dormant")
+        if status not in active_statuses:
+            continue
+
+        expires = t.get("expires_at", "")
+        if expires and expires <= now_ts and not t.get("pinned"):
+            receipt = {
+                "ts": now_ts,
+                "type": "service.thread_archived",
+                "thread_id": t["id"],
+                "reason": "ttl_expired",
+                "previous_status": status,
+            }
+            t["status"] = "archived"
+            t["updated_at"] = now_ts
+            archived_ids.append(t["id"])
+            receipts.append(receipt)
+            store.append_jsonl("decisions", receipt)
+            changed = True
+            continue
+
+        last_interaction = t.get("last_interaction_at") or t.get("created_at", "")
+        if last_interaction:
+            try:
+                last_dt = datetime.strptime(last_interaction, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                now_dt = datetime.strptime(now_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                if (now_dt - last_dt) > timedelta(hours=starvation_hours):
+                    starved_ids.append(t["id"])
+            except (ValueError, TypeError):
+                pass
+
+        if t.get("dirty_since"):
+            dirty_ids.append(t["id"])
+
+        if expires:
+            try:
+                exp_dt = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                now_dt = datetime.strptime(now_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                remaining = exp_dt - now_dt
+                if timedelta(0) < remaining <= timedelta(hours=expiring_window_hours):
+                    expiring_ids.append(t["id"])
+            except (ValueError, TypeError):
+                pass
+
+    if changed:
+        _rewrite_jsonl(store, "threads", threads)
+
+    data = {
+        "serviced": len(archived_ids) + len(starved_ids) + len(dirty_ids) + len(expiring_ids),
+        "archived": archived_ids,
+        "starved": starved_ids,
+        "dirty": dirty_ids,
+        "expiring": expiring_ids,
+        "receipts_written": len(receipts),
+    }
+    return _ok(instance, data)
 
 
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
