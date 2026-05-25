@@ -144,6 +144,31 @@ The injected pointer context is model-facing validation scaffolding. It can incl
 - **compact** — archive expired items
 - **help** — usage reference
 
+## Deterministic Sensors
+
+Compact sensor helpers in `agent_sensorium.sensors` emit signal dicts suitable for `sensorium_ingest_signal`. They are stdlib-only, deterministic, and contain only metadata — never raw file contents, transcripts, or unbounded data.
+
+| Helper | Source | Use |
+|--------|--------|-----|
+| `session_event_signal` | `hermes_session` | Compact session event: kind/summary/ref |
+| `artifact_signal` | `artifact` | File metadata: path/size/hash/ref, no content |
+| `operator_signal` | `manual` | Explicit operator note/correction |
+
+Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surfaces to `["local"]`.
+
+## Shadow Tick
+
+`scripts/sensorium_tick.py` runs deterministic lifecycle operations without model calls or outbound delivery:
+
+1. **Compact** — archive expired candidates/threads
+2. **Service** — TTL archival, starvation/dirty/expiring reports
+3. **Dispatch preview** — dry-run dispatch (never creates threads)
+4. **Status** — read-only state snapshot
+
+Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `tick.completed` receipt to local decisions JSONL. Use `--dry-run` to skip mutations.
+
+The tick must not: send messages, create external tasks, create platform threads, call messaging APIs, or invoke models.
+
 ## Conscious Review Checklist
 
 When reviewing a dormant thread, choose exactly one action:

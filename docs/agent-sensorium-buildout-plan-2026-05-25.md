@@ -126,6 +126,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - cron/no-agent use stays silent unless errors occur;
 - tick writes receipts but sends no user-facing messages.
 
+**Status:** Implemented in the Phase 7 slice. `agent_sensorium/sensors.py` provides three deterministic compact sensor helpers (`session_event_signal`, `artifact_signal`, `operator_signal`) — all stdlib-only, truncating summaries to 200 chars, defaulting sensitivity to `private` and surfaces to `["local"]`, and never including raw file contents or transcripts. `scripts/sensorium_tick.py` runs compact → service → dispatch(dry_run=True) → status in sequence, writes a `tick.completed` receipt to local decisions JSONL, and produces no stdout by default (safe for cron/no-agent use). The `--json` flag opts into output; `--dry-run` skips mutations. Dispatch is always a preview — the tick never creates threads or outbound records. Tests prove compactness, stdout silence, receipt writing, and absence of outbound delivery. Remaining refinement for later phases: wire sensors into active session hooks; add hindsight/RSS/file-crawl sensors; configurable tick schedule via instance config.
+
 ### Phase 8 — Subconscious advisory dry-run
 
 **Why:** Semantic consolidation should arrive only after deterministic spine and loop breakers are observable.
@@ -161,14 +163,15 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 7 next: deterministic sensors and shadow tick.
+Implement Phase 8 next: subconscious advisory dry-run.
 
 Files:
 
-- Add deterministic compact sensor helpers (session-event, artifact, explicit-operator) without model calls or raw transcript dumps.
-- Add `scripts/sensorium_tick.py` to run status, compaction, dispatch dry-run, and deterministic thread service.
-- Add focused tests proving sensors emit compact signals only, tick writes local receipts/state only, and no user-facing/outbound delivery occurs.
-- Update bundled skill/docs with the deterministic sensor and silent tick boundary.
+- Add a bounded advisory context builder: config summary, top candidates, recent events/decisions, and no raw transcripts.
+- Add advisory output schema validation for `DROP | SAVE | CREATE_CONSCIOUS_TASK`.
+- Keep model-backed advisory disabled by default; dry-run stores only local advisory receipts and performs no external side effects.
+- Add focused tests for context bounds, schema refusal paths, disabled-by-default behavior, and dry-run receipt/no-action semantics.
+- Update bundled skill/docs with the advisory dry-run boundary.
 
 Gate:
 
