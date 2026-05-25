@@ -91,6 +91,33 @@ class TestConfigLoading:
         assert diag["source"] == "defaults"
         assert diag.get("error") == "config_unreadable"
 
+    def test_valid_json_non_object_config_falls_back_to_defaults(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps("instance_name"))
+        config, diag = load_instance_config(config_path=str(cfg))
+        assert config["instance_name"] == "default"
+        assert config["allowed_surfaces"] == ["local"]
+        assert diag["source"] == "file"
+
+    def test_blank_surface_values_are_ignored(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({"allowed_surfaces": ["discord", "", "  ", "local"]}))
+        config, _ = load_instance_config(config_path=str(cfg))
+        assert config["allowed_surfaces"] == ["discord", "local"]
+
+    def test_blank_only_surface_values_fall_back_to_safe_default(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({"allowed_surfaces": ["", "  "]}))
+        config, _ = load_instance_config(config_path=str(cfg))
+        assert config["allowed_surfaces"] == ["local"]
+
+    def test_blank_threshold_values_are_ignored(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({"thresholds": {"starvation_hours": 0, "expiring_window_hours": -4}}))
+        config, _ = load_instance_config(config_path=str(cfg))
+        assert config["thresholds"]["starvation_hours"] == 72
+        assert config["thresholds"]["expiring_window_hours"] == 24
+
     def test_partial_config_uses_defaults_for_missing(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({"instance_name": "custom"}))

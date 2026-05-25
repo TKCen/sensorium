@@ -43,6 +43,9 @@ def resolve_config_path(
 
 
 def _validate_config(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raw = {}
+
     config: dict = {
         "instance_name": SAFE_DEFAULTS["instance_name"],
         "policy_card_ref": SAFE_DEFAULTS["policy_card_ref"],
@@ -63,8 +66,10 @@ def _validate_config(raw: dict) -> dict:
             config["policy_card_ref"] = None
     if "allowed_surfaces" in raw:
         val = raw["allowed_surfaces"]
-        if isinstance(val, list) and all(isinstance(s, str) for s in val) and val:
-            config["allowed_surfaces"] = sorted(set(val))
+        if isinstance(val, list) and all(isinstance(s, str) for s in val):
+            surfaces = sorted({s.strip() for s in val if s.strip()})
+            if surfaces:
+                config["allowed_surfaces"] = surfaces
     if "max_sensitivity" in raw:
         val = raw["max_sensitivity"]
         if val in VALID_SENSITIVITIES:
@@ -73,7 +78,7 @@ def _validate_config(raw: dict) -> dict:
         val = raw["thresholds"]
         if isinstance(val, dict):
             for k in ("starvation_hours", "expiring_window_hours"):
-                if k in val and isinstance(val[k], (int, float)):
+                if k in val and isinstance(val[k], (int, float)) and val[k] > 0:
                     config["thresholds"][k] = val[k]
     if "budgets" in raw:
         val = raw["budgets"]
