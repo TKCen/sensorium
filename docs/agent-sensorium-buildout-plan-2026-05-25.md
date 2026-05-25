@@ -128,6 +128,20 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 **Status:** Implemented in the Phase 7 slice. `agent_sensorium/sensors.py` provides three deterministic compact sensor helpers (`session_event_signal`, `artifact_signal`, `operator_signal`) — all stdlib-only, truncating summaries to 200 chars, defaulting sensitivity to `private` and surfaces to `["local"]`, and never including raw file contents or transcripts. `scripts/sensorium_tick.py` runs compact → service → dispatch(dry_run=True) → status in sequence, writes a `tick.completed` receipt to local decisions JSONL, and produces no stdout by default (safe for cron/no-agent use). The `--json` flag opts into output; `--dry-run` skips mutations. Dispatch is always a preview — the tick never creates threads or outbound records. Tests prove compactness, stdout silence, receipt writing, and absence of outbound delivery. Remaining refinement for later phases: wire sensors into active session hooks; add hindsight/RSS/file-crawl sensors; configurable tick schedule via instance config.
 
+### Phase 7.5 — Probe coverage and live-signal validation
+
+**Why:** Before model-backed subconscious advisory, prove the deterministic nervous system is actually receiving enough compact signals. Advisory over an empty store is theater, not cognition.
+
+**Acceptance:**
+
+- probe inventory distinguishes implemented helpers, wired live probes, configured watched sources, and blind spots;
+- at least three source classes can be exercised end-to-end into `signals/inbox.jsonl` and, when thresholds warrant, promoted events/candidates;
+- validation uses temporary state by default and never writes raw transcripts, raw file contents, outbound messages, platform threads, or external tasks;
+- a live/audit command or script reports signal counts by sensor/source/kind, recent probe freshness, promotion yield, and configured-but-silent probes;
+- tests cover empty-store reporting, seeded probe signals, promotion/correlation, privacy bounds, and no-outbound/no-raw-content behavior.
+
+**Status:** Not started. This is the required next slice before Phase 8. Current default live state has zero signals/events/candidates, so the immediate goal is probe coverage and end-to-end signal validation, not advisory.
+
 ### Phase 8 — Subconscious advisory dry-run
 
 **Why:** Semantic consolidation should arrive only after deterministic spine and loop breakers are observable.
@@ -163,15 +177,15 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 8 next: subconscious advisory dry-run.
+Implement Phase 7.5 next: probe coverage and live-signal validation.
 
 Files:
 
-- Add a bounded advisory context builder: config summary, top candidates, recent events/decisions, and no raw transcripts.
-- Add advisory output schema validation for `DROP | SAVE | CREATE_CONSCIOUS_TASK`.
-- Keep model-backed advisory disabled by default; dry-run stores only local advisory receipts and performs no external side effects.
-- Add focused tests for context bounds, schema refusal paths, disabled-by-default behavior, and dry-run receipt/no-action semantics.
-- Update bundled skill/docs with the advisory dry-run boundary.
+- Add a probe inventory/audit surface that separates available helper functions from actually wired live probes.
+- Add a temporary-state probe smoke path that exercises session-event, artifact, and explicit-operator signals end-to-end through ingest/promotion without outbound side effects.
+- Report counts by sensor/source/kind, recent freshness, promotion yield, and blind spots/configured-but-silent probes.
+- Add focused tests for empty stores, seeded probes, threshold promotion/correlation, privacy bounds, no raw content, and no outbound records.
+- Update bundled skill/docs with the pre-advisory probe validation boundary.
 
 Gate:
 

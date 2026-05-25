@@ -169,6 +169,17 @@ Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `
 
 The tick must not: send messages, create external tasks, create platform threads, call messaging APIs, or invoke models.
 
+## Probe Coverage Boundary
+
+Before enabling model-backed advisory, validate that real probes produce enough compact signals. Do not confuse helper functions with live sensing. A probe audit should distinguish:
+
+- implemented helpers (`session_event_signal`, `artifact_signal`, `operator_signal`);
+- wired live probes that actually call ingest;
+- configured watched sources that are currently silent;
+- blind spots such as Hindsight echoes, RSS/feed items, file crawls, task results, or active-session summaries when not yet wired.
+
+Use temporary state by default for smoke validation. A good pre-advisory smoke exercises at least session-event, artifact, and explicit-operator source classes end-to-end into `signals/inbox.jsonl`, then reports counts by sensor/source/kind, freshness, and promotion yield. The smoke/audit must not store raw transcripts, raw file contents, outbound messages, platform threads, external tasks, or model output.
+
 ## Conscious Review Checklist
 
 When reviewing a dormant thread, choose exactly one action:
