@@ -180,6 +180,57 @@ Before enabling model-backed advisory, validate that real probes produce enough 
 
 Use temporary state by default for smoke validation. A good pre-advisory smoke exercises at least session-event, artifact, and explicit-operator source classes end-to-end into `signals/inbox.jsonl`, then reports counts by sensor/source/kind, freshness, and promotion yield. The smoke/audit must not store raw transcripts, raw file contents, outbound messages, platform threads, external tasks, or model output.
 
+## Probe Audit Tool
+
+`scripts/sensorium_probe_audit.py` validates probe coverage and exercises the signal pipeline without model calls or live state mutation.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `inventory` | List implemented helpers, wired live probes, configured sources, and blind spots |
+| `smoke` | Exercise session-event, artifact, and operator probes end-to-end in temp state |
+| `audit` | Report counts by sensor/source/kind, freshness, promotion yield, and silent sources |
+
+### Usage
+
+```bash
+# Probe inventory (helpers vs wired vs blind spots)
+python scripts/sensorium_probe_audit.py inventory --json
+
+# Smoke test — exercises 3 source classes in temp state (default)
+python scripts/sensorium_probe_audit.py smoke --json
+
+# Smoke test — explicit state dir
+python scripts/sensorium_probe_audit.py smoke --json --state-dir /tmp/my_probe_state
+
+# Audit an existing store
+python scripts/sensorium_probe_audit.py audit --json --state-dir /path/to/state
+python scripts/sensorium_probe_audit.py audit --json --instance sera
+```
+
+### Interpreting results
+
+- **inventory**: `wired_live_probes` should grow as sensors are connected to live hooks. `blind_spots` lists sensors not yet implemented.
+- **smoke**: `all_promoted: true` means all three source classes successfully traverse signal → event → candidate. Each probe should have `signal_id`, `event_id`, and `candidate_id`.
+- **audit**: `promotion_yield.yield_pct` shows what fraction of signals become events. `silent_sources` lists configured sources with zero signals. `blind_spots` lists unimplemented sensors.
+
+### Programmatic API
+
+```python
+from agent_sensorium.probe_audit import probe_inventory, run_smoke_probes, audit_store
+
+inv = probe_inventory()
+smoke = run_smoke_probes(state_dir="/tmp/probe_test")
+report = audit_store(state_dir="/tmp/probe_test", instance="probe_smoke")
+```
+
+### Safety
+
+- Uses temporary state by default for smoke; never mutates the real default Sensorium unless `--state-dir` explicitly points there.
+- Never writes raw transcripts, file contents, outbound messages, platform threads, external tasks, or model output.
+- No model calls. Stdlib-only.
+
 ## Conscious Review Checklist
 
 When reviewing a dormant thread, choose exactly one action:

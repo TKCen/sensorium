@@ -140,7 +140,7 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - a live/audit command or script reports signal counts by sensor/source/kind, recent probe freshness, promotion yield, and configured-but-silent probes;
 - tests cover empty-store reporting, seeded probe signals, promotion/correlation, privacy bounds, and no-outbound/no-raw-content behavior.
 
-**Status:** Not started. This is the required next slice before Phase 8. Current default live state has zero signals/events/candidates, so the immediate goal is probe coverage and end-to-end signal validation, not advisory.
+**Status:** Implemented in the Phase 7.5 slice. `agent_sensorium/probe_audit.py` provides `probe_inventory()`, `run_smoke_probes()`, and `audit_store()` — all stdlib-only, no model calls. `scripts/sensorium_probe_audit.py` exposes `inventory`, `smoke`, and `audit` subcommands with `--json` and `--state-dir` options. Smoke exercises session-event, artifact, and operator source classes end-to-end through ingest → promotion → candidate creation, all in temporary state by default. Audit reports counts by sensor/source/kind, freshness, promotion yield, configured-but-silent sources, and blind spots. Probe inventory distinguishes implemented helpers (3), wired live probes (0), and blind spots (5: hindsight echoes, RSS/feed, file crawl, task results, active-session summaries). Tests cover empty-store reporting, seeded probes, threshold promotion/correlation, privacy/surface bounds, no raw content, no outbound records, and script stdout behavior. Remaining refinement for later phases: wire sensors into live hooks to move helpers from helper-only to wired-live status; implement blind-spot sensors.
 
 ### Phase 8 — Subconscious advisory dry-run
 
@@ -177,15 +177,15 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 7.5 next: probe coverage and live-signal validation.
+Implement Phase 8 next: subconscious advisory dry-run.
 
 Files:
 
-- Add a probe inventory/audit surface that separates available helper functions from actually wired live probes.
-- Add a temporary-state probe smoke path that exercises session-event, artifact, and explicit-operator signals end-to-end through ingest/promotion without outbound side effects.
-- Report counts by sensor/source/kind, recent freshness, promotion yield, and blind spots/configured-but-silent probes.
-- Add focused tests for empty stores, seeded probes, threshold promotion/correlation, privacy bounds, no raw content, and no outbound records.
-- Update bundled skill/docs with the pre-advisory probe validation boundary.
+- Add a bounded advisory context builder: config summary, top candidates, recent events/decisions, probe audit summary, and no raw transcripts.
+- Add advisory output schema validation for `DROP | SAVE | CREATE_CONSCIOUS_TASK`.
+- Keep model-backed advisory disabled by default; dry-run stores only local advisory receipts and performs no external side effects.
+- Add focused tests for context bounds, schema refusal paths, disabled-by-default behavior, probe-audit inclusion, and dry-run receipt/no-action semantics.
+- Update bundled skill/docs with the advisory dry-run boundary.
 
 Gate:
 
