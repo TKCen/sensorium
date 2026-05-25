@@ -109,6 +109,11 @@ class TestFeedbackSignalValidation:
         sig = _feedback_signal(feedback_scope=["thread", "candidate"])
         validate_signal(sig)
 
+    def test_feedback_scope_none_rejected(self):
+        sig = _feedback_signal(feedback_scope=None)
+        with pytest.raises(ValueError, match="feedback_scope"):
+            validate_signal(sig)
+
     def test_non_feedback_source_skips_feedback_validation(self):
         sig = {
             "sensor": "test",
@@ -221,6 +226,7 @@ class TestDispatcherSelfLoopRejection:
         )
         normal = _make_candidate(pressure=0.6, cand_id="cand_normal")
         result = select_candidate([self_loop, normal])
+        assert result is not None
         assert result["id"] == "cand_normal"
 
     def test_external_caused_by_not_self_loop(self):
@@ -392,6 +398,45 @@ class TestPluginFeedbackSchema:
         result = json.loads(raw)
         assert result["success"] is True
         assert result["data"].get("feedback_emitted") is True
+
+
+class TestFeedbackCoalescePath:
+    """Feedback metadata propagates through coalesce into existing candidate."""
+
+    def test_feedback_meta_set_on_coalesced_candidate(self, state_dir):
+        normal_sig = {
+            "sensor": "test",
+            "source": "manual",
+            "kind": "task_result",
+            "summary": "Original observation",
+            "strength_hint": 0.9,
+            "correlation_keys": ["project-alpha"],
+        }
+        handle_sensorium_ingest_signal(
+            signal=normal_sig, instance="test", state_dir=state_dir
+        )
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        candidates_before = store.read_jsonl("candidates")
+        assert len(candidates_before) == 1
+        assert "feedback_meta" not in candidates_before[0]
+
+        feedback_sig = _feedback_signal(
+            kind="task_result",
+            summary="Feedback on same topic",
+            strength_hint=0.9,
+            correlation_keys=["project-alpha"],
+            caused_by={"thread_id": "sth_abc123"},
+            outcome="delivered",
+            feedback_scope="delivery",
+        )
+        handle_sensorium_ingest_signal(
+            signal=feedback_sig, instance="test", state_dir=state_dir
+        )
+        candidates_after = store.read_jsonl("candidates")
+        assert len(candidates_after) == 1
+        meta = candidates_after[0].get("feedback_meta")
+        assert meta is not None
+        assert meta["caused_by"] == {"thread_id": "sth_abc123"}
 
 
 class TestFeedbackSignalEndToEnd:

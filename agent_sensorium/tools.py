@@ -280,6 +280,8 @@ def _coalesce_candidate_with_event(
         event.get("allowed_surfaces") or [],
     ])
     candidate["updated_at"] = now
+    if not candidate.get("feedback_meta") and incoming_candidate.get("feedback_meta"):
+        candidate["feedback_meta"] = incoming_candidate["feedback_meta"]
     candidate.setdefault("related_event_fingerprints", [])
     event_fp = event.get("fingerprint") or event_fingerprint(event)
     if event_fp not in candidate["related_event_fingerprints"]:
@@ -638,6 +640,9 @@ def handle_sensorium_thread_update(
         "new_pinned": bool(target.get("pinned")),
         "reason": reason,
     }
+    target.setdefault("decision_log", []).append(receipt)
+    store.append_jsonl("decisions", receipt)
+
     if emit_feedback and target.get("status") in {"closed", "archived"}:
         feedback_receipt = {
             "ts": now,
@@ -650,8 +655,6 @@ def handle_sensorium_thread_update(
         store.append_jsonl("decisions", feedback_receipt)
         receipt["feedback_emitted"] = True
 
-    target.setdefault("decision_log", []).append(receipt)
-    store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "threads", threads)
     return _ok(instance, receipt)
 

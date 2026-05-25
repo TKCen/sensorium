@@ -128,7 +128,7 @@ def event_to_candidate(event: dict, config: dict | None = None) -> dict:
     return candidate
 
 
-_SENSORIUM_ID_PREFIXES = ("sth_", "cand_", "ctask_", "evt_", "sig_", "dispatch")
+_SENSORIUM_ID_PREFIXES = ("sth_", "cand_", "ctask_", "evt_", "sig_", "dispatch_")
 
 
 def is_feedback_self_loop(candidate: dict) -> bool:

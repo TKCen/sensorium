@@ -87,6 +87,8 @@ def validate_signal(signal: dict) -> None:
         if fb_missing:
             raise ValueError(f"Feedback signal missing required fields: {fb_missing}")
         scope = signal.get("feedback_scope")
+        if scope is None:
+            raise ValueError("Feedback signal feedback_scope must not be None")
         if isinstance(scope, str):
             scope = [scope]
         if isinstance(scope, list):
