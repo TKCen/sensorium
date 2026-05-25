@@ -45,10 +45,17 @@ def _err(instance: str, error: str) -> str:
 
 
 def handle_sensorium_status(
-    *, instance: str = "default", state_dir: str | None = None
+    *, instance: str = "default", state_dir: str | None = None,
+    config_path: str | None = None,
 ) -> str:
+    from .config import load_instance_config
+
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
+
+    _, config_diag = load_instance_config(
+        config_path=config_path, state_dir=state_dir,
+    )
 
     signals = store.read_jsonl("signals")
     events = store.read_jsonl("events")
@@ -124,6 +131,7 @@ def handle_sensorium_status(
             }
             for t in visible_threads[:5]
         ],
+        "config": config_diag,
         "ts": utc_now_iso(),
     }
 

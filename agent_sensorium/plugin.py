@@ -76,14 +76,21 @@ def register(ctx) -> None:
         toolset=_TOOLSET,
         schema=_schema(
             "sensorium_status",
-            "Read-only snapshot of Agent Sensorium state: counts, top candidates, and visible threads.",
-            common,
+            "Read-only snapshot of Agent Sensorium state: counts, top candidates, visible threads, and instance config diagnostics.",
+            {
+                **common,
+                "config_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to instance config JSON file.",
+                },
+            },
         ),
         handler=lambda args, **kw: handle_sensorium_status(
             instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
+            config_path=args.get("config_path"),
         ),
-        description="Read-only snapshot of Agent Sensorium state.",
+        description="Read-only snapshot of Agent Sensorium state and config diagnostics.",
     )
     ctx.register_tool(
         name="sensorium_ingest_signal",

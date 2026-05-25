@@ -67,7 +67,7 @@ Hold/resume preserves `hold_reason` and `resume_trigger` fields. Every thread up
 
 | Tool | Description |
 |------|-------------|
-| `sensorium_status` | Read-only state snapshot: counts, top candidates, and visible threads |
+| `sensorium_status` | Read-only state snapshot: counts, top candidates, visible threads, and instance config diagnostics |
 | `sensorium_ingest_signal` | Ingest a signal and promote if threshold met |
 | `sensorium_ingest_event` | Ingest an already-promoted trusted event and create a candidate |
 | `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
@@ -77,6 +77,40 @@ Hold/resume preserves `hold_reason` and `resume_trigger` fields. Every thread up
 | `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
 | `sensorium_service_threads` | Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
+
+## Instance config and policy boundary
+
+The reusable `agent_sensorium` package is generic — it contains no instance-specific identity, channel IDs, or private policy. Instance-specific configuration lives in a separate config file loaded at runtime.
+
+### Config discovery order
+
+1. Explicit `config_path` argument (passed to tools/handlers)
+2. `{state_dir}/instance.config.json` (auto-discovered from instance state directory)
+3. Safe defaults: `allowed_surfaces: ["local"]`, `max_sensitivity: "private"`, no policy card
+
+### Config file format
+
+```json
+{
+  "instance_name": "sera",
+  "policy_card_ref": "docs/sera-policy-card.md",
+  "allowed_surfaces": ["local", "discord"],
+  "max_sensitivity": "private",
+  "thresholds": { "starvation_hours": 72, "expiring_window_hours": 24 },
+  "budgets": { "dispatch": { "capacity": 10, "window_seconds": 3600 } }
+}
+```
+
+### Policy rules
+
+- **Surface policy** intersects item `allowed_surfaces` with config `allowed_surfaces`. Config can only narrow scope, never broaden it.
+- **Sensitivity policy** takes the more restrictive of item sensitivity and config `max_sensitivity`. An item marked `local_only` stays `local_only` even if config allows `public_safe`.
+- **Missing config** fails safe: local-only surfaces, private sensitivity, default thresholds.
+- **Diagnostics** (`sensorium_status`) expose compact config status (source, path, policy_card_ref, instance_name, allowed_surfaces, max_sensitivity) — never raw budgets, thresholds, or private policy contents.
+
+### Sample configs
+
+See `docs/examples/sera-instance-config.json` and `docs/examples/sera-policy-card.md` for a sample instance config and policy card outside the reusable package.
 
 ## Pointer vs capsule boundary
 
