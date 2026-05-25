@@ -563,6 +563,49 @@ def handle_sensorium_thread_open(
     return _ok(instance, _compact_thread_capsule(target))
 
 
+def _thread_feedback_outcome(action: str) -> str:
+    if action == "archive":
+        return "operator_rejected"
+    return "completed"
+
+
+def _build_thread_feedback_signal(store: SensoriumStore, *, thread: dict, action: str, reason: str) -> dict:
+    origin_candidate_id = thread.get("origin_candidate_id") or ""
+    origin_candidate = None
+    if origin_candidate_id:
+        for candidate in store.read_jsonl("candidates"):
+            if candidate.get("id") == origin_candidate_id:
+                origin_candidate = candidate
+                break
+
+    caused_by = {
+        "thread_id": thread.get("id", ""),
+        "action": action,
+    }
+    if origin_candidate_id:
+        caused_by["origin_candidate_id"] = origin_candidate_id
+
+    summary_bits = [f"Thread {thread.get('id', '')} {action}"]
+    if reason:
+        summary_bits.append(reason)
+
+    return {
+        "sensor": "sensorium.thread_update",
+        "source": "feedback",
+        "kind": "task_result",
+        "summary": ": ".join(summary_bits),
+        "actor": "operator",
+        "strength_hint": 0.5,
+        "caused_by": caused_by,
+        "outcome": _thread_feedback_outcome(action),
+        "feedback_scope": "operator_evaluation",
+        "correlation_keys": (origin_candidate.get("correlation_keys") or []) if origin_candidate else [],
+        "sensitivity": thread.get("sensitivity", "private"),
+        "allowed_surfaces": thread.get("allowed_surfaces") or ["local"],
+        "source_ref": thread.get("id", ""),
+    }
+
+
 def handle_sensorium_thread_update(
     *,
     thread_id: str,
@@ -644,16 +687,29 @@ def handle_sensorium_thread_update(
     store.append_jsonl("decisions", receipt)
 
     if emit_feedback and target.get("status") in {"closed", "archived"}:
+        feedback_signal_raw = handle_sensorium_ingest_signal(
+            signal=_build_thread_feedback_signal(store, thread=target, action=action, reason=reason),
+            instance=instance,
+            state_dir=state_dir,
+        )
+        feedback_signal_result = json.loads(feedback_signal_raw)
+        if not feedback_signal_result.get("success"):
+            return _err(instance, feedback_signal_result.get("error") or "Failed to emit feedback signal.")
+        feedback_signal_id = (feedback_signal_result.get("data") or {}).get("signal_id", "")
         feedback_receipt = {
             "ts": now,
             "type": "thread.feedback_emitted",
             "thread_id": target.get("id"),
             "origin_candidate_id": target.get("origin_candidate_id"),
+            "feedback_signal_id": feedback_signal_id,
+            "outcome": _thread_feedback_outcome(action),
+            "feedback_scope": "operator_evaluation",
             "action": action,
             "reason": reason,
         }
         store.append_jsonl("decisions", feedback_receipt)
         receipt["feedback_emitted"] = True
+        receipt["feedback_signal_id"] = feedback_signal_id
 
     _rewrite_jsonl(store, "threads", threads)
     return _ok(instance, receipt)

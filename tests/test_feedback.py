@@ -114,6 +114,31 @@ class TestFeedbackSignalValidation:
         with pytest.raises(ValueError, match="feedback_scope"):
             validate_signal(sig)
 
+    def test_feedback_scope_wrong_type_rejected(self):
+        sig = _feedback_signal(feedback_scope={"scope": "thread"})
+        with pytest.raises(ValueError, match="feedback_scope"):
+            validate_signal(sig)
+
+    def test_feedback_scope_list_values_must_be_strings(self):
+        sig = _feedback_signal(feedback_scope=["thread", {"bad": "scope"}])
+        with pytest.raises(ValueError, match="feedback_scope"):
+            validate_signal(sig)
+
+    def test_caused_by_must_be_dict(self):
+        sig = _feedback_signal(caused_by="sth_abc123")
+        with pytest.raises(ValueError, match="caused_by"):
+            validate_signal(sig)
+
+    def test_caused_by_must_not_be_empty(self):
+        sig = _feedback_signal(caused_by={})
+        with pytest.raises(ValueError, match="caused_by"):
+            validate_signal(sig)
+
+    def test_outcome_must_be_string(self):
+        sig = _feedback_signal(outcome={"status": "completed"})
+        with pytest.raises(ValueError, match="outcome"):
+            validate_signal(sig)
+
     def test_non_feedback_source_skips_feedback_validation(self):
         sig = {
             "sensor": "test",
@@ -332,6 +357,34 @@ class TestThreadUpdateFeedbackEmission:
         r = feedback_receipts[0]
         assert r["thread_id"] == thread_id
         assert r["action"] == "close"
+        assert r["feedback_signal_id"].startswith("sig_")
+
+        feedback_signals = [s for s in store.read_jsonl("signals") if s.get("source") == "feedback"]
+        assert len(feedback_signals) == 1
+        signal = feedback_signals[0]
+        assert signal["id"] == r["feedback_signal_id"]
+        assert signal["caused_by"]["thread_id"] == thread_id
+        assert signal["caused_by"]["action"] == "close"
+        assert signal["outcome"] == "completed"
+        assert signal["feedback_scope"] == "operator_evaluation"
+
+    def test_archive_with_emit_feedback_marks_rejected_outcome(self, store, state_dir):
+        thread_id = self._setup_thread(store, state_dir)
+        raw = handle_sensorium_thread_update(
+            thread_id=thread_id,
+            action="archive",
+            reason="not useful",
+            emit_feedback=True,
+            instance="test",
+            state_dir=state_dir,
+        )
+        result = json.loads(raw)
+        assert result["success"] is True
+        feedback_signals = [s for s in store.read_jsonl("signals") if s.get("source") == "feedback"]
+        assert len(feedback_signals) == 1
+        assert feedback_signals[0]["caused_by"]["action"] == "archive"
+        assert feedback_signals[0]["outcome"] == "operator_rejected"
+        assert feedback_signals[0]["feedback_scope"] == "operator_evaluation"
 
     def test_hold_with_emit_feedback_no_receipt(self, store, state_dir):
         thread_id = self._setup_thread(store, state_dir)

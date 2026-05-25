@@ -39,7 +39,7 @@ Mutating dispatch is guarded by one local dispatcher lock/lease under the instan
 
 Feedback signals (`source == "feedback"`) re-enter the pipeline with three required fields:
 
-- **`caused_by`**: compact dict identifying the action/thread/candidate being evaluated.
+- **`caused_by`**: compact non-empty dict identifying the action/thread/candidate being evaluated.
 - **`outcome`**: explicit result string classified deterministically:
   - *Delivery-only* (not success): `delivered`, `sent`, `posted`, `dispatched`, `queued`.
   - *Success*: `operator_approved`, `completed`, `response_received`, `acknowledged`.
@@ -48,7 +48,7 @@ Feedback signals (`source == "feedback"`) re-enter the pipeline with three requi
 
 Feedback metadata propagates through events and candidates as `feedback_meta`. The dispatcher rejects self-loop-only candidates: feedback about sensorium's own prior actions (thread/candidate/dispatch IDs) without operator evaluation evidence cannot wake consciousness by itself. Only `feedback_scope: operator_evaluation` bypasses the self-loop filter.
 
-Thread close/update can optionally emit a local `thread.feedback_emitted` decision receipt when `emit_feedback=True` is passed. Default is silent — no feedback emission unless explicitly configured. This is local-only: no outbound messages, no external tasks.
+Thread close/update can optionally emit a local feedback signal plus a `thread.feedback_emitted` decision receipt when `emit_feedback=True` is passed. The emitted signal uses `source: feedback`, `feedback_scope: operator_evaluation`, a thread/action `caused_by` dict, and an evaluated outcome (`completed` for close/mark_reviewed, `operator_rejected` for archive). Default is silent — no feedback emission unless explicitly configured. This is local-only: no outbound messages, no external tasks.
 
 ## Thread service boundary
 

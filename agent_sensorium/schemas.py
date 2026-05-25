@@ -86,15 +86,29 @@ def validate_signal(signal: dict) -> None:
         fb_missing = FEEDBACK_REQUIRED_FIELDS - signal.keys()
         if fb_missing:
             raise ValueError(f"Feedback signal missing required fields: {fb_missing}")
+
+        caused_by = signal.get("caused_by")
+        if not isinstance(caused_by, dict) or not caused_by:
+            raise ValueError("Feedback signal caused_by must be a non-empty dict")
+
+        outcome = signal.get("outcome")
+        if not isinstance(outcome, str) or not outcome.strip():
+            raise ValueError("Feedback signal outcome must be a non-empty string")
+
         scope = signal.get("feedback_scope")
         if scope is None:
             raise ValueError("Feedback signal feedback_scope must not be None")
         if isinstance(scope, str):
             scope = [scope]
-        if isinstance(scope, list):
-            invalid = set(scope) - VALID_FEEDBACK_SCOPES
-            if invalid:
-                raise ValueError(f"Invalid feedback_scope values: {invalid}")
+        elif not isinstance(scope, list):
+            raise ValueError("Feedback signal feedback_scope must be a string or list")
+        if not scope:
+            raise ValueError("Feedback signal feedback_scope must not be empty")
+        if any(not isinstance(item, str) for item in scope):
+            raise ValueError("Feedback signal feedback_scope values must be strings")
+        invalid = set(scope) - VALID_FEEDBACK_SCOPES
+        if invalid:
+            raise ValueError(f"Invalid feedback_scope values: {invalid}")
 
 
 def validate_event(event: dict) -> None:
