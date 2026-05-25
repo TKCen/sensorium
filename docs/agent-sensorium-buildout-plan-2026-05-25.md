@@ -113,6 +113,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - Sera local config exists outside reusable code;
 - tests prove missing config defaults safely and policy cannot broaden item surface scope.
 
+**Status:** Implemented in the Phase 6 slice. `agent_sensorium/config.py` loads instance config from explicit `config_path`, `{state_dir}/instance.config.json`, or safe defaults. `sensorium_status` exposes compact diagnostics (`source`, `path`, `policy_card_ref`, `instance_name`, `allowed_surfaces`, `max_sensitivity`) without raw policy/budget dumps. Policy helpers enforce narrowing-only surface and sensitivity behavior, and tests cover missing/corrupt/non-object configs, blank surfaces, invalid thresholds, plugin `config_path` seams, and no-broadening guarantees. Sample Sera config and policy card live outside reusable core under `docs/examples/`. Remaining refinement for later phases: wire config thresholds into service passes and apply policy helpers at ingest/dispatch boundaries.
+
 ### Phase 7 — Deterministic sensors and shadow tick
 
 **Why:** Sensorium needs low-cost sensing before model-backed advisory.
@@ -159,14 +161,14 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 6 next: instance config and policy cards.
+Implement Phase 7 next: deterministic sensors and shadow tick.
 
 Files:
 
-- Add `agent_sensorium/config.py` for instance config loading/validation.
-- Modify `agent_sensorium/tools.py` and `agent_sensorium/plugin.py` to load instance config.
-- Add focused tests for config loading, missing-config defaults, and policy surface-scope narrowing.
-- Update bundled skill/docs with the config boundary.
+- Add deterministic compact sensor helpers (session-event, artifact, explicit-operator) without model calls or raw transcript dumps.
+- Add `scripts/sensorium_tick.py` to run status, compaction, dispatch dry-run, and deterministic thread service.
+- Add focused tests proving sensors emit compact signals only, tick writes local receipts/state only, and no user-facing/outbound delivery occurs.
+- Update bundled skill/docs with the deterministic sensor and silent tick boundary.
 
 Gate:
 
