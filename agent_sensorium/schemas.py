@@ -10,6 +10,21 @@ VALID_ACTORS = {"operator", "agent", "tool"}
 
 SENSITIVITY_RANK = {"local_only": 0, "private": 1, "public_safe": 2}
 
+FEEDBACK_REQUIRED_FIELDS = {"caused_by", "outcome", "feedback_scope"}
+VALID_FEEDBACK_SCOPES = {"thread", "candidate", "delivery", "operator_evaluation", "system_action"}
+
+DELIVERY_ONLY_OUTCOMES = frozenset({
+    "delivered", "sent", "posted", "dispatched", "queued",
+})
+
+SUCCESS_OUTCOMES = frozenset({
+    "operator_approved", "completed", "response_received", "acknowledged",
+})
+
+FAILURE_OUTCOMES = frozenset({
+    "operator_rejected", "failed", "no_response", "expired_no_response",
+})
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -49,6 +64,16 @@ def normalize_signal(raw: dict) -> dict:
     return sig
 
 
+def classify_feedback_outcome(outcome: str) -> str:
+    if outcome in DELIVERY_ONLY_OUTCOMES:
+        return "delivery_only"
+    if outcome in SUCCESS_OUTCOMES:
+        return "success"
+    if outcome in FAILURE_OUTCOMES:
+        return "failure"
+    return "inconclusive"
+
+
 def validate_signal(signal: dict) -> None:
     missing = SIGNAL_REQUIRED_FIELDS - signal.keys()
     if missing:
@@ -57,6 +82,17 @@ def validate_signal(signal: dict) -> None:
         raise ValueError(
             f"Invalid sensitivity: {signal['sensitivity']}. Must be one of {VALID_SENSITIVITIES}"
         )
+    if signal.get("source") == "feedback":
+        fb_missing = FEEDBACK_REQUIRED_FIELDS - signal.keys()
+        if fb_missing:
+            raise ValueError(f"Feedback signal missing required fields: {fb_missing}")
+        scope = signal.get("feedback_scope")
+        if isinstance(scope, str):
+            scope = [scope]
+        if isinstance(scope, list):
+            invalid = set(scope) - VALID_FEEDBACK_SCOPES
+            if invalid:
+                raise ValueError(f"Invalid feedback_scope values: {invalid}")
 
 
 def validate_event(event: dict) -> None:

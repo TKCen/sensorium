@@ -35,6 +35,21 @@ Signal, event, and candidate records persist deterministic fingerprints. Re-impo
 
 Mutating dispatch is guarded by one local dispatcher lock/lease under the instance state directory. An active unexpired lock returns `lock_unavailable` and creates no thread; an expired lock is recovered with a `dispatch.lock_recovered` decision receipt before dispatch continues. Dispatch state is written to `state.latest.json` with `state_version`, `last_dispatch_result`, `budgets`, and lock status. Status exposes those fields so dashboards and operators can observe the attention scheduler without owning it. Token buckets are currently enforced for mutating dispatch and visible for dispatch/pointer/conscious/advisory lanes; pointer/conscious/advisory consumption remains deferred until those services exist.
 
+## Feedback lane and loop breakers
+
+Feedback signals (`source == "feedback"`) re-enter the pipeline with three required fields:
+
+- **`caused_by`**: compact dict identifying the action/thread/candidate being evaluated.
+- **`outcome`**: explicit result string classified deterministically:
+  - *Delivery-only* (not success): `delivered`, `sent`, `posted`, `dispatched`, `queued`.
+  - *Success*: `operator_approved`, `completed`, `response_received`, `acknowledged`.
+  - *Failure*: `operator_rejected`, `failed`, `no_response`, `expired_no_response`.
+- **`feedback_scope`**: one of `thread`, `candidate`, `delivery`, `operator_evaluation`, `system_action`.
+
+Feedback metadata propagates through events and candidates as `feedback_meta`. The dispatcher rejects self-loop-only candidates: feedback about sensorium's own prior actions (thread/candidate/dispatch IDs) without operator evaluation evidence cannot wake consciousness by itself. Only `feedback_scope: operator_evaluation` bypasses the self-loop filter.
+
+Thread close/update can optionally emit a local `thread.feedback_emitted` decision receipt when `emit_feedback=True` is passed. Default is silent — no feedback emission unless explicitly configured. This is local-only: no outbound messages, no external tasks.
+
 ## Thread service boundary
 
 Threads carry lifecycle fields: `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, and `source_refs`. The `sensorium_service_threads` tool runs a deterministic service pass that:

@@ -87,6 +87,12 @@ def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:
         "allowed_surfaces": signal.get("allowed_surfaces", ["local"]),
         "expires_at": "",
     }
+    if signal.get("source") == "feedback":
+        event["feedback_meta"] = {
+            "caused_by": signal.get("caused_by"),
+            "outcome": signal.get("outcome"),
+            "feedback_scope": signal.get("feedback_scope"),
+        }
     event["fingerprint"] = event_fingerprint(event)
     return event
 
@@ -116,8 +122,28 @@ def event_to_candidate(event: dict, config: dict | None = None) -> dict:
         "updated_at": now,
         "expires_at": "",
     }
+    if event.get("feedback_meta"):
+        candidate["feedback_meta"] = event["feedback_meta"]
     candidate["fingerprint"] = candidate_fingerprint(candidate)
     return candidate
+
+
+_SENSORIUM_ID_PREFIXES = ("sth_", "cand_", "ctask_", "evt_", "sig_", "dispatch")
+
+
+def is_feedback_self_loop(candidate: dict) -> bool:
+    meta = candidate.get("feedback_meta")
+    if not meta:
+        return False
+    if meta.get("feedback_scope") == "operator_evaluation":
+        return False
+    caused_by = meta.get("caused_by") or {}
+    if not isinstance(caused_by, dict):
+        return False
+    for val in caused_by.values():
+        if isinstance(val, str) and any(val.startswith(p) for p in _SENSORIUM_ID_PREFIXES):
+            return True
+    return False
 
 
 def candidate_fingerprint(candidate: dict) -> str:

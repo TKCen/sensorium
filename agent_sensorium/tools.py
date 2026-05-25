@@ -567,6 +567,7 @@ def handle_sensorium_thread_update(
     action: str,
     reason: str = "",
     resume_trigger: str = "",
+    emit_feedback: bool = False,
     instance: str = "default",
     state_dir: str | None = None,
 ) -> str:
@@ -637,6 +638,18 @@ def handle_sensorium_thread_update(
         "new_pinned": bool(target.get("pinned")),
         "reason": reason,
     }
+    if emit_feedback and target.get("status") in {"closed", "archived"}:
+        feedback_receipt = {
+            "ts": now,
+            "type": "thread.feedback_emitted",
+            "thread_id": target.get("id"),
+            "origin_candidate_id": target.get("origin_candidate_id"),
+            "action": action,
+            "reason": reason,
+        }
+        store.append_jsonl("decisions", feedback_receipt)
+        receipt["feedback_emitted"] = True
+
     target.setdefault("decision_log", []).append(receipt)
     store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "threads", threads)

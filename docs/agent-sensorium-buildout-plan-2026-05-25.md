@@ -100,6 +100,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - dispatcher rejects self-loop-only candidates;
 - delivery is not treated as success without response/evaluation/completion.
 
+**Status:** Implemented in the Phase 5 slice. Feedback signals (`source == "feedback"`) require `caused_by`, `outcome`, and `feedback_scope` fields; validation rejects missing/invalid values. A deterministic outcome classifier distinguishes delivery-only outcomes (`delivered`, `sent`, `posted`, `dispatched`, `queued`) from evaluated outcomes (`operator_approved`, `completed`, `response_received`, `acknowledged` as success; `operator_rejected`, `failed`, `no_response`, `expired_no_response` as failure). Feedback metadata propagates through the event→candidate pipeline via `feedback_meta`. The dispatcher rejects self-loop-only candidates: feedback about sensorium's own prior actions (identified by sensorium ID prefixes in `caused_by`) is skipped unless `feedback_scope` is `operator_evaluation`. Thread close/update emits a `thread.feedback_emitted` decision receipt only when `emit_feedback=True` is explicitly passed; default is silent. Remaining refinement for later phases: feedback-driven candidate pressure decay; configurable outcome classification via instance config (Phase 6).
+
 ### Phase 6 — Instance config and policy cards
 
 **Why:** The core must stay generic while Sera can have real identity/privacy/relational policy.
@@ -157,13 +159,14 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 5 next: feedback lane and loop breakers.
+Implement Phase 6 next: instance config and policy cards.
 
 Files:
 
-- Modify `agent_sensorium/tools.py`, `agent_sensorium/schemas.py`, and store as needed.
-- Add focused tests for feedback signal validation (`caused_by`, `outcome`, `feedback_scope`), thread close/update feedback emission, and dispatcher self-loop rejection.
-- Update bundled skill/docs with the feedback lane boundary.
+- Add `agent_sensorium/config.py` for instance config loading/validation.
+- Modify `agent_sensorium/tools.py` and `agent_sensorium/plugin.py` to load instance config.
+- Add focused tests for config loading, missing-config defaults, and policy surface-scope narrowing.
+- Update bundled skill/docs with the config boundary.
 
 Gate:
 

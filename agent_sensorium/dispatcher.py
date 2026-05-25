@@ -14,6 +14,7 @@ from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from .gate import is_feedback_self_loop
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -223,7 +224,9 @@ def select_candidate(candidates: list[dict], config: dict | None = None) -> dict
     threshold = cfg.get("thresholds", {}).get("dispatch_pressure", 0.5)
     eligible = [
         c for c in candidates
-        if c.get("status") == "candidate" and c.get("pressure", 0) >= threshold
+        if c.get("status") == "candidate"
+        and c.get("pressure", 0) >= threshold
+        and not is_feedback_self_loop(c)
     ]
     if not eligible:
         return None

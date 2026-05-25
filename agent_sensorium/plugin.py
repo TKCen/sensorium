@@ -267,6 +267,10 @@ def register(ctx) -> None:
                     "type": "string",
                     "description": "Optional trigger condition to resume a held thread.",
                 },
+                "emit_feedback": {
+                    "type": "boolean",
+                    "description": "If true, emit a local feedback receipt when closing/archiving a thread.",
+                },
             },
         ),
         handler=lambda args, **kw: handle_sensorium_thread_update(
@@ -276,6 +280,7 @@ def register(ctx) -> None:
             action=args.get("action") or "",
             reason=args.get("reason") or "",
             resume_trigger=args.get("resume_trigger") or "",
+            emit_feedback=bool(args.get("emit_feedback", False)),
         ),
         description="Update a conscious thread with a decision receipt.",
     )
