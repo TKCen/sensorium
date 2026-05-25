@@ -74,6 +74,8 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 - `state.latest.json` carries state version and last dispatcher result;
 - concurrent dispatch tests cannot create duplicate threads.
 
+**Status:** Implemented in the Phase 3 slice. Mutating dispatch now uses a local dispatcher lock/lease, recovers stale locks with `dispatch.lock_recovered` receipts, writes `state.latest.json`, exposes budgets/locks/last dispatch result in status, refuses exhausted dispatch budgets, and preserves duplicate-thread prevention for repeated dispatch of the same candidate. Remaining refinement for later phases: make pointer/conscious/advisory buckets active consumers when those lanes become autonomous services.
+
 ### Phase 4 — Thread service queue
 
 **Why:** Existing threads need lifecycle service: dirty summaries, holds, resume triggers, decay, and starved/expiring visibility.
@@ -153,13 +155,13 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 3 next: dispatcher lock, leases, budgets, and `state.latest`.
+Implement Phase 4 next: thread service queue.
 
 Files:
 
-- Modify `agent_sensorium/dispatcher.py` and supporting store/tool surfaces as needed.
-- Add focused tests for local lock acquisition, stale lock recovery, budget visibility, and duplicate-thread prevention.
-- Update bundled skill/docs with the dispatcher scheduling boundary.
+- Modify `agent_sensorium/tools.py`, `agent_sensorium/dispatcher.py`, and store/supporting surfaces as needed.
+- Add focused tests for `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, starved/expiring/dirty status counts, deterministic service pass decisions, and closed-thread settlement hints.
+- Update bundled skill/docs with the thread-service boundary.
 
 Gate:
 

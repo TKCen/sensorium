@@ -31,6 +31,10 @@ Use `sensorium_ingest_signal` for low-level observations that still need determi
 
 Signal, event, and candidate records persist deterministic fingerprints. Re-importing the same signal or event is idempotent: the tool returns the existing ids and does not append duplicate JSONL records. Related promoted events with the same kind and overlapping `correlation_keys` coalesce into the existing active candidate by extending `event_ids`, raising repetition/pressure deterministically, narrowing sensitivity/surface scope, and writing a local decision receipt. This is still local-only and deterministic; no model-backed semantic clustering runs in MVP.
 
+## Dispatcher lock, budgets, and state.latest
+
+Mutating dispatch is guarded by one local dispatcher lock/lease under the instance state directory. An active unexpired lock returns `lock_unavailable` and creates no thread; an expired lock is recovered with a `dispatch.lock_recovered` decision receipt before dispatch continues. Dispatch state is written to `state.latest.json` with `state_version`, `last_dispatch_result`, `budgets`, and lock status. Status exposes those fields so dashboards and operators can observe the attention scheduler without owning it. Token buckets are currently enforced for mutating dispatch and visible for dispatch/pointer/conscious/advisory lanes; pointer/conscious/advisory consumption remains deferred until those services exist.
+
 ## Tools
 
 | Tool | Description |

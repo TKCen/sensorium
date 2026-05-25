@@ -53,6 +53,7 @@ def handle_sensorium_status(
     events = store.read_jsonl("events")
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
+    state = store.read_state()
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
     active_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
@@ -108,6 +109,16 @@ def handle_sensorium_status(
             "action": latest.get("action"),
             "reason": truncate_text(latest.get("reason", ""), 80),
         }
+
+    if state:
+        if "state_version" in state:
+            data["state_version"] = state.get("state_version")
+        if "last_dispatch_result" in state:
+            data["last_dispatch_result"] = state.get("last_dispatch_result")
+        if "budgets" in state:
+            data["budgets"] = state.get("budgets")
+        if "locks" in state:
+            data["locks"] = state.get("locks")
 
     return _ok(instance, data)
 

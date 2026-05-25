@@ -35,6 +35,7 @@ class SensoriumStore:
         self._root.mkdir(parents=True, exist_ok=True)
         (self._root / "signals").mkdir(exist_ok=True)
         (self._root / "archive").mkdir(exist_ok=True)
+        (self._root / "locks").mkdir(exist_ok=True)
 
     def _resolve(self, name: str) -> Path:
         rel = _STATE_NAMES.get(name)
