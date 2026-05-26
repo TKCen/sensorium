@@ -205,5 +205,5 @@
     );
   }
 
-  PLUGINS.registerPage("agent-sensorium", SensoriumPage);
+  PLUGINS.register("agent-sensorium", SensoriumPage);
 })();
