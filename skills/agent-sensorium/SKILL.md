@@ -15,14 +15,14 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 5. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
 6. A tiny active-session pointer can mention that an eligible thread exists when the current surface is allowed and cooldown is open. The pointer is only a doorway, not the capsule.
 
-## MVP Limitations
+## Current limitations and side-effect boundary
 
-- **Pull-based only** — no proactive messages, no DM delivery.
+- **Pull/context first** — default behavior is internal state plus active-session pointers, not proactive messages or DM delivery.
 - **Subconscious advisory is bounded and disabled by default** — it builds compact context and can validate/store advisory receipts; live model calls happen only when the cheap model lane is explicitly enabled.
-- **No platform thread creation** — threads are internal state only.
-- **No relational autonomy** — no REACH_OUT decisions.
+- **Platform thread creation is not automatic** — Sensorium threads are canonical internal state. Replyable Discord/channel/DM contexts are represented as explicit outbox requests and require conscious action plus explicit policy/adapter enablement before any live side effect.
+- **Relational autonomy is not automatic** — `REACH_OUT` can be represented as an outbox request, but direct delivery is disabled by default.
 - **No external task creation** — no Kanban/research/media tasks.
-- **No scheduled automation** — tick runs manually or via explicit invocation.
+- **No scheduled delivery automation** — tick runs manually or via explicit invocation and must not send messages.
 
 ## Trusted event imports
 
@@ -76,6 +76,12 @@ The advisory output schema accepts only:
 
 The lane is disabled by default. With no explicit advisory output, enabled runs return `model_output_required` unless `config.model_enabled=true` or `--subconscious-model` is supplied. The built-in cheap lane calls an OpenAI-compatible chat endpoint over bounded context only; default routing is MiniMax `MiniMax-M2.5` via `https://api.minimax.io/v1` using `MINIMAX_API_KEY`. Environment overrides are `SENSORIUM_SUBCONSCIOUS_MODEL_ENABLED`, `SENSORIUM_SUBCONSCIOUS_PROVIDER`, `SENSORIUM_SUBCONSCIOUS_MODEL`, `SENSORIUM_SUBCONSCIOUS_BASE_URL`, and `SENSORIUM_SUBCONSCIOUS_API_KEY_ENV`. Dry-run mode stores a local `subconscious.advisory` receipt by default when invoked outside tick `--dry-run`, but it never creates candidates, threads, outbound messages, platform threads, or external Kanban/research/media work.
 
+## Outbox and replyable-context boundary
+
+The outbox layer is the first safe bridge between internal Sensorium threads and future replyable platform contexts. It stores explicit, idempotent outbox requests in `outbox.jsonl` with `origin_thread_id`, request type, surface, delivery mode, compact target metadata, message preview, media refs, policy-derived sensitivity/surfaces, and platform refs after dispatch. Preparing an outbox request updates the originating thread with compact causal refs and writes an `outbox.prepared` or `outbox.denied` receipt.
+
+Default allowed delivery modes are only `peripheral_reference` and `context_pointer`. Direct replyable modes (`discord_channel_thread`, `discord_dm_bound_session`) fail closed unless config explicitly sets both `direct_modes_enabled: true` and includes the mode in `allowed_delivery_modes`; Discord dispatch also requires `outbox.discord.enabled: true`, `execute=True`, and an adapter. The current plugin exposes the policy/idempotency/receipt surface and a fake adapter for tests; live Discord REST/gateway consumption is a follow-up, not enabled by default.
+
 ## Tools
 
 | Tool | Description |
@@ -90,6 +96,8 @@ The lane is disabled by default. With no explicit advisory output, enabled runs 
 | `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
 | `sensorium_service_threads` | Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports |
 | `sensorium_subconscious_advisory` | Bounded advisory context/output validator; disabled by default; may create only internal conscious-task candidates when explicitly enabled |
+| `sensorium_outbox_prepare` | Prepare an idempotent internal outbox/context request for a Sensorium thread; dry-run by default; no live Discord side effect |
+| `sensorium_outbox_dispatch` | Dispatch a prepared outbox request only when `execute=True` and explicit policy/adapter gates allow it |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Instance config and policy boundary
@@ -146,7 +154,7 @@ The injected pointer context is model-facing validation scaffolding. It can incl
 ## Command
 
 ```
-/sensorium [status|threads|pointer|open|thread|dispatch|compact|help]
+/sensorium [status|threads|pointer|open|thread|outbox|dispatch|compact|help]
 ```
 
 - **status** (default) — compact overview with counts and top items
@@ -154,6 +162,7 @@ The injected pointer context is model-facing validation scaffolding. It can incl
 - **pointer [surface]** — preview the small doorway that may be injected into an active session when surface/privacy/cooldown gates allow it
 - **open [thread_id|latest] [surface]** — open a compact thread capsule if the requested surface is allowed
 - **thread <thread_id|latest> <close|hold|resume|archive|pin|unpin|mark_reviewed> [reason]** — update thread lifecycle/pin state with a receipt
+- **outbox** — list recent prepared/dispatchable outbox requests
 - **dispatch** — dry-run dispatch preview (never mutates via command)
 - **compact** — archive expired items
 - **help** — usage reference
