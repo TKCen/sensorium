@@ -159,7 +159,7 @@ Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surface
 
 ### Machine body pressure
 
-The first wired generic sensor is `machine_body_pressure`, enabled explicitly with `scripts/sensorium_tick.py --body-pressure`. It samples cheap OS counters only: `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, disk/inode pressure, and swap pressure. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
+The first wired generic sensor is `machine_body_pressure`, enabled explicitly with `scripts/sensorium_tick.py --body-pressure`. It samples cheap OS counters only: `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, disk/inode pressure, and swap pressure. In WSL, default disk sampling includes `/` plus mounted Windows drive roots such as `/mnt/c`, so it sees both ext4/VHDX-internal fullness and host-drive free-space pressure around the VHDX. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
 
 Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json` and emits no signal for healthy samples. It emits compact signals only for deterministic transitions such as `healthy_to_degraded`, `healthy_to_critical`, `degraded_to_recovered`, or rate-limited `sustained_degraded`. Runtime sensing uses present-tense samples plus short-window debounce only; replay helpers are for tests/audits and are not runtime sensing.
 

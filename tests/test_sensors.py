@@ -15,6 +15,7 @@ from agent_sensorium.sensors import (
     operator_signal,
     replay_machine_body_pressure,
     session_event_signal,
+    wsl_disk_paths,
 )
 
 
@@ -274,6 +275,19 @@ class TestMachineBodyPressure:
         assert sample["psi_cpu_some_avg10"] == 1.0
         assert "processes" not in sample
         assert "cmdline" not in sample
+
+    def test_default_disk_paths_include_wsl_root_and_windows_mounts(self, tmp_path):
+        mnt = tmp_path / "mnt"
+        (mnt / "c").mkdir(parents=True)
+        (mnt / "d").mkdir()
+        (mnt / "not-a-drive").mkdir()
+
+        paths = wsl_disk_paths(mount_root=str(mnt))
+
+        assert paths[0] == "/"
+        assert str(mnt / "c") in paths
+        assert str(mnt / "d") in paths
+        assert str(mnt / "not-a-drive") not in paths
 
     def test_body_pressure_signal_validates_and_ingests(self):
         from agent_sensorium.schemas import validate_signal

@@ -210,6 +210,27 @@ def _parse_psi(text: str, prefix: str) -> dict:
     return result
 
 
+def wsl_disk_paths(*, mount_root: str = "/mnt") -> list[str]:
+    """Return cheap disk paths for WSL root plus mounted Windows drives.
+
+    WSL's ext4 filesystem commonly lives inside a VHDX on the Windows C: drive.
+    Sampling only `/` sees ext4 fullness, but not host-drive pressure around the
+    VHDX. Mounted drive roots (`/mnt/c`, `/mnt/d`, ...) are cheap statvfs targets
+    and expose Windows-side free-space pressure without native Windows probes.
+    """
+    paths = ["/"]
+    root = Path(mount_root)
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return paths
+    for child in children:
+        name = child.name.lower()
+        if len(name) == 1 and "a" <= name <= "z" and child.is_dir():
+            paths.append(str(child))
+    return paths
+
+
 def _disk_pressure(paths: list[str]) -> dict:
     worst_used: float | None = None
     worst_inode_used: float | None = None
@@ -248,7 +269,7 @@ def machine_body_pressure_sample(
     sample.update(_parse_meminfo(_read_text(root / "meminfo")))
     for family in ("cpu", "memory", "io"):
         sample.update(_parse_psi(_read_text(root / "pressure" / family), family))
-    sample.update(_disk_pressure(disk_paths or ["/"]))
+    sample.update(_disk_pressure(disk_paths or wsl_disk_paths()))
     return sample
 
 
