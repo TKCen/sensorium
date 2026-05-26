@@ -42,10 +42,10 @@ DEFAULT_ADVISORY_CONFIG: dict[str, Any] = {
     "summary_chars": 180,
     "default_pressure": 0.66,
     "model_enabled": False,
-    "model_provider": "openrouter",
-    "model": "deepseek/deepseek-v4-flash",
-    "model_base_url": "https://openrouter.ai/api/v1",
-    "model_api_key_env": "OPENROUTER_API_KEY",
+    "model_provider": "minimax",
+    "model": "MiniMax-M2.5",
+    "model_base_url": "https://api.minimax.io/v1",
+    "model_api_key_env": "MINIMAX_API_KEY",
     "model_api_key": None,
     "model_timeout_seconds": 20,
     "model_max_tokens": 1200,
@@ -247,6 +247,7 @@ def _extract_json_object(text: str) -> dict:
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:

@@ -9,6 +9,7 @@ from agent_sensorium.store import SensoriumStore
 from agent_sensorium.subconscious import (
     build_advisory_context,
     generate_advisory_output,
+    _extract_json_object,
     run_subconscious_advisory,
     validate_advisory_output,
 )
@@ -191,9 +192,9 @@ def test_generate_advisory_output_uses_cheap_openai_compatible_model():
         {"recent_events": [_event(1)], "top_candidates": [], "recent_decisions": []},
         config={
             "model_enabled": True,
-            "model_provider": "openrouter",
-            "model": "deepseek/deepseek-v4-flash",
-            "model_base_url": "https://openrouter.ai/api/v1",
+            "model_provider": "minimax",
+            "model": "MiniMax-M2.5",
+            "model_base_url": "https://api.minimax.io/v1",
             "model_api_key": "test-key",
             "model_timeout_seconds": 7,
         },
@@ -201,11 +202,26 @@ def test_generate_advisory_output_uses_cheap_openai_compatible_model():
     )
 
     assert output["action"] == "SAVE"
-    assert requests[0]["url"] == "https://openrouter.ai/api/v1/chat/completions"
-    assert requests[0]["payload"]["model"] == "deepseek/deepseek-v4-flash"
+    assert requests[0]["url"] == "https://api.minimax.io/v1/chat/completions"
+    assert requests[0]["payload"]["model"] == "MiniMax-M2.5"
     assert requests[0]["payload"]["response_format"] == {"type": "json_object"}
     assert requests[0]["headers"]["Authorization"] == "Bearer test-key"
     assert requests[0]["timeout"] == 7
+
+
+def test_minimax_think_wrapper_is_stripped_before_json_parse():
+    content = """<think>MiniMax may include internal reasoning with {\"action\":\"DROP\",\"rationale\":\"wrong-place\"}.</think>
+
+{"action":"SAVE","rationale":"final advisory","event_ids":["evt_1"],"candidate_ids":[]}"""
+
+    parsed = _extract_json_object(content)
+
+    assert parsed == {
+        "action": "SAVE",
+        "rationale": "final advisory",
+        "event_ids": ["evt_1"],
+        "candidate_ids": [],
+    }
 
 
 def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
