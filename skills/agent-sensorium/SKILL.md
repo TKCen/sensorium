@@ -154,20 +154,30 @@ Compact sensor helpers in `agent_sensorium.sensors` emit signal dicts suitable f
 | `artifact_signal` | `artifact` | File metadata: path/size/hash/ref, no content |
 | `operator_signal` | `manual` | Explicit operator note/correction |
 | `machine_body_pressure_sample` + `classify_machine_body_pressure` | `machine` | Cheap body-pressure samples and transition-only signals |
+| `machine_network_pressure_sample` + `classify_machine_network_pressure` | `machine` | Interface error/drop and TCP-state pressure counts, no endpoints |
+| `machine_process_pressure_sample` + `classify_machine_process_pressure` | `machine` | Process-state counts for zombies/D-state, no cmdlines |
+| `hindsight_pressure_sample` + `classify_hindsight_pressure` | `memory` | Hindsight API/operation queue pressure counts only |
+| `kanban_pressure_sample` + `classify_kanban_pressure` | `kanban` | Kanban board aggregate pressure counts only |
 
 Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surfaces to `["local"]`; body-pressure signals are `local_only` and global-scoped because machine pressure affects all local agents.
 
-### Machine body pressure
+### Pressure sensors
 
-The first wired generic sensor is `machine_body_pressure`, enabled explicitly with `scripts/sensorium_tick.py --body-pressure`. It samples cheap OS counters only: `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, disk/inode pressure, and swap pressure. In WSL, default disk sampling includes `/` plus mounted Windows drive roots such as `/mnt/c`, so it sees both ext4/VHDX-internal fullness and host-drive free-space pressure around the VHDX. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
+The wired generic sensors are explicit tick options and can also be run together with `scripts/sensorium_tick.py --all-sensors`:
 
-Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json` and emits no signal for healthy samples. It emits compact signals only for deterministic transitions such as `healthy_to_degraded`, `healthy_to_critical`, `degraded_to_recovered`, or rate-limited `sustained_degraded`. Runtime sensing uses present-tense samples plus short-window debounce only; replay helpers are for tests/audits and are not runtime sensing.
+- `--body-pressure`: samples `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, swap, disk, and inode pressure. In WSL, default disk sampling includes `/` plus mounted Windows drive roots such as `/mnt/c`, so it sees both ext4/VHDX-internal fullness and host-drive free-space pressure around the VHDX. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
+- `--network-pressure`: samples `/proc/net/dev`, `/proc/net/tcp`, and `/proc/net/tcp6`; it records interface names, aggregate error/drop counters, and TCP state counts only. It does not store packet data, local/remote addresses, ports, DNS names, or connection tuples.
+- `--process-pressure`: samples `/proc/[pid]/stat` state letters only, reporting aggregate process count, zombie count, and uninterruptible-sleep count. It does not store PIDs, command lines, env vars, cwd, executable paths, or raw process lists.
+- `--hindsight-pressure`: samples the local Hindsight API for health and operation queue counts only (`pending`, `processing`, `failed`). It does not call Hindsight reflect/recall/retain and does not read memory text.
+- `--kanban-pressure`: opens Kanban SQLite boards read-only and reports aggregate task/status/stale-running/failed/blocked counts only. It does not read task title, body, comments, result, errors, branch names, or session IDs.
+
+Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json` and emits no signal for healthy samples. It emits compact signals only for deterministic transitions such as `healthy_to_degraded`, `healthy_to_critical`, `degraded_to_recovered`, or rate-limited `sustained_degraded`. Runtime sensing uses present-tense samples plus short-window debounce only; replay helpers are for tests/audits and are not runtime sensing. The other pressure sensors keep tiny `{name}_state.json` transition state and emit only when the observed pressure level changes.
 
 ## Shadow Tick
 
 `scripts/sensorium_tick.py` runs deterministic lifecycle operations without model calls or outbound delivery:
 
-1. **Optional body pressure** — when `--body-pressure` is passed, sample machine pressure and ingest only transition signals
+1. **Optional pressure sensors** — `--body-pressure`, `--network-pressure`, `--process-pressure`, `--hindsight-pressure`, `--kanban-pressure`, or `--all-sensors`; sample present-tense counters and ingest only transition signals.
 2. **Compact** — archive expired candidates/threads
 3. **Service** — TTL archival, starvation/dirty/expiring reports
 4. **Dispatch preview** — dry-run dispatch (never creates threads)

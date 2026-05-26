@@ -14,7 +14,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_sensorium.schemas import utc_now_iso
-from agent_sensorium.sensors import classify_machine_body_pressure, machine_body_pressure_sample
+from agent_sensorium.sensors import (
+    classify_hindsight_pressure,
+    classify_kanban_pressure,
+    classify_machine_body_pressure,
+    classify_machine_network_pressure,
+    classify_machine_process_pressure,
+    hindsight_pressure_sample,
+    kanban_pressure_sample,
+    machine_body_pressure_sample,
+    machine_network_pressure_sample,
+    machine_process_pressure_sample,
+)
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.tools import (
     handle_sensorium_compact,
@@ -25,11 +36,15 @@ from agent_sensorium.tools import (
 )
 
 
+def _sensor_state_path(store: SensoriumStore, name: str) -> Path:
+    return store.root / f"{name}_state.json"
+
+
 def _body_state_path(store: SensoriumStore) -> Path:
-    return store.root / "body_pressure_state.json"
+    return _sensor_state_path(store, "body_pressure")
 
 
-def _read_body_state(path: Path) -> dict:
+def _read_sensor_state(path: Path) -> dict:
     try:
         if path.exists():
             return json.loads(path.read_text(errors="ignore"))
@@ -38,9 +53,45 @@ def _read_body_state(path: Path) -> dict:
     return {}
 
 
-def _write_body_state(path: Path, state: dict) -> None:
+def _write_sensor_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, separators=(",", ":")))
+
+
+_read_body_state = _read_sensor_state
+_write_body_state = _write_sensor_state
+
+
+def _run_transition_sensor(
+    *,
+    name: str,
+    store: SensoriumStore,
+    dry_run: bool,
+    kw: dict,
+    sample_fn,
+    classify_fn,
+) -> tuple[dict, str | None]:
+    path = _sensor_state_path(store, name)
+    state = _read_sensor_state(path)
+    sample = sample_fn()
+    signal, next_state = classify_fn(sample, state=state)
+    step = {
+        "sampled": True,
+        "emitted": signal is not None,
+        "level": next_state.get("level", "healthy"),
+    }
+    if signal is not None:
+        step["transition"] = signal.get("transition")
+        if not dry_run:
+            raw = json.loads(handle_sensorium_ingest_signal(signal=signal, **kw))
+            if raw.get("success"):
+                step["ingest"] = raw["data"]
+            else:
+                return step, f"{name}_ingest: {raw.get('error', 'unknown')}"
+    if not dry_run:
+        store.ensure_dirs()
+        _write_sensor_state(path, next_state)
+    return step, None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         "--body-pressure", action="store_true",
         help="Sample machine body pressure and ingest only transition signals",
     )
+    parser.add_argument("--network-pressure", action="store_true", help="Sample network pressure transition signals")
+    parser.add_argument("--process-pressure", action="store_true", help="Sample process/zombie pressure transition signals")
+    parser.add_argument("--hindsight-pressure", action="store_true", help="Sample Hindsight queue/API pressure transition signals")
+    parser.add_argument("--kanban-pressure", action="store_true", help="Sample Kanban board pressure transition signals")
+    parser.add_argument("--all-sensors", action="store_true", help="Run all currently wired deterministic sensors")
     args = parser.parse_args(argv)
 
     kw: dict = {"instance": args.instance, "state_dir": args.state_dir}
@@ -67,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     errors: list[str] = []
 
     try:
-        if args.body_pressure:
+        if args.body_pressure or args.all_sensors:
             store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
             body_path = _body_state_path(store)
             body_state = _read_body_state(body_path)
@@ -91,6 +147,29 @@ def main(argv: list[str] | None = None) -> int:
                 store.ensure_dirs()
                 _write_body_state(body_path, next_state)
             steps["body_pressure"] = body_step
+
+        transition_specs = [
+            ("network_pressure", args.network_pressure, machine_network_pressure_sample, classify_machine_network_pressure),
+            ("process_pressure", args.process_pressure, machine_process_pressure_sample, classify_machine_process_pressure),
+            ("hindsight_pressure", args.hindsight_pressure, hindsight_pressure_sample, classify_hindsight_pressure),
+            ("kanban_pressure", args.kanban_pressure, kanban_pressure_sample, classify_kanban_pressure),
+        ]
+        if any(enabled or args.all_sensors for _, enabled, _, _ in transition_specs):
+            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+            for name, enabled, sample_fn, classify_fn in transition_specs:
+                if not (enabled or args.all_sensors):
+                    continue
+                step, err = _run_transition_sensor(
+                    name=name,
+                    store=store,
+                    dry_run=args.dry_run,
+                    kw=kw,
+                    sample_fn=sample_fn,
+                    classify_fn=classify_fn,
+                )
+                steps[name] = step
+                if err:
+                    errors.append(err)
 
         if not args.dry_run:
             raw = json.loads(handle_sensorium_compact(**kw))

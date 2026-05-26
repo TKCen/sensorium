@@ -32,9 +32,15 @@ class TestProbeInventory:
         assert "operator_signal" in names
         assert "machine_body_pressure_sample" in names
 
-    def test_body_pressure_is_only_wired_live_probe(self):
+    def test_current_wired_live_probes(self):
         inv = probe_inventory()
-        assert inv["wired_live_probes"] == ["sensorium.machine_body_pressure"]
+        assert set(inv["wired_live_probes"]) == {
+            "sensorium.machine_body_pressure",
+            "sensorium.machine_network_pressure",
+            "sensorium.machine_process_pressure",
+            "sensorium.hindsight_pressure",
+            "sensorium.kanban_pressure",
+        }
 
     def test_helpers_marked_with_wiring_status(self):
         inv = probe_inventory()
@@ -45,7 +51,6 @@ class TestProbeInventory:
     def test_blind_spots_listed(self):
         inv = probe_inventory()
         names = [b["name"] for b in inv["blind_spots"]]
-        assert "hindsight_echoes" in names
         assert "rss_feed_items" in names
         assert "file_crawl" in names
         assert "task_results" in names
@@ -81,7 +86,7 @@ class TestEmptyStoreAudit:
     def test_lists_blind_spots(self, state_dir):
         report = audit_store(state_dir=state_dir, instance="test")
         assert len(report["blind_spots"]) > 0
-        assert "hindsight_echoes" in report["blind_spots"]
+        assert "rss_feed_items" in report["blind_spots"]
 
     def test_audit_does_not_create_missing_store_dirs(self, tmp_path):
         missing = tmp_path / "missing_sensorium_state"

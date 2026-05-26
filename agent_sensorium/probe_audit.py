@@ -8,7 +8,16 @@ state without mutating the real default Sensorium.
 import json
 
 from .schemas import VALID_SOURCES
-from .sensors import artifact_signal, machine_body_pressure_sample, operator_signal, session_event_signal
+from .sensors import (
+    artifact_signal,
+    hindsight_pressure_sample,
+    kanban_pressure_sample,
+    machine_body_pressure_sample,
+    machine_network_pressure_sample,
+    machine_process_pressure_sample,
+    operator_signal,
+    session_event_signal,
+)
 from .store import SensoriumStore
 from .tools import handle_sensorium_ingest_signal
 
@@ -17,10 +26,13 @@ KNOWN_HELPERS = {
     "artifact_signal": {"source": "artifact", "sensor": "sensorium.artifact", "wired_live": False},
     "operator_signal": {"source": "manual", "sensor": "sensorium.explicit_operator", "wired_live": False},
     machine_body_pressure_sample.__name__: {"source": "machine", "sensor": "sensorium.machine_body_pressure", "wired_live": True},
+    machine_network_pressure_sample.__name__: {"source": "machine", "sensor": "sensorium.machine_network_pressure", "wired_live": True},
+    machine_process_pressure_sample.__name__: {"source": "machine", "sensor": "sensorium.machine_process_pressure", "wired_live": True},
+    hindsight_pressure_sample.__name__: {"source": "memory", "sensor": "sensorium.hindsight_pressure", "wired_live": True},
+    kanban_pressure_sample.__name__: {"source": "kanban", "sensor": "sensorium.kanban_pressure", "wired_live": True},
 }
 
 BLIND_SPOTS = [
-    {"name": "hindsight_echoes", "description": "Hindsight memory echoes not yet wired as signals"},
     {"name": "rss_feed_items", "description": "RSS/feed item sensor not implemented"},
     {"name": "file_crawl", "description": "File system crawl sensor not implemented"},
     {"name": "task_results", "description": "External task result sensor not implemented"},

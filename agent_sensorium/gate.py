@@ -23,6 +23,10 @@ DEFAULT_CONFIG: dict = {
         "unresolved_question",
         "task_result",
         "body_pressure",
+        "network_pressure",
+        "process_pressure",
+        "hindsight_pressure",
+        "kanban_pressure",
     ],
 }
 

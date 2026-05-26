@@ -212,6 +212,36 @@ class TestTickBodyPressure:
         assert not (Path(state_dir) / "body_pressure_state.json").exists()
 
 
+class TestTickAdditionalPressureSensors:
+    """Optional non-body sensors are explicit, local-only, and dry-run safe."""
+
+    def test_all_sensors_flag_ingests_network_process_hindsight_and_kanban(self, state_dir, monkeypatch):
+        monkeypatch.setattr(sensorium_tick, "machine_body_pressure_sample", lambda **_: {"mem_available_pct": 80.0, "load_per_cpu": 0.1, "swap_used_pct": 0.0})
+        monkeypatch.setattr(sensorium_tick, "machine_network_pressure_sample", lambda **_: {"interfaces": ["eth0"], "non_loopback_interfaces": 1, "rx_errors": 0, "tx_errors": 0, "rx_drops": 0, "tx_drops": 0, "tcp_states": {"CLOSE_WAIT": 25}})
+        monkeypatch.setattr(sensorium_tick, "machine_process_pressure_sample", lambda **_: {"process_count": 10, "zombie_count": 2, "uninterruptible_count": 0})
+        monkeypatch.setattr(sensorium_tick, "hindsight_pressure_sample", lambda **_: {"api_available": True, "pending_total": 250, "processing_total": 0, "failed_total": 0})
+        monkeypatch.setattr(sensorium_tick, "kanban_pressure_sample", lambda **_: {"board_count": 1, "status_counts": {"running": 1}, "failed_tasks": 0, "blocked_tasks": 0, "stale_running_tasks": 1})
+
+        code = sensorium_tick.main(["--instance", "test", "--state-dir", state_dir, "--all-sensors"])
+
+        assert code == 0
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        sensors = {sig["sensor"] for sig in store.read_jsonl("signals")}
+        assert "sensorium.machine_network_pressure" in sensors
+        assert "sensorium.machine_process_pressure" in sensors
+        assert "sensorium.hindsight_pressure" in sensors
+        assert "sensorium.kanban_pressure" in sensors
+
+    def test_additional_sensors_dry_run_does_not_persist_state_or_signal(self, state_dir, monkeypatch):
+        monkeypatch.setattr(sensorium_tick, "machine_network_pressure_sample", lambda **_: {"interfaces": ["eth0"], "non_loopback_interfaces": 1, "rx_errors": 0, "tx_errors": 0, "rx_drops": 0, "tx_drops": 0, "tcp_states": {"CLOSE_WAIT": 25}})
+        code = sensorium_tick.main(["--instance", "test", "--state-dir", state_dir, "--network-pressure", "--dry-run"])
+
+        assert code == 0
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        assert store.read_jsonl("signals") == []
+        assert not (Path(state_dir) / "network_pressure_state.json").exists()
+
+
 class TestTickNoOutbound:
     """Tick never creates outbound or user-facing records."""
 

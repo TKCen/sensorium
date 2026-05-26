@@ -6,8 +6,14 @@ file contents, full transcripts, or unbounded data.
 """
 
 import hashlib
+import json
 import os
 import re
+import sqlite3
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from .schemas import VALID_SENSITIVITIES, truncate_text
@@ -495,6 +501,326 @@ def replay_machine_body_pressure(samples: list[dict], *, config: dict | None = N
         if sig is not None:
             signals.append(sig)
     return signals
+
+
+def _transition_pressure_signal(
+    *,
+    sensor: str,
+    source: str,
+    kind: str,
+    level: str,
+    previous_level: str,
+    metric_family: str,
+    reason: str,
+    values: dict,
+    correlation_key: str,
+) -> dict:
+    transition = f"{previous_level}_to_{level}" if level != "healthy" else f"{previous_level}_to_recovered"
+    summary = f"{kind.replace('_', ' ')} {transition}"
+    if reason:
+        summary += f": {reason}"
+    strength = 0.95 if level == "critical" else 0.8
+    if level == "healthy":
+        strength = 0.72
+    return {
+        "sensor": sensor,
+        "source": source,
+        "kind": kind,
+        "summary": truncate_text(summary, MAX_SUMMARY_CHARS),
+        "actor": "tool",
+        "strength_hint": strength,
+        "sensitivity": "local_only",
+        "allowed_surfaces": ["local"],
+        "correlation_keys": [correlation_key, f"{correlation_key}:{metric_family}"],
+        "scope": "global",
+        "metric_family": metric_family,
+        "pressure_level": level,
+        "previous_level": previous_level,
+        "transition": transition,
+        "values": values,
+    }
+
+
+def _transition_classifier(
+    sample: dict,
+    *,
+    state: dict | None,
+    observed_level: str,
+    metric_family: str,
+    reason: str,
+    values: dict,
+    sensor: str,
+    source: str,
+    kind: str,
+    correlation_key: str,
+) -> tuple[dict | None, dict]:
+    st = dict(state or {})
+    previous = st.get("level", "healthy")
+    st["level"] = observed_level
+    st["last_sample"] = dict(values)
+    signal = None
+    if observed_level != previous:
+        signal = _transition_pressure_signal(
+            sensor=sensor,
+            source=source,
+            kind=kind,
+            level=observed_level,
+            previous_level=previous,
+            metric_family=metric_family,
+            reason=reason,
+            values=values,
+            correlation_key=correlation_key,
+        )
+    return signal, st
+
+
+_TCP_STATE_NAMES = {
+    "01": "ESTABLISHED",
+    "02": "SYN_SENT",
+    "03": "SYN_RECV",
+    "04": "FIN_WAIT1",
+    "05": "FIN_WAIT2",
+    "06": "TIME_WAIT",
+    "07": "CLOSE",
+    "08": "CLOSE_WAIT",
+    "09": "LAST_ACK",
+    "0A": "LISTEN",
+    "0B": "CLOSING",
+}
+
+
+def _parse_tcp_state_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        state = _TCP_STATE_NAMES.get(parts[3], parts[3])
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def machine_network_pressure_sample(*, proc_root: str = "/proc") -> dict:
+    """Collect network counters without packet contents or endpoint addresses."""
+    root = Path(proc_root)
+    interfaces: list[str] = []
+    rx_errors = tx_errors = rx_drops = tx_drops = 0
+    for line in _read_text(root / "net" / "dev").splitlines()[2:]:
+        if ":" not in line:
+            continue
+        iface, rest = line.split(":", 1)
+        name = iface.strip()
+        values = rest.split()
+        if len(values) < 12:
+            continue
+        interfaces.append(name)
+        try:
+            rx_errors += int(values[2]); rx_drops += int(values[3])
+            tx_errors += int(values[10]); tx_drops += int(values[11])
+        except ValueError:
+            continue
+    tcp_states: dict[str, int] = {}
+    for rel in ("tcp", "tcp6"):
+        for state, count in _parse_tcp_state_counts(_read_text(root / "net" / rel)).items():
+            tcp_states[state] = tcp_states.get(state, 0) + count
+    non_loopback = [i for i in interfaces if i != "lo" and not i.startswith("loopback")]
+    return {
+        "interfaces": sorted(interfaces),
+        "non_loopback_interfaces": len(non_loopback),
+        "rx_errors": rx_errors,
+        "tx_errors": tx_errors,
+        "rx_drops": rx_drops,
+        "tx_drops": tx_drops,
+        "tcp_states": tcp_states,
+    }
+
+
+def classify_machine_network_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
+    cfg = {"close_wait_degraded": 20, "syn_degraded": 20, "error_delta_degraded": 1}
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
+    st = dict(state or {})
+    errors = int(sample.get("rx_errors", 0) or 0) + int(sample.get("tx_errors", 0) or 0)
+    drops = int(sample.get("rx_drops", 0) or 0) + int(sample.get("tx_drops", 0) or 0)
+    tcp = sample.get("tcp_states", {}) if isinstance(sample.get("tcp_states"), dict) else {}
+    syn = int(tcp.get("SYN_SENT", 0) or 0) + int(tcp.get("SYN_RECV", 0) or 0)
+    close_wait = int(tcp.get("CLOSE_WAIT", 0) or 0)
+    level = "healthy"; family = "network"; reason = ""
+    if int(sample.get("non_loopback_interfaces", 0) or 0) == 0:
+        level = "critical"; family = "interface"; reason = "no non-loopback interfaces"
+    elif close_wait >= cfg["close_wait_degraded"]:
+        level = "degraded"; family = "tcp"; reason = f"CLOSE_WAIT={close_wait}"
+    elif syn >= cfg["syn_degraded"]:
+        level = "degraded"; family = "tcp"; reason = f"SYN backlog={syn}"
+    elif "last_error_total" in st and (errors - int(st.get("last_error_total", 0))) >= cfg["error_delta_degraded"]:
+        level = "degraded"; family = "errors"; reason = f"network errors increased to {errors}"
+    elif "last_drop_total" in st and (drops - int(st.get("last_drop_total", 0))) >= cfg["error_delta_degraded"]:
+        level = "degraded"; family = "drops"; reason = f"network drops increased to {drops}"
+    values = {
+        "interface_count": len(sample.get("interfaces", []) or []),
+        "non_loopback_interfaces": int(sample.get("non_loopback_interfaces", 0) or 0),
+        "error_total": errors,
+        "drop_total": drops,
+        "tcp_close_wait": close_wait,
+        "tcp_syn": syn,
+    }
+    sig, next_state = _transition_classifier(sample, state=st, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.machine_network_pressure", source="machine", kind="network_pressure", correlation_key="machine-network-pressure")
+    next_state["last_error_total"] = errors
+    next_state["last_drop_total"] = drops
+    return sig, next_state
+
+
+def machine_process_pressure_sample(*, proc_root: str = "/proc") -> dict:
+    """Count process states from /proc/[pid]/stat without command lines."""
+    root = Path(proc_root)
+    counts: dict[str, int] = {}
+    total = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.name.isdigit():
+            continue
+        text = _read_text(child / "stat")
+        if not text:
+            continue
+        try:
+            after = text.rsplit(")", 1)[1].strip().split()
+            state = after[0]
+        except (IndexError, ValueError):
+            continue
+        counts[state] = counts.get(state, 0) + 1
+        total += 1
+    return {
+        "process_count": total,
+        "zombie_count": counts.get("Z", 0),
+        "uninterruptible_count": counts.get("D", 0),
+        "state_counts": counts,
+    }
+
+
+def classify_machine_process_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
+    cfg = {"zombie_degraded": 1, "zombie_critical": 10, "d_degraded": 1, "d_critical": 5}
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
+    zombies = int(sample.get("zombie_count", 0) or 0)
+    d_count = int(sample.get("uninterruptible_count", 0) or 0)
+    level = "healthy"; family = "process"; reason = ""
+    if zombies >= cfg["zombie_critical"]:
+        level = "critical"; family = "zombie"; reason = f"zombies={zombies}"
+    elif d_count >= cfg["d_critical"]:
+        level = "critical"; family = "uninterruptible"; reason = f"D-state={d_count}"
+    elif zombies >= cfg["zombie_degraded"]:
+        level = "degraded"; family = "zombie"; reason = f"zombies={zombies}"
+    elif d_count >= cfg["d_degraded"]:
+        level = "degraded"; family = "uninterruptible"; reason = f"D-state={d_count}"
+    values = {"process_count": int(sample.get("process_count", 0) or 0), "zombie_count": zombies, "uninterruptible_count": d_count}
+    return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.machine_process_pressure", source="machine", kind="process_pressure", correlation_key="machine-process-pressure")
+
+
+def _http_json(url: str, *, timeout_seconds: float) -> dict | list:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - localhost/admin API by caller config
+        return json.loads(resp.read(200_000).decode("utf-8", errors="ignore") or "{}")
+
+
+def hindsight_pressure_sample(*, base_url: str = "http://localhost:8888", bank_id: str = "hermes", timeout_seconds: float = 1.0) -> dict:
+    """Sample Hindsight operation pressure via local API counts only."""
+    base = base_url.rstrip("/")
+    try:
+        _http_json(f"{base}/health", timeout_seconds=timeout_seconds)
+        totals = {"pending_total": 0, "processing_total": 0, "failed_total": 0}
+        for status, key in (("pending", "pending_total"), ("processing", "processing_total"), ("failed", "failed_total")):
+            url = f"{base}/v1/default/banks/{urllib.parse.quote(bank_id)}/operations?status={status}&limit=1"
+            data = _http_json(url, timeout_seconds=timeout_seconds)
+            if isinstance(data, dict):
+                totals[key] = int(data.get("total") or data.get("total_count") or len(data.get("operations", []) or data.get("items", []) or []))
+        return {"api_available": True, **totals}
+    except Exception as exc:
+        return {"api_available": False, "error": truncate_text(type(exc).__name__, 80), "pending_total": 0, "processing_total": 0, "failed_total": 0}
+
+
+def classify_hindsight_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
+    cfg = {"pending_degraded": 50, "pending_critical": 200, "failed_degraded": 5, "processing_critical": 20}
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
+    pending = int(sample.get("pending_total", 0) or 0); processing = int(sample.get("processing_total", 0) or 0); failed = int(sample.get("failed_total", 0) or 0)
+    level = "healthy"; family = "memory_queue"; reason = ""
+    if not sample.get("api_available", False):
+        level = "degraded"; family = "api"; reason = "Hindsight API unavailable"
+    elif pending >= cfg["pending_critical"]:
+        level = "critical"; family = "pending"; reason = f"pending={pending}"
+    elif processing >= cfg["processing_critical"]:
+        level = "critical"; family = "processing"; reason = f"processing={processing}"
+    elif pending >= cfg["pending_degraded"]:
+        level = "degraded"; family = "pending"; reason = f"pending={pending}"
+    elif failed >= cfg["failed_degraded"]:
+        level = "degraded"; family = "failed"; reason = f"failed={failed}"
+    values = {"api_available": bool(sample.get("api_available", False)), "pending_total": pending, "processing_total": processing, "failed_total": failed}
+    return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.hindsight_pressure", source="memory", kind="hindsight_pressure", correlation_key="hindsight-pressure")
+
+
+def _default_kanban_paths() -> list[str]:
+    root = Path.home() / ".hermes" / "kanban" / "boards"
+    paths: list[str] = []
+    try:
+        for p in root.glob("*/kanban.db"):
+            if "_archived" not in p.parts:
+                paths.append(str(p))
+    except OSError:
+        pass
+    legacy = Path.home() / ".hermes" / "kanban.db"
+    if legacy.exists():
+        paths.append(str(legacy))
+    return sorted(set(paths))
+
+
+def kanban_pressure_sample(*, board_paths: list[str] | None = None, now_epoch: int | None = None, stale_running_seconds: int = 3600) -> dict:
+    """Read Kanban board counts only; never task titles/bodies/comments."""
+    now = int(now_epoch if now_epoch is not None else time.time())
+    status_counts: dict[str, int] = {}
+    failed = blocked = stale = total = boards = 0
+    for raw in board_paths if board_paths is not None else _default_kanban_paths():
+        try:
+            con = sqlite3.connect(f"file:{raw}?mode=ro", uri=True, timeout=1)
+            con.row_factory = sqlite3.Row
+            boards += 1
+            for row in con.execute("SELECT status, consecutive_failures, last_heartbeat_at FROM tasks"):
+                status = str(row["status"] or "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                total += 1
+                if status in {"failed", "crashed", "timed_out"} or int(row["consecutive_failures"] or 0) > 0:
+                    failed += 1
+                if status in {"blocked", "stuck"}:
+                    blocked += 1
+                heartbeat = row["last_heartbeat_at"]
+                if status == "running" and heartbeat and now - int(heartbeat) >= stale_running_seconds:
+                    stale += 1
+            con.close()
+        except (OSError, sqlite3.Error, ValueError):
+            continue
+    return {"board_count": boards, "task_count": total, "status_counts": status_counts, "failed_tasks": failed, "blocked_tasks": blocked, "stale_running_tasks": stale}
+
+
+def classify_kanban_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
+    cfg = {"stale_degraded": 1, "stale_critical": 5, "failed_degraded": 3, "failed_critical": 10, "blocked_degraded": 10}
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
+    stale = int(sample.get("stale_running_tasks", 0) or 0); failed = int(sample.get("failed_tasks", 0) or 0); blocked = int(sample.get("blocked_tasks", 0) or 0)
+    level = "healthy"; family = "kanban"; reason = ""
+    if stale >= cfg["stale_critical"]:
+        level = "critical"; family = "stale_running"; reason = f"stale_running={stale}"
+    elif failed >= cfg["failed_critical"]:
+        level = "critical"; family = "failed"; reason = f"failed={failed}"
+    elif stale >= cfg["stale_degraded"]:
+        level = "degraded"; family = "stale_running"; reason = f"stale_running={stale}"
+    elif failed >= cfg["failed_degraded"]:
+        level = "degraded"; family = "failed"; reason = f"failed={failed}"
+    elif blocked >= cfg["blocked_degraded"]:
+        level = "degraded"; family = "blocked"; reason = f"blocked={blocked}"
+    values = {"board_count": int(sample.get("board_count", 0) or 0), "task_count": int(sample.get("task_count", 0) or 0), "failed_tasks": failed, "blocked_tasks": blocked, "stale_running_tasks": stale, "status_counts": dict(sample.get("status_counts", {}) or {})}
+    return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.kanban_pressure", source="kanban", kind="kanban_pressure", correlation_key="kanban-pressure")
 
 
 def file_content_hash(path: str) -> str:

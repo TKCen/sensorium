@@ -9,9 +9,17 @@ from agent_sensorium.sensors import (
     MAX_REF_CHARS,
     MAX_SUMMARY_CHARS,
     artifact_signal,
+    classify_hindsight_pressure,
+    classify_kanban_pressure,
     classify_machine_body_pressure,
+    classify_machine_network_pressure,
+    classify_machine_process_pressure,
     file_content_hash,
+    hindsight_pressure_sample,
+    kanban_pressure_sample,
     machine_body_pressure_sample,
+    machine_network_pressure_sample,
+    machine_process_pressure_sample,
     operator_signal,
     replay_machine_body_pressure,
     session_event_signal,
@@ -304,6 +312,134 @@ class TestMachineBodyPressure:
             raw = handle_sensorium_ingest_signal(signal=sig, instance="test", state_dir=td)
             result = json.loads(raw)
             assert result["success"] is True
+
+
+class TestMachineNetworkPressure:
+    def test_network_sample_parses_proc_without_addresses(self, tmp_path):
+        proc = tmp_path / "proc"
+        (proc / "net").mkdir(parents=True)
+        (proc / "net" / "dev").write_text(
+            "Inter-| Receive | Transmit\n"
+            " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n"
+            "  eth0: 100 1 2 3 0 0 0 0 200 2 4 5 0 0 0 0\n"
+        )
+        (proc / "net" / "tcp").write_text("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n0: 00000000:0000 00000000:0000 08 0 0 0 0 0 0 0\n")
+        (proc / "net" / "tcp6").write_text("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n")
+
+        sample = machine_network_pressure_sample(proc_root=str(proc))
+
+        assert sample["interfaces"] == ["eth0"]
+        assert sample["non_loopback_interfaces"] == 1
+        assert sample["rx_errors"] == 2
+        assert sample["tx_errors"] == 4
+        assert sample["rx_drops"] == 3
+        assert sample["tx_drops"] == 5
+        assert sample["tcp_states"]["CLOSE_WAIT"] == 1
+        assert "local_address" not in sample
+        assert "remote_address" not in sample
+
+    def test_network_transition_emits_compact_signal(self):
+        state = {"level": "healthy", "last_error_total": 0, "last_drop_total": 0}
+        sample = {
+            "interfaces": ["eth0"], "non_loopback_interfaces": 1,
+            "rx_errors": 1, "tx_errors": 0, "rx_drops": 0, "tx_drops": 0,
+            "tcp_states": {},
+        }
+        sig, state = classify_machine_network_pressure(sample, state=state)
+
+        assert sig is not None
+        assert sig["sensor"] == "sensorium.machine_network_pressure"
+        assert sig["source"] == "machine"
+        assert sig["kind"] == "network_pressure"
+        assert sig["pressure_level"] == "degraded"
+        assert sig["transition"] == "healthy_to_degraded"
+        assert sig["sensitivity"] == "local_only"
+        assert "remote_address" not in sig
+        assert "packets" not in sig
+
+
+class TestMachineProcessPressure:
+    def test_process_sample_counts_states_without_cmdlines(self, tmp_path):
+        proc = tmp_path / "proc"
+        for pid, state in [("1", "S"), ("2", "Z"), ("3", "D")]:
+            d = proc / pid
+            d.mkdir(parents=True)
+            (d / "stat").write_text(f"{pid} (test) {state} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0")
+
+        sample = machine_process_pressure_sample(proc_root=str(proc))
+
+        assert sample["process_count"] == 3
+        assert sample["zombie_count"] == 1
+        assert sample["uninterruptible_count"] == 1
+        assert "cmdline" not in sample
+        assert "processes" not in sample
+
+    def test_process_pressure_emits_for_zombies(self):
+        sig, state = classify_machine_process_pressure({"process_count": 20, "zombie_count": 2, "uninterruptible_count": 0}, state={})
+
+        assert sig is not None
+        assert sig["sensor"] == "sensorium.machine_process_pressure"
+        assert sig["source"] == "machine"
+        assert sig["kind"] == "process_pressure"
+        assert sig["metric_family"] == "zombie"
+        assert sig["pressure_level"] == "degraded"
+        assert "cmdline" not in sig
+
+
+class TestHindsightPressure:
+    def test_hindsight_unavailable_sample_is_compact(self):
+        sample = hindsight_pressure_sample(base_url="http://127.0.0.1:1", timeout_seconds=0.01)
+        assert sample["api_available"] is False
+        assert "error" in sample
+        assert "content" not in sample
+
+    def test_hindsight_queue_pressure_emits_signal(self):
+        sample = {"api_available": True, "pending_total": 250, "processing_total": 1, "failed_total": 0}
+        sig, state = classify_hindsight_pressure(sample, state={})
+
+        assert sig is not None
+        assert sig["sensor"] == "sensorium.hindsight_pressure"
+        assert sig["source"] == "memory"
+        assert sig["kind"] == "hindsight_pressure"
+        assert sig["pressure_level"] == "critical"
+        assert "memory_text" not in sig
+        assert "raw" not in sig
+
+
+class TestKanbanPressure:
+    def test_kanban_sample_reads_counts_only(self, tmp_path):
+        import sqlite3, time
+
+        db = tmp_path / "kanban.db"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE tasks (id TEXT, status TEXT, priority INTEGER, consecutive_failures INTEGER, last_heartbeat_at INTEGER)")
+        con.executemany(
+            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+            [("t1", "ready", 100, 0, None), ("t2", "running", 50, 0, int(time.time()) - 9999), ("t3", "failed", 10, 3, None)],
+        )
+        con.commit(); con.close()
+
+        sample = kanban_pressure_sample(board_paths=[str(db)], now_epoch=int(time.time()))
+
+        assert sample["board_count"] == 1
+        assert sample["status_counts"]["ready"] == 1
+        assert sample["status_counts"]["running"] == 1
+        assert sample["failed_tasks"] == 1
+        assert sample["stale_running_tasks"] == 1
+        assert "title" not in sample
+        assert "body" not in sample
+
+    def test_kanban_pressure_emits_for_stale_running(self):
+        sample = {"board_count": 1, "status_counts": {"running": 2}, "failed_tasks": 0, "blocked_tasks": 0, "stale_running_tasks": 2}
+        sig, state = classify_kanban_pressure(sample, state={})
+
+        assert sig is not None
+        assert sig["sensor"] == "sensorium.kanban_pressure"
+        assert sig["source"] == "kanban"
+        assert sig["kind"] == "kanban_pressure"
+        assert sig["metric_family"] == "stale_running"
+        assert sig["sensitivity"] == "local_only"
+        assert "body" not in sig
 
 
 class TestFileContentHash:
