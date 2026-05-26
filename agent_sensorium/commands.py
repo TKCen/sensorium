@@ -37,6 +37,8 @@ def handle_sensorium_command(
         return _fmt_dispatch(**kw)
     elif sub == "compact":
         return _fmt_compact(**kw)
+    elif sub == "outbox":
+        return _fmt_outbox(args=parts[1:], **kw)
     elif sub == "help":
         return _help()
     else:
@@ -177,6 +179,23 @@ def _fmt_compact(*, instance: str, state_dir: str | None) -> str:
     )
 
 
+def _fmt_outbox(*, instance: str, state_dir: str | None, args: list[str]) -> str:
+    from .store import SensoriumStore
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    requests = store.read_jsonl("outbox")
+    if not requests:
+        return f"Sensorium [{instance}] outbox: empty."
+    lines = [f"Sensorium [{instance}] outbox ({len(requests)} requests):"]
+    for req in requests[-5:]:
+        mode = req.get("delivery_mode", "?")
+        surface = req.get("surface", "?")
+        status = req.get("status", "?")
+        lines.append(f"  [{status}] {req.get('id', '?')} {surface}/{mode} -> {req.get('origin_thread_id', '?')}")
+    return "\n".join(lines)
+
+
 def _help() -> str:
     return (
         "Usage: /sensorium [subcommand]\n"
@@ -189,5 +208,6 @@ def _help() -> str:
         "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
         "  dispatch       Dry-run dispatch preview\n"
         "  compact        Archive expired items\n"
+        "  outbox        List recent outbox requests\n"
         "  help           This message"
     )

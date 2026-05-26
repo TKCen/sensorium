@@ -989,3 +989,64 @@ def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
     with open(path, "w") as f:
         for item in items:
             f.write(json.dumps(item, separators=(",", ":")) + "\n")
+
+
+def handle_sensorium_outbox_prepare(
+    *,
+    thread_id: str,
+    request_type: str = "THINK",
+    surface: str = "local",
+    delivery_mode: str = "",
+    target: dict | None = None,
+    title: str = "",
+    message_preview: str = "",
+    content_hash: str = "",
+    origin_candidate_id: str = "",
+    dry_run: bool = True,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    from .outbox import OUTBOX_DEFAULTS, prepare_outbox_request
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = prepare_outbox_request(
+        store,
+        thread_id=thread_id,
+        request_type=request_type,
+        surface=surface,
+        delivery_mode=delivery_mode or OUTBOX_DEFAULTS["default_delivery_mode"],
+        target=target or {},
+        title=title,
+        message_preview=message_preview,
+        content_hash=content_hash,
+        origin_candidate_id=origin_candidate_id,
+        config=config,
+        dry_run=dry_run,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(instance, result.get("detail") or result.get("error", "outbox_prepare_failed"))
+
+
+def handle_sensorium_outbox_dispatch(
+    *,
+    outbox_id: str,
+    execute: bool = False,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    from .outbox import dispatch_outbox_request
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    result = dispatch_outbox_request(
+        store,
+        outbox_id=outbox_id,
+        config=config,
+        execute=execute,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(instance, result.get("detail") or result.get("error", "outbox_dispatch_failed"))

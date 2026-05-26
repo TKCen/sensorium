@@ -54,6 +54,8 @@ def register(ctx) -> None:
         handle_sensorium_dispatch_once,
         handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
+        handle_sensorium_outbox_dispatch,
+        handle_sensorium_outbox_prepare,
         handle_sensorium_service_threads,
         handle_sensorium_status,
         handle_sensorium_subconscious_advisory,
@@ -370,6 +372,100 @@ def register(ctx) -> None:
         description="Run bounded Subconscious advisory over local Sensorium Events.",
     )
 
+    ctx.register_tool(
+        name="sensorium_outbox_prepare",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_outbox_prepare",
+            "Prepare an outbox request for a Sensorium thread. Internal state only by default; no live Discord side effects unless dispatch is called with execute=True and policy allows it.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Sensorium thread ID to create the outbox request for.",
+                },
+                "request_type": {
+                    "type": "string",
+                    "enum": ["REACH_OUT", "PRIVATE_EXPRESSION", "THINK"],
+                    "description": "Type of outbox request. Defaults to THINK.",
+                },
+                "surface": {
+                    "type": "string",
+                    "description": "Target surface: discord or local. Defaults to local.",
+                },
+                "delivery_mode": {
+                    "type": "string",
+                    "enum": ["peripheral_reference", "context_pointer", "discord_channel_thread", "discord_dm_bound_session"],
+                    "description": "Delivery mode. Direct Discord modes disabled by default.",
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Target descriptor: channel_id, thread_id, dm_channel_id, session_ref.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the outbox request.",
+                },
+                "message_preview": {
+                    "type": "string",
+                    "description": "Compact message preview (metadata only, not full content).",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true (default), return the would-be request without writing.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional outbox config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_outbox_prepare(
+            thread_id=args.get("thread_id", ""),
+            request_type=args.get("request_type", "THINK"),
+            surface=args.get("surface", "local"),
+            delivery_mode=args.get("delivery_mode", ""),
+            target=args.get("target"),
+            title=args.get("title", ""),
+            message_preview=args.get("message_preview", ""),
+            dry_run=bool(args.get("dry_run", True)),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Prepare a Sensorium outbox request (internal state, no live Discord).",
+    )
+    ctx.register_tool(
+        name="sensorium_outbox_dispatch",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_outbox_dispatch",
+            "Dispatch a prepared outbox request. No-op unless execute=True and config allows the delivery mode. No adapter is wired in this slice; dispatch of direct Discord modes will fail without an adapter.",
+            {
+                **common,
+                "outbox_id": {
+                    "type": "string",
+                    "description": "Outbox request ID to dispatch.",
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": "Must be true to actually dispatch. Default false (dry-run).",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional outbox config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_outbox_dispatch(
+            outbox_id=args.get("outbox_id", ""),
+            execute=bool(args.get("execute", False)),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Dispatch a prepared Sensorium outbox request.",
+    )
     ctx.register_command(
         "sensorium",
         lambda raw_args: handle_sensorium_command(raw_args, instance=_default_instance()),
