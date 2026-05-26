@@ -10,6 +10,7 @@ from agent_sensorium.subconscious import (
     build_advisory_context,
     generate_advisory_output,
     _extract_json_object,
+    _model_prompt,
     run_subconscious_advisory,
     validate_advisory_output,
 )
@@ -222,6 +223,14 @@ def test_minimax_think_wrapper_is_stripped_before_json_parse():
         "event_ids": ["evt_1"],
         "candidate_ids": [],
     }
+
+
+def test_model_prompt_treats_degraded_kanban_pressure_as_conscious_material():
+    messages = _model_prompt({"top_candidates": [{"kind": "kanban_pressure", "summary": "blocked=17", "pressure": 0.68}]})
+
+    system = messages[0]["content"]
+    assert "do not DROP solely because candidate pressure is below 0.70" in system
+    assert "kanban_pressure blocked>=10" in system
 
 
 def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):

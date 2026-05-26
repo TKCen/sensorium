@@ -41,6 +41,7 @@ from agent_sensorium.tools import handle_sensorium_subconscious_advisory  # noqa
 
 
 SOURCE_CANDIDATE_KINDS_EXCLUDED = {"subconscious_advisory"}
+ADVISORY_POLICY_VERSION = "2026-05-26.2"
 
 
 def _json_write(path: Path, obj: dict) -> None:
@@ -80,6 +81,7 @@ def _source_material(store: SensoriumStore, *, event_limit: int, candidate_limit
     candidates.sort(key=lambda c: (str(c.get("kind", "")), str(c.get("id", ""))))
     candidates = candidates[-candidate_limit:]
     return {
+        "advisory_policy_version": ADVISORY_POLICY_VERSION,
         "events": [
             {
                 "id": e.get("id"),
@@ -140,6 +142,7 @@ def run_once(args: argparse.Namespace) -> dict:
         result_base = {
             "instance": args.instance,
             "ts": utc_now_iso(),
+            "advisory_policy_version": ADVISORY_POLICY_VERSION,
             "source_signature": sig,
             "source_counts": {
                 "events": len(material["events"]),
