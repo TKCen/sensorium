@@ -3,13 +3,18 @@
 Phase 8 keeps this lane bounded: it builds compact context from promoted
 Events/Candidates/Decisions, validates advisory-shaped output, and can write an
 internal conscious-task candidate. It does not send messages, create external
-work, open platform threads, or call a model unless a future caller explicitly
-adds that capability.
+work, or open platform threads. Model reasoning is cheap/OpenAI-compatible and
+runs only when explicitly enabled.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import urllib.request
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from .gate import candidate_fingerprint
@@ -36,11 +41,32 @@ DEFAULT_ADVISORY_CONFIG: dict[str, Any] = {
     "decision_limit": 5,
     "summary_chars": 180,
     "default_pressure": 0.66,
+    "model_enabled": False,
+    "model_provider": "openrouter",
+    "model": "deepseek/deepseek-v4-flash",
+    "model_base_url": "https://openrouter.ai/api/v1",
+    "model_api_key_env": "OPENROUTER_API_KEY",
+    "model_api_key": None,
+    "model_timeout_seconds": 20,
+    "model_max_tokens": 1200,
+    "model_temperature": 0.0,
+    "model_response_format": {"type": "json_object"},
 }
 
 
 def _merged_config(config: dict | None = None) -> dict:
     cfg = deepcopy(DEFAULT_ADVISORY_CONFIG)
+    env_overrides = {
+        "model_provider": os.getenv("SENSORIUM_SUBCONSCIOUS_PROVIDER"),
+        "model": os.getenv("SENSORIUM_SUBCONSCIOUS_MODEL"),
+        "model_base_url": os.getenv("SENSORIUM_SUBCONSCIOUS_BASE_URL"),
+        "model_api_key_env": os.getenv("SENSORIUM_SUBCONSCIOUS_API_KEY_ENV"),
+    }
+    for key, value in env_overrides.items():
+        if value:
+            cfg[key] = value
+    if os.getenv("SENSORIUM_SUBCONSCIOUS_MODEL_ENABLED") in {"1", "true", "yes", "on"}:
+        cfg["model_enabled"] = True
     if config:
         cfg.update(config)
     return cfg
@@ -175,6 +201,132 @@ def validate_advisory_output(output: dict) -> dict:
     return normalized
 
 
+def _hermes_env_path() -> Path:
+    try:
+        from importlib import import_module
+
+        constants = import_module("hermes_constants")
+        return Path(constants.get_hermes_home()) / ".env"
+    except Exception:
+        return Path.home() / ".hermes" / ".env"
+
+
+def _load_dotenv_value(key: str) -> str | None:
+    env_path = _hermes_env_path()
+    try:
+        text = env_path.read_text(errors="ignore")
+    except OSError:
+        return None
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.*)\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    value = match.group(1).strip().strip('"').strip("'")
+    return value or None
+
+
+def _model_api_key(cfg: dict) -> str | None:
+    explicit = cfg.get("model_api_key")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    env_name = str(cfg.get("model_api_key_env") or "").strip()
+    if not env_name:
+        return None
+    return os.getenv(env_name) or _load_dotenv_value(env_name)
+
+
+def _post_openai_chat_completion(url: str, payload: dict, headers: dict, timeout: int | float) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=float(timeout)) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _extract_json_object(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
+def _model_prompt(context: dict) -> list[dict]:
+    system = (
+        "You are the cheap Subconscious advisory lane for Agent Sensorium. "
+        "Read only the bounded JSON context. Do not ask questions. Do not send messages. "
+        "Return exactly one JSON object with action DROP, SAVE, or CREATE_CONSCIOUS_TASK. "
+        "Use CREATE_CONSCIOUS_TASK only when the context merits later conscious attention. "
+        "Allowed conscious_task request_type values: THINK, SAVE, UPDATE_MEMORY_OR_SKILL, CREATE_FOLLOWUP. "
+        "Never output REACH_OUT. Never invent raw transcript/file/task details."
+    )
+    user = {
+        "context": context,
+        "required_schema": {
+            "action": "DROP | SAVE | CREATE_CONSCIOUS_TASK",
+            "rationale": "short reason",
+            "event_ids": ["evt_id"],
+            "candidate_ids": ["cand_id"],
+            "pressure": "optional 0..1",
+            "conscious_task": {
+                "request_type": "THINK | SAVE | UPDATE_MEMORY_OR_SKILL | CREATE_FOLLOWUP",
+                "title": "required only for CREATE_CONSCIOUS_TASK",
+                "why": "required only for CREATE_CONSCIOUS_TASK",
+                "expected_decision": "required only for CREATE_CONSCIOUS_TASK",
+            },
+        },
+    }
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user, separators=(",", ":"))},
+    ]
+
+
+def generate_advisory_output(
+    context: dict,
+    *,
+    config: dict | None = None,
+    transport=None,
+) -> dict:
+    """Generate advisory output with a cheap OpenAI-compatible model."""
+    cfg = _merged_config(config)
+    api_key = _model_api_key(cfg)
+    if not api_key:
+        raise RuntimeError(f"missing API key for {cfg.get('model_provider')} ({cfg.get('model_api_key_env')})")
+
+    base_url = str(cfg["model_base_url"]).rstrip("/")
+    url = f"{base_url}/chat/completions"
+    payload = {
+        "model": cfg["model"],
+        "messages": _model_prompt(context),
+        "temperature": float(cfg["model_temperature"]),
+        "max_tokens": int(cfg["model_max_tokens"]),
+    }
+    response_format = cfg.get("model_response_format")
+    if isinstance(response_format, dict) and response_format:
+        payload["response_format"] = response_format
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-Title": "Agent Sensorium Subconscious",
+    }
+    call = transport or _post_openai_chat_completion
+    response = call(url, payload, headers, int(cfg["model_timeout_seconds"]))
+    try:
+        content = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("model response missing choices[0].message.content") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("model response content was empty")
+    return validate_advisory_output(_extract_json_object(content))
+
+
 def _refs_for_ids(items: list[dict], ids: list[str]) -> list[dict]:
     wanted = set(ids)
     return [item for item in items if item.get("id") in wanted]
@@ -279,34 +431,57 @@ def run_subconscious_advisory(
     dry_run: bool = True,
     config: dict | None = None,
     record_receipt: bool = True,
+    model_generate=None,
 ) -> dict:
     """Run one bounded advisory pass.
 
-    The model lane is intentionally disabled by default. Until a caller provides
-    a validated advisory output, enabled runs return `model_output_required`.
+    The model lane is cheap/OpenAI-compatible and opt-in. If enabled with
+    model_enabled=true and no advisory_output is supplied, it generates bounded
+    advisory JSON from compact context only.
     """
     store.ensure_dirs()
-    context = build_advisory_context(store, config=config)
+    cfg = _merged_config(config)
+    context = build_advisory_context(store, config=cfg)
 
     if not enabled:
         result = {
             "action": "disabled",
             "dry_run": dry_run,
+            "model_used": False,
             "reason": "subconscious advisory model lane is disabled by default",
             "context": context,
         }
         _write_advisory_receipt(store, result=result, output=advisory_output, dry_run=dry_run, context=context, record_receipt=record_receipt)
         return result
 
+    model_used = False
     if advisory_output is None:
-        result = {
-            "action": "model_output_required",
-            "dry_run": dry_run,
-            "reason": "no advisory_output supplied; live model calls are not implemented in the plugin core",
-            "context": context,
-        }
-        _write_advisory_receipt(store, result=result, output=None, dry_run=dry_run, context=context, record_receipt=record_receipt)
-        return result
+        if not cfg.get("model_enabled"):
+            result = {
+                "action": "model_output_required",
+                "dry_run": dry_run,
+                "model_used": False,
+                "reason": "no advisory_output supplied and cheap model lane is not enabled",
+                "context": context,
+            }
+            _write_advisory_receipt(store, result=result, output=None, dry_run=dry_run, context=context, record_receipt=record_receipt)
+            return result
+        generator = model_generate or generate_advisory_output
+        try:
+            advisory_output = generator(context, config=cfg)
+            model_used = True
+        except Exception as exc:
+            result = {
+                "action": "model_unavailable",
+                "dry_run": dry_run,
+                "model_used": False,
+                "model_provider": cfg.get("model_provider"),
+                "model": cfg.get("model"),
+                "reason": truncate_text(str(exc), 220),
+                "context": context,
+            }
+            _write_advisory_receipt(store, result=result, output=None, dry_run=dry_run, context=context, record_receipt=record_receipt)
+            return result
 
     output = validate_advisory_output(advisory_output)
 
@@ -314,17 +489,23 @@ def run_subconscious_advisory(
         result = {
             "action": output["action"].lower(),
             "dry_run": dry_run,
+            "model_used": model_used,
+            "model_provider": cfg.get("model_provider") if model_used else None,
+            "model": cfg.get("model") if model_used else None,
             "reason": output["rationale"],
             "context": context,
         }
         _write_advisory_receipt(store, result=result, output=output, dry_run=dry_run, context=context, record_receipt=record_receipt)
         return result
 
-    candidate = _candidate_from_advisory(store, output, config=config)
+    candidate = _candidate_from_advisory(store, output, config=cfg)
     if dry_run:
         result = {
             "action": "would_create_conscious_task",
             "dry_run": True,
+            "model_used": model_used,
+            "model_provider": cfg.get("model_provider") if model_used else None,
+            "model": cfg.get("model") if model_used else None,
             "candidate_preview": candidate,
             "reason": output["rationale"],
             "context": context,
@@ -338,6 +519,9 @@ def run_subconscious_advisory(
         result = {
             "action": "already_exists",
             "dry_run": False,
+            "model_used": model_used,
+            "model_provider": cfg.get("model_provider") if model_used else None,
+            "model": cfg.get("model") if model_used else None,
             "candidate_id": existing.get("id"),
             "reason": "duplicate subconscious advisory candidate",
             "context": context,
@@ -349,6 +533,9 @@ def run_subconscious_advisory(
     result = {
         "action": "created_conscious_task_candidate",
         "dry_run": False,
+        "model_used": model_used,
+        "model_provider": cfg.get("model_provider") if model_used else None,
+        "model": cfg.get("model") if model_used else None,
         "candidate_id": candidate["id"],
         "reason": output["rationale"],
         "context": context,

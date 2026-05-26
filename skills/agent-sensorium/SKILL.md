@@ -11,14 +11,14 @@ Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Consciou
 1. **Sensors** emit raw **Signals** (observations, corrections, artifacts).
 2. A deterministic **Gate** promotes strong signals to **Events** based on strength and kind thresholds.
 3. Events create **Candidates** with weighted pressure scores.
-4. Optional **Subconscious advisory** can build bounded context from Events/Candidates/Decisions and propose an internal conscious-task candidate. The model lane is disabled by default.
+4. Optional **Subconscious advisory** can build bounded context from Events/Candidates/Decisions and propose an internal conscious-task candidate. The cheap model lane is explicit opt-in and disabled by default.
 5. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
 6. A tiny active-session pointer can mention that an eligible thread exists when the current surface is allowed and cooldown is open. The pointer is only a doorway, not the capsule.
 
 ## MVP Limitations
 
 - **Pull-based only** — no proactive messages, no DM delivery.
-- **Subconscious advisory is bounded and disabled by default** — it builds compact context and can validate/store advisory receipts; live model calls are not run by the plugin core.
+- **Subconscious advisory is bounded and disabled by default** — it builds compact context and can validate/store advisory receipts; live model calls happen only when the cheap model lane is explicitly enabled.
 - **No platform thread creation** — threads are internal state only.
 - **No relational autonomy** — no REACH_OUT decisions.
 - **No external task creation** — no Kanban/research/media tasks.
@@ -74,7 +74,7 @@ The advisory output schema accepts only:
 - `SAVE` — write a local advisory receipt for later conscious interpretation;
 - `CREATE_CONSCIOUS_TASK` — create or preview one internal `subconscious_advisory` candidate with embedded `conscious_task` fields.
 
-The lane is disabled by default. With no explicit advisory output, enabled runs return `model_output_required`; the plugin core does not call an LLM directly. Dry-run mode stores a local `subconscious.advisory` receipt by default when invoked outside tick `--dry-run`, but it never creates candidates, threads, outbound messages, platform threads, or external Kanban/research/media work.
+The lane is disabled by default. With no explicit advisory output, enabled runs return `model_output_required` unless `config.model_enabled=true` or `--subconscious-model` is supplied. The built-in cheap lane calls an OpenAI-compatible chat endpoint over bounded context only; default routing is OpenRouter `deepseek/deepseek-v4-flash` using `OPENROUTER_API_KEY`. Environment overrides are `SENSORIUM_SUBCONSCIOUS_MODEL_ENABLED`, `SENSORIUM_SUBCONSCIOUS_PROVIDER`, `SENSORIUM_SUBCONSCIOUS_MODEL`, `SENSORIUM_SUBCONSCIOUS_BASE_URL`, and `SENSORIUM_SUBCONSCIOUS_API_KEY_ENV`. Dry-run mode stores a local `subconscious.advisory` receipt by default when invoked outside tick `--dry-run`, but it never creates candidates, threads, outbound messages, platform threads, or external Kanban/research/media work.
 
 ## Tools
 
@@ -194,13 +194,13 @@ Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json`
 1. **Optional pressure sensors** — `--body-pressure`, `--network-pressure`, `--process-pressure`, `--hindsight-pressure`, `--kanban-pressure`, or `--all-sensors`; sample present-tense counters and ingest only transition signals.
 2. **Compact** — archive expired candidates/threads
 3. **Service** — TTL archival, starvation/dirty/expiring reports
-4. **Optional Subconscious advisory** — `--subconscious-advisory` builds bounded context and runs disabled/dry-run by default; `--enable-subconscious-advisory` explicitly enables advisory-output handling, but the core tick still does not perform live model calls
+4. **Optional Subconscious advisory** — `--subconscious-advisory` builds bounded context and runs disabled/dry-run by default; `--subconscious-model` allows the cheap model to produce advisory JSON; `--enable-subconscious-advisory` allows non-dry-run creation of only internal conscious-task candidates
 5. **Dispatch preview** — dry-run dispatch (never creates threads)
 6. **Status** — read-only state snapshot
 
 Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `tick.completed` receipt to local decisions JSONL. Use `--dry-run` to skip mutations, including body-pressure state persistence and signal ingest.
 
-The tick must not: send messages, create external tasks, create platform threads, call messaging APIs, or invoke models.
+The tick must not: send messages, create external tasks, create platform threads, or call messaging APIs. It must invoke a model only when `--subconscious-advisory --subconscious-model` is explicitly supplied, and that model pass may produce only advisory JSON or an internal conscious-task candidate.
 
 ## Probe Coverage Boundary
 

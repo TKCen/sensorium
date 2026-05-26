@@ -457,8 +457,9 @@ def handle_sensorium_subconscious_advisory(
 ) -> str:
     """Run one bounded Subconscious advisory pass.
 
-    Disabled by default. The core plugin does not call models directly; callers
-    may provide a validated advisory_output from an external/model lane.
+    Disabled by default. When enabled with config.model_enabled=true, the core
+    can call a cheap OpenAI-compatible model over bounded context only; callers
+    may also provide a precomputed advisory_output.
     """
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     try:

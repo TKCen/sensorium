@@ -8,6 +8,7 @@ from agent_sensorium.schemas import utc_now_iso
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.subconscious import (
     build_advisory_context,
+    generate_advisory_output,
     run_subconscious_advisory,
     validate_advisory_output,
 )
@@ -166,6 +167,82 @@ def test_enabled_non_dry_run_creates_internal_candidate_only(state_dir):
     assert candidates[0]["kind"] == "subconscious_advisory"
     assert candidates[0]["conscious_task"]["title"] == "Review blocked Kanban tasks"
     assert store.read_jsonl("threads") == []
+
+
+def test_generate_advisory_output_uses_cheap_openai_compatible_model():
+    requests = []
+
+    def fake_transport(url, payload, headers, timeout):
+        requests.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "action": "SAVE",
+                        "rationale": "Cheap model saw weak but useful signal pressure.",
+                        "event_ids": ["evt_1"],
+                        "candidate_ids": [],
+                    })
+                }
+            }]
+        }
+
+    output = generate_advisory_output(
+        {"recent_events": [_event(1)], "top_candidates": [], "recent_decisions": []},
+        config={
+            "model_enabled": True,
+            "model_provider": "openrouter",
+            "model": "deepseek/deepseek-v4-flash",
+            "model_base_url": "https://openrouter.ai/api/v1",
+            "model_api_key": "test-key",
+            "model_timeout_seconds": 7,
+        },
+        transport=fake_transport,
+    )
+
+    assert output["action"] == "SAVE"
+    assert requests[0]["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert requests[0]["payload"]["model"] == "deepseek/deepseek-v4-flash"
+    assert requests[0]["payload"]["response_format"] == {"type": "json_object"}
+    assert requests[0]["headers"]["Authorization"] == "Bearer test-key"
+    assert requests[0]["timeout"] == 7
+
+
+def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    store.ensure_dirs()
+    store.append_jsonl("events", _event(4, kind="hindsight_pressure", summary="failed=9"))
+
+    def fake_generate(context, *, config):
+        assert context["recent_events"]
+        assert config["model_enabled"] is True
+        return {
+            "action": "CREATE_CONSCIOUS_TASK",
+            "rationale": "Cheap model saw repeated Hindsight failure pressure.",
+            "event_ids": ["evt_4"],
+            "candidate_ids": [],
+            "pressure": 0.71,
+            "conscious_task": {
+                "request_type": "THINK",
+                "title": "Review Hindsight pressure",
+                "why": "A cheap Subconscious pass saw failed operation pressure.",
+                "expected_decision": "Suppress, hold, or create a bounded repair follow-up.",
+            },
+        }
+
+    result = run_subconscious_advisory(
+        store,
+        enabled=True,
+        dry_run=False,
+        config={"model_enabled": True},
+        model_generate=fake_generate,
+    )
+
+    assert result["action"] == "created_conscious_task_candidate"
+    assert result["model_used"] is True
+    candidates = store.read_jsonl("candidates")
+    assert len(candidates) == 1
+    assert candidates[0]["summary"] == "Review Hindsight pressure"
 
 
 def test_tool_handler_runs_advisory_dry_run(state_dir):

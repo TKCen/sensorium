@@ -193,7 +193,7 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 - model lane is disabled by default;
 - dry-run stores advisory receipt and never performs external side effects.
 
-**Status:** Implemented. `agent_sensorium.subconscious` builds bounded advisory context from promoted Events, active Candidates, recent Decisions, and probe-audit summary; it does not include raw Signals, transcripts, files, memory text, or task bodies. Advisory output validates `DROP`, `SAVE`, and `CREATE_CONSCIOUS_TASK`; the model lane is disabled by default and the plugin core performs no live LLM calls. `sensorium_subconscious_advisory` exposes the lane as an explicit tool, and `scripts/sensorium_tick.py --subconscious-advisory` wires a disabled/dry-run pass behind opt-in. Dry-run can write a local `subconscious.advisory` receipt but creates no candidates, threads, messages, external tasks, or platform artifacts. Explicitly enabled non-dry-run handling can create one internal `subconscious_advisory` candidate with embedded `conscious_task` fields only.
+**Status:** Implemented, then upgraded with an explicit cheap model lane. `agent_sensorium.subconscious` builds bounded advisory context from promoted Events, active Candidates, recent Decisions, and probe-audit summary; it does not include raw Signals, transcripts, files, memory text, or task bodies. Advisory output validates `DROP`, `SAVE`, and `CREATE_CONSCIOUS_TASK`; the model lane remains disabled by default. When explicitly enabled via config or tick `--subconscious-model`, the built-in OpenAI-compatible adapter calls a cheap model over bounded context only; default routing is OpenRouter `deepseek/deepseek-v4-flash` using `OPENROUTER_API_KEY`, with environment/config overrides for provider, model, base URL, and API-key env var. `sensorium_subconscious_advisory` exposes the lane as an explicit tool, and `scripts/sensorium_tick.py --subconscious-advisory` wires a disabled/dry-run pass behind opt-in. Dry-run can write a local `subconscious.advisory` receipt but creates no candidates, threads, messages, external tasks, or platform artifacts. Explicitly enabled non-dry-run handling can create one internal `subconscious_advisory` candidate with embedded `conscious_task` fields only.
 
 ### Phase 9 — Conscious activation and outbox proposals
 
@@ -219,12 +219,12 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 
 ## Immediate next slice
 
-Phase 8 Subconscious advisory dry-run is implemented. The next slice should **not** add outbound action yet. First validate this advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
+Phase 8 Subconscious advisory plus the explicit cheap model lane are implemented. The next slice should **not** add outbound action yet. First validate this advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
 
 - verify advisory context stays bounded and contains only Events/Candidates/Decisions/probe summary;
-- measure how often real pressure Events produce useful `DROP`/`SAVE`/`CREATE_CONSCIOUS_TASK` advisory outputs once a model lane is explicitly supplied;
+- measure how often real pressure Events produce useful `DROP`/`SAVE`/`CREATE_CONSCIOUS_TASK` advisory outputs with the cheap lane enabled;
 - tune pressure/candidate thresholds before creating more conscious-task candidates;
-- keep tick invocation opt-in (`--subconscious-advisory`) and avoid live model calls from the plugin core;
+- keep tick invocation opt-in (`--subconscious-advisory --subconscious-model`) and avoid model calls unless explicitly requested;
 - decide whether Phase 9 should add a conscious-task review surface, an outbox proposal schema, or dashboard visibility first.
 
 Gate:

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Deterministic sensorium tick — no model calls, no outbound delivery.
+"""Deterministic sensorium tick with optional cheap Subconscious advisory.
 
 Runs compaction, thread service, dispatch preview, and status.
+Pressure sensors remain deterministic/no-model. Subconscious model advisory runs only
+when explicitly requested with --subconscious-advisory --subconscious-model.
 Writes a local tick receipt. Silent on stdout by default for cron use.
 Use --json to print result to stdout.
 """
@@ -123,8 +125,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--enable-subconscious-advisory", action="store_true",
-        help="Explicitly enable advisory output handling; still no live model call in core tick",
+        help="Allow advisory output handling to create internal conscious-task candidates; still no external side effects",
     )
+    parser.add_argument(
+        "--subconscious-model", action="store_true",
+        help="Allow the cheap OpenAI-compatible Subconscious model lane to generate advisory output",
+    )
+    parser.add_argument("--subconscious-model-name", default=None, help="Override Subconscious model name")
+    parser.add_argument("--subconscious-model-provider", default=None, help="Override Subconscious model provider label")
+    parser.add_argument("--subconscious-model-base-url", default=None, help="Override OpenAI-compatible base URL")
     args = parser.parse_args(argv)
 
     kw: dict = {"instance": args.instance, "state_dir": args.state_dir}
@@ -196,9 +205,19 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.subconscious_advisory:
             advisory_dry_run = args.dry_run or not args.enable_subconscious_advisory
+            advisory_config = {}
+            if args.subconscious_model:
+                advisory_config["model_enabled"] = True
+            if args.subconscious_model_name:
+                advisory_config["model"] = args.subconscious_model_name
+            if args.subconscious_model_provider:
+                advisory_config["model_provider"] = args.subconscious_model_provider
+            if args.subconscious_model_base_url:
+                advisory_config["model_base_url"] = args.subconscious_model_base_url
             raw = json.loads(handle_sensorium_subconscious_advisory(
                 dry_run=advisory_dry_run,
-                enabled=args.enable_subconscious_advisory,
+                enabled=args.enable_subconscious_advisory or args.subconscious_model,
+                config=advisory_config or None,
                 record_receipt=not args.dry_run,
                 **kw,
             ))

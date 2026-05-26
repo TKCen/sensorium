@@ -338,7 +338,7 @@ def register(ctx) -> None:
         toolset=_TOOLSET,
         schema=_schema(
             "sensorium_subconscious_advisory",
-            "Run a bounded Subconscious advisory pass over Events/Candidates. Disabled by default; dry-run stores a local receipt and never creates external side effects.",
+            "Run a bounded Subconscious advisory pass over Events/Candidates. Disabled by default; cheap model use requires config.model_enabled=true and never creates external side effects.",
             {
                 **common,
                 "dry_run": {
