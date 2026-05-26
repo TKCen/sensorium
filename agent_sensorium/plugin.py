@@ -56,6 +56,7 @@ def register(ctx) -> None:
         handle_sensorium_ingest_signal,
         handle_sensorium_service_threads,
         handle_sensorium_status,
+        handle_sensorium_subconscious_advisory,
         handle_sensorium_thread_open,
         handle_sensorium_thread_update,
     )
@@ -330,6 +331,43 @@ def register(ctx) -> None:
             now=args.get("now"),
         ),
         description="Thread service pass: archive expired, report starved/dirty/expiring.",
+    )
+
+    ctx.register_tool(
+        name="sensorium_subconscious_advisory",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_subconscious_advisory",
+            "Run a bounded Subconscious advisory pass over Events/Candidates. Disabled by default; dry-run stores a local receipt and never creates external side effects.",
+            {
+                **common,
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, preview/store advisory receipt without creating an internal candidate.",
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Explicitly enable the advisory lane. Defaults false.",
+                },
+                "advisory_output": {
+                    "type": "object",
+                    "description": "Optional already-produced model/advisory output with action DROP, SAVE, or CREATE_CONSCIOUS_TASK.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional context/advisory config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_subconscious_advisory(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            dry_run=bool(args.get("dry_run", True)),
+            enabled=bool(args.get("enabled", False)),
+            advisory_output=args.get("advisory_output"),
+            config=args.get("config"),
+        ),
+        description="Run bounded Subconscious advisory over local Sensorium Events.",
     )
 
     ctx.register_command(

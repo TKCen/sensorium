@@ -131,10 +131,16 @@ def cmd_audit(args) -> int:
     return 0
 
 
-def _add_common_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--json", action="store_true", dest="print_json")
-    p.add_argument("--state-dir", default=None)
-    p.add_argument("--instance", default="default")
+def _add_common_args(p: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
+    """Add common args before or after subcommand without clobbering earlier values."""
+    if suppress_defaults:
+        p.add_argument("--json", action="store_true", dest="print_json", default=argparse.SUPPRESS)
+        p.add_argument("--state-dir", default=argparse.SUPPRESS)
+        p.add_argument("--instance", default=argparse.SUPPRESS)
+    else:
+        p.add_argument("--json", action="store_true", dest="print_json")
+        p.add_argument("--state-dir", default=None)
+        p.add_argument("--instance", default="default")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -148,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         ("audit", "Audit existing state"),
     ]:
         sp = sub.add_parser(name, help=help_text)
-        _add_common_args(sp)
+        _add_common_args(sp, suppress_defaults=True)
 
     args = parser.parse_args(argv)
 

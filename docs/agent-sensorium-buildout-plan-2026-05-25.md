@@ -193,6 +193,8 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 - model lane is disabled by default;
 - dry-run stores advisory receipt and never performs external side effects.
 
+**Status:** Implemented. `agent_sensorium.subconscious` builds bounded advisory context from promoted Events, active Candidates, recent Decisions, and probe-audit summary; it does not include raw Signals, transcripts, files, memory text, or task bodies. Advisory output validates `DROP`, `SAVE`, and `CREATE_CONSCIOUS_TASK`; the model lane is disabled by default and the plugin core performs no live LLM calls. `sensorium_subconscious_advisory` exposes the lane as an explicit tool, and `scripts/sensorium_tick.py --subconscious-advisory` wires a disabled/dry-run pass behind opt-in. Dry-run can write a local `subconscious.advisory` receipt but creates no candidates, threads, messages, external tasks, or platform artifacts. Explicitly enabled non-dry-run handling can create one internal `subconscious_advisory` candidate with embedded `conscious_task` fields only.
+
 ### Phase 9 — Conscious activation and outbox proposals
 
 **Why:** The agent needs a way to prepare bounded work without surprise side effects.
@@ -217,16 +219,13 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 
 ## Immediate next slice
 
-Phase 7.6 first slice is implemented. The next slice should **not** add a second sensor yet. First run `scripts/sensorium_tick.py --body-pressure` in shadow/explicit mode long enough to measure:
+Phase 8 Subconscious advisory dry-run is implemented. The next slice should **not** add outbound action yet. First validate this advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
 
-- runtime cost;
-- healthy sample drop rate;
-- transition count;
-- false positives/flapping;
-- promotion yield;
-- whether body Events actually help Subconscious routing decisions.
-
-Only after that evidence should the project choose between: tuning thresholds/windows, adding dashboard/status visibility for body pressure, adding optional GPU telemetry, or implementing the next shared-substrate sensor. Model-backed Phase 8 advisory remains after deterministic sensing has enough real Event substrate.
+- verify advisory context stays bounded and contains only Events/Candidates/Decisions/probe summary;
+- measure how often real pressure Events produce useful `DROP`/`SAVE`/`CREATE_CONSCIOUS_TASK` advisory outputs once a model lane is explicitly supplied;
+- tune pressure/candidate thresholds before creating more conscious-task candidates;
+- keep tick invocation opt-in (`--subconscious-advisory`) and avoid live model calls from the plugin core;
+- decide whether Phase 9 should add a conscious-task review surface, an outbox proposal schema, or dashboard visibility first.
 
 Gate:
 

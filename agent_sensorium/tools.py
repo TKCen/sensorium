@@ -24,6 +24,7 @@ from .schemas import (
     validate_signal,
 )
 from .store import SensoriumStore
+from .subconscious import run_subconscious_advisory
 
 ARCHIVED_STATUSES = {"archived", "closed"}
 
@@ -441,6 +442,36 @@ def handle_sensorium_dispatch_once(
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
     result = _dispatch_once(store, dry_run=dry_run, config=config)
+    return _ok(instance, result)
+
+
+def handle_sensorium_subconscious_advisory(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    dry_run: bool = True,
+    enabled: bool = False,
+    advisory_output: dict | None = None,
+    config: dict | None = None,
+    record_receipt: bool = True,
+) -> str:
+    """Run one bounded Subconscious advisory pass.
+
+    Disabled by default. The core plugin does not call models directly; callers
+    may provide a validated advisory_output from an external/model lane.
+    """
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    try:
+        result = run_subconscious_advisory(
+            store,
+            advisory_output=advisory_output,
+            enabled=enabled,
+            dry_run=dry_run,
+            config=config,
+            record_receipt=record_receipt,
+        )
+    except ValueError as e:
+        return _err(instance, str(e))
     return _ok(instance, result)
 
 

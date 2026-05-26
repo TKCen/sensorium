@@ -33,6 +33,7 @@ from agent_sensorium.tools import (
     handle_sensorium_ingest_signal,
     handle_sensorium_service_threads,
     handle_sensorium_status,
+    handle_sensorium_subconscious_advisory,
 )
 
 
@@ -116,6 +117,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hindsight-pressure", action="store_true", help="Sample Hindsight queue/API pressure transition signals")
     parser.add_argument("--kanban-pressure", action="store_true", help="Sample Kanban board pressure transition signals")
     parser.add_argument("--all-sensors", action="store_true", help="Run all currently wired deterministic sensors")
+    parser.add_argument(
+        "--subconscious-advisory", action="store_true",
+        help="Run bounded Subconscious advisory dry-run over Events/Candidates",
+    )
+    parser.add_argument(
+        "--enable-subconscious-advisory", action="store_true",
+        help="Explicitly enable advisory output handling; still no live model call in core tick",
+    )
     args = parser.parse_args(argv)
 
     kw: dict = {"instance": args.instance, "state_dir": args.state_dir}
@@ -184,6 +193,19 @@ def main(argv: list[str] | None = None) -> int:
                 steps["service"] = raw["data"]
             else:
                 errors.append(f"service: {raw.get('error', 'unknown')}")
+
+        if args.subconscious_advisory:
+            advisory_dry_run = args.dry_run or not args.enable_subconscious_advisory
+            raw = json.loads(handle_sensorium_subconscious_advisory(
+                dry_run=advisory_dry_run,
+                enabled=args.enable_subconscious_advisory,
+                record_receipt=not args.dry_run,
+                **kw,
+            ))
+            if raw.get("success"):
+                steps["subconscious_advisory"] = raw["data"]
+            else:
+                errors.append(f"subconscious_advisory: {raw.get('error', 'unknown')}")
 
         raw = json.loads(handle_sensorium_dispatch_once(dry_run=True, **kw))
         if raw.get("success"):
