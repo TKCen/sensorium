@@ -153,19 +153,27 @@ Compact sensor helpers in `agent_sensorium.sensors` emit signal dicts suitable f
 | `session_event_signal` | `hermes_session` | Compact session event: kind/summary/ref |
 | `artifact_signal` | `artifact` | File metadata: path/size/hash/ref, no content |
 | `operator_signal` | `manual` | Explicit operator note/correction |
+| `machine_body_pressure_sample` + `classify_machine_body_pressure` | `machine` | Cheap body-pressure samples and transition-only signals |
 
-Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surfaces to `["local"]`.
+Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surfaces to `["local"]`; body-pressure signals are `local_only` and global-scoped because machine pressure affects all local agents.
+
+### Machine body pressure
+
+The first wired generic sensor is `machine_body_pressure`, enabled explicitly with `scripts/sensorium_tick.py --body-pressure`. It samples cheap OS counters only: `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, disk/inode pressure, and swap pressure. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
+
+Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json` and emits no signal for healthy samples. It emits compact signals only for deterministic transitions such as `healthy_to_degraded`, `healthy_to_critical`, `degraded_to_recovered`, or rate-limited `sustained_degraded`. Runtime sensing uses present-tense samples plus short-window debounce only; replay helpers are for tests/audits and are not runtime sensing.
 
 ## Shadow Tick
 
 `scripts/sensorium_tick.py` runs deterministic lifecycle operations without model calls or outbound delivery:
 
-1. **Compact** — archive expired candidates/threads
-2. **Service** — TTL archival, starvation/dirty/expiring reports
-3. **Dispatch preview** — dry-run dispatch (never creates threads)
-4. **Status** — read-only state snapshot
+1. **Optional body pressure** — when `--body-pressure` is passed, sample machine pressure and ingest only transition signals
+2. **Compact** — archive expired candidates/threads
+3. **Service** — TTL archival, starvation/dirty/expiring reports
+4. **Dispatch preview** — dry-run dispatch (never creates threads)
+5. **Status** — read-only state snapshot
 
-Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `tick.completed` receipt to local decisions JSONL. Use `--dry-run` to skip mutations.
+Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `tick.completed` receipt to local decisions JSONL. Use `--dry-run` to skip mutations, including body-pressure state persistence and signal ingest.
 
 The tick must not: send messages, create external tasks, create platform threads, call messaging APIs, or invoke models.
 

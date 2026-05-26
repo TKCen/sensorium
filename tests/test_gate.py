@@ -44,6 +44,12 @@ class TestShouldPromoteSignal:
         assert promoted is True
         assert "kind" in reason
 
+    def test_body_pressure_is_important_kind(self):
+        sig = _make_signal(kind="body_pressure", source="machine", strength_hint=0.65)
+        promoted, reason = should_promote_signal(sig)
+        assert promoted is True
+        assert "kind" in reason
+
     def test_important_kind_below_kind_threshold(self):
         sig = _make_signal(kind="design_decision", strength_hint=0.4)
         promoted, reason = should_promote_signal(sig)

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 SIGNAL_REQUIRED_FIELDS = {"sensor", "source", "kind", "summary"}
 VALID_SENSITIVITIES = {"local_only", "private", "public_safe"}
-VALID_SOURCES = {"manual", "hermes_session", "artifact", "feedback"}
+VALID_SOURCES = {"manual", "hermes_session", "artifact", "feedback", "machine"}
 VALID_ACTORS = {"operator", "agent", "tool"}
 
 SENSITIVITY_RANK = {"local_only": 0, "private": 1, "public_safe": 2}

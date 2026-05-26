@@ -142,13 +142,53 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 **Status:** Implemented in the Phase 7.5 slice. `agent_sensorium/probe_audit.py` provides `probe_inventory()`, `run_smoke_probes()`, and `audit_store()` — all stdlib-only, no model calls. `scripts/sensorium_probe_audit.py` exposes `inventory`, `smoke`, and `audit` subcommands with `--json` and `--state-dir` options. Smoke exercises session-event, artifact, and operator source classes end-to-end through ingest → promotion → candidate creation, all in temporary state by default. Audit reports counts by sensor/source/kind, freshness, promotion yield, configured-but-silent sources, and blind spots. Probe inventory distinguishes implemented helpers (3), wired live probes (0), and blind spots (5: hindsight echoes, RSS/feed, file crawl, task results, active-session summaries). Tests cover empty-store reporting, seeded probes, threshold promotion/correlation, privacy/surface bounds, no raw content, no outbound records, and script stdout behavior. Remaining refinement for later phases: wire sensors into live hooks to move helpers from helper-only to wired-live status; implement blind-spot sensors.
 
-### Phase 8 — Subconscious advisory dry-run
+### Phase 7.6 — SENSOR_FIRST generic Hermes sensor pattern
 
-**Why:** Semantic consolidation should arrive only after deterministic spine and loop breakers are observable.
+**Why:** Before adding broad sensor families, prove the pattern with one reusable Hermes-level sensor that is incredibly cheap, deterministic, and useful to every agent/profile. Sensors run all the time, so they must measure structured facts, not infer semantic meaning. Any LLM interpretation belongs later in Subconscious/advisory.
+
+**First sensor:** `machine_body_pressure`.
+
+This is a better first live sensor than generic tool errors because hardware/resource pressure is shared bodily substrate for every Hermes agent on the machine. It is cheap, structured, present-tense, globally relevant, and testable without causing task failures. Ordinary tool errors remain session-local; body pressure describes whether the local host is strained enough to affect all sessions, workers, Hindsight, browsers, media jobs, and local inference.
+
+The live sensor must operate only over current OS/hardware counters and a very short aggregation window; it is not a historical miner. Offline replay over sampled metrics is allowed only as a **test harness** for the same online classifier, not as sensor behavior. The first implementation should prefer Linux/WSL-native cheap sources: `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}` when available, disk free/inode pressure, swap pressure, process-count/load normalization, and optional GPU counters only when a cheap local command such as `rocm-smi` is available and bounded by timeout. It must not run expensive profilers or inspect process command lines by default.
+
+**Global relevance rule:** A body-pressure signal is global only when machine pressure crosses deterministic thresholds or transitions into/out of degraded state: sustained high CPU pressure/load, low memory, swap pressure, IO pressure, disk-full risk, GPU memory/temperature pressure if available, or recovery after pressure. Normal healthy samples should be dropped or retained only as tiny rolling state.
+
+**Event emission rule:** body sampling produces raw samples, not Events. The sensor emits a Sensorium Event only on state transitions or sustained pressure worth Subconscious reasoning about:
+
+- `healthy -> degraded` after threshold breach persists for a short debounce window;
+- `degraded -> critical` immediately or after a smaller debounce, depending on metric severity;
+- `degraded/critical -> recovered` after healthy readings persist for a recovery window;
+- `pressure_flapping` when the level oscillates repeatedly inside the short window;
+- `sustained_pressure` heartbeat only for long-running pressure, rate-limited, so Subconscious can reroute work without getting spammed.
+
+Sensor history is intentionally tiny: keep only the last few samples/minutes needed for debounce, hysteresis, trend direction, and transition summaries. Do not mine old logs or long-horizon history in the sensor. Event history belongs to Subconscious: it may reason over body-pressure Events across hours/days to change routing, reduce cadence, unload local models, move work to no-agent/MiniMax/cloud, or hold nonessential loops. The Event payload should include compact window stats (`current`, `avg`, `max`, `samples`, `duration`, `threshold`, `previous_level`) rather than raw sample series.
+
+**Suggested default windows:** sample every 30–60s; degrade debounce 2–3 consecutive samples or ~3 minutes; critical debounce 1–2 samples depending on severity; recovery debounce 5–10 minutes healthy; sustained-pressure heartbeat no more than every 30–60 minutes while degraded/critical. Subconscious can consider the last 6–24h of body-pressure Events for routing decisions; longer baseline/trend analysis is advisory/dashboard work, not runtime sensing.
 
 **Acceptance:**
 
-- advisory context builder produces bounded context: config summary, top candidates, recent events/decisions, no raw transcripts;
+- implement exactly one generic sensor first: `machine_body_pressure`;
+- live operation consumes only present-tense OS/hardware counters and tiny rolling state; no historical scans in the runtime path;
+- no LLM calls, embeddings, semantic classification, transcript scanning, raw-output summarization, or per-process command-line mining;
+- emit global signals only for deterministic body-pressure transitions, e.g. `healthy -> degraded`, `degraded -> critical`, `critical -> recovered`, based on configured thresholds and short-window smoothing;
+- use cheap structured sources first: procfs PSI/load/meminfo, disk free/inodes, swap pressure, and optional bounded GPU telemetry;
+- ignore normal healthy samples by default;
+- keep payload bounded: metric family, pressure level, threshold crossed, current numeric values, short-window duration/count, host/profile scope, and timestamp; no raw process lists, secrets, transcripts, or full command output;
+- validate the online classifier with replay over sampled metric fixtures plus synthetic threshold-crossing fixtures; replay must simulate present-tense metric samples and never become the runtime sensor;
+- sensors are reusable across Hermes profiles and use configured paths/host metadata instead of hard-coded Sera/default-profile paths;
+- adapters emit signal dicts or ingest only when explicitly called by hooks/ticks; they do not send messages, create external tasks, open platform threads, or call models;
+- probe/audit reports runtime cost, sample volume, dropped healthy samples, transition counts, false-positive samples, and promotion yield before any second generic sensor is added.
+
+**Status:** Implemented in the first Phase 7.6 slice. `agent_sensorium.sensors` now exposes `machine_body_pressure_sample`, `classify_machine_body_pressure`, and `replay_machine_body_pressure`. The sensor samples cheap procfs/statvfs counters, keeps tiny rolling state, emits only compact transition signals, and never stores process command lines, raw process lists, transcripts, file contents, or tool output. `scripts/sensorium_tick.py --body-pressure` wires the sensor into the deterministic tick as an explicit opt-in; healthy samples stay silent, transition signals are ingested locally, dry-run persists nothing, and dispatch remains a preview. Probe inventory reports `sensorium.machine_body_pressure` as the only wired live probe. Full tests and py_compile passed after implementation.
+
+### Phase 8 — Subconscious advisory dry-run
+
+**Why:** Semantic consolidation should arrive only after deterministic spine and loop breakers are observable, including generic Hermes sensors producing real compact substrate.
+
+**Acceptance:**
+
+- advisory context builder produces bounded context: config summary, top candidates, recent events/decisions, probe audit summary, and no raw transcripts;
 - advisory output schema validates `DROP | SAVE | CREATE_CONSCIOUS_TASK`;
 - model lane is disabled by default;
 - dry-run stores advisory receipt and never performs external side effects.
@@ -177,15 +217,16 @@ The repo has no Beads DB, so backlog lives in this checked-in plan until a board
 
 ## Immediate next slice
 
-Implement Phase 8 next: subconscious advisory dry-run.
+Phase 7.6 first slice is implemented. The next slice should **not** add a second sensor yet. First run `scripts/sensorium_tick.py --body-pressure` in shadow/explicit mode long enough to measure:
 
-Files:
+- runtime cost;
+- healthy sample drop rate;
+- transition count;
+- false positives/flapping;
+- promotion yield;
+- whether body Events actually help Subconscious routing decisions.
 
-- Add a bounded advisory context builder: config summary, top candidates, recent events/decisions, probe audit summary, and no raw transcripts.
-- Add advisory output schema validation for `DROP | SAVE | CREATE_CONSCIOUS_TASK`.
-- Keep model-backed advisory disabled by default; dry-run stores only local advisory receipts and performs no external side effects.
-- Add focused tests for context bounds, schema refusal paths, disabled-by-default behavior, probe-audit inclusion, and dry-run receipt/no-action semantics.
-- Update bundled skill/docs with the advisory dry-run boundary.
+Only after that evidence should the project choose between: tuning thresholds/windows, adding dashboard/status visibility for body pressure, adding optional GPU telemetry, or implementing the next shared-substrate sensor. Model-backed Phase 8 advisory remains after deterministic sensing has enough real Event substrate.
 
 Gate:
 

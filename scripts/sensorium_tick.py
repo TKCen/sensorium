@@ -14,13 +14,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_sensorium.schemas import utc_now_iso
+from agent_sensorium.sensors import classify_machine_body_pressure, machine_body_pressure_sample
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.tools import (
     handle_sensorium_compact,
     handle_sensorium_dispatch_once,
+    handle_sensorium_ingest_signal,
     handle_sensorium_service_threads,
     handle_sensorium_status,
 )
+
+
+def _body_state_path(store: SensoriumStore) -> Path:
+    return store.root / "body_pressure_state.json"
+
+
+def _read_body_state(path: Path) -> dict:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {}
+
+
+def _write_body_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, separators=(",", ":")))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="Skip mutations (compact, service archival, receipt)",
     )
+    parser.add_argument(
+        "--body-pressure", action="store_true",
+        help="Sample machine body pressure and ingest only transition signals",
+    )
     args = parser.parse_args(argv)
 
     kw: dict = {"instance": args.instance, "state_dir": args.state_dir}
@@ -43,6 +67,31 @@ def main(argv: list[str] | None = None) -> int:
     errors: list[str] = []
 
     try:
+        if args.body_pressure:
+            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+            body_path = _body_state_path(store)
+            body_state = _read_body_state(body_path)
+            sample = machine_body_pressure_sample()
+            signal, next_state = classify_machine_body_pressure(sample, state=body_state)
+            body_step = {
+                "sampled": True,
+                "emitted": signal is not None,
+                "level": next_state.get("level", "healthy"),
+                "observed_level": next_state.get("last_observed_level", "healthy"),
+            }
+            if signal is not None:
+                body_step["transition"] = signal.get("transition")
+                if not args.dry_run:
+                    raw = json.loads(handle_sensorium_ingest_signal(signal=signal, **kw))
+                    if raw.get("success"):
+                        body_step["ingest"] = raw["data"]
+                    else:
+                        errors.append(f"body_pressure_ingest: {raw.get('error', 'unknown')}")
+            if not args.dry_run:
+                store.ensure_dirs()
+                _write_body_state(body_path, next_state)
+            steps["body_pressure"] = body_step
+
         if not args.dry_run:
             raw = json.loads(handle_sensorium_compact(**kw))
             if raw.get("success"):

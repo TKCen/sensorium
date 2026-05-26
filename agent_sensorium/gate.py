@@ -22,6 +22,7 @@ DEFAULT_CONFIG: dict = {
         "artifact_created",
         "unresolved_question",
         "task_result",
+        "body_pressure",
     ],
 }
 

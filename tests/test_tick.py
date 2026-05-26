@@ -165,6 +165,53 @@ class TestTickErrors:
         assert "sensorium_tick:" in proc.stderr
 
 
+class TestTickBodyPressure:
+    """Optional body-pressure tick samples cheaply and emits only transition signals."""
+
+    def test_body_pressure_disabled_by_default(self, state_dir, monkeypatch):
+        def bad_sample(**_kwargs):
+            return {"mem_available_pct": 3.0, "load_per_cpu": 0.1, "swap_used_pct": 0.0}
+
+        monkeypatch.setattr(sensorium_tick, "machine_body_pressure_sample", bad_sample)
+        _run_tick(state_dir)
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        assert store.read_jsonl("signals") == []
+
+    def test_body_pressure_option_debounces_and_ingests_transition(self, state_dir, monkeypatch):
+        def bad_sample(**_kwargs):
+            return {"mem_available_pct": 8.0, "load_per_cpu": 0.1, "swap_used_pct": 0.0}
+
+        monkeypatch.setattr(sensorium_tick, "machine_body_pressure_sample", bad_sample)
+        for _ in range(2):
+            code = sensorium_tick.main(["--instance", "test", "--state-dir", state_dir, "--body-pressure"])
+            assert code == 0
+            store = SensoriumStore(instance="test", state_dir=state_dir)
+            assert store.read_jsonl("signals") == []
+
+        code = sensorium_tick.main(["--instance", "test", "--state-dir", state_dir, "--body-pressure"])
+        assert code == 0
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        signals = store.read_jsonl("signals")
+        assert len(signals) == 1
+        assert signals[0]["sensor"] == "sensorium.machine_body_pressure"
+        assert signals[0]["transition"] == "healthy_to_degraded"
+        assert signals[0]["kind"] == "body_pressure"
+
+    def test_body_pressure_dry_run_does_not_persist_state_or_signal(self, state_dir, monkeypatch):
+        def critical_sample(**_kwargs):
+            return {"mem_available_pct": 3.0, "load_per_cpu": 0.1, "swap_used_pct": 0.0}
+
+        monkeypatch.setattr(sensorium_tick, "machine_body_pressure_sample", critical_sample)
+        for _ in range(3):
+            code = sensorium_tick.main([
+                "--instance", "test", "--state-dir", state_dir, "--body-pressure", "--dry-run",
+            ])
+            assert code == 0
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        assert store.read_jsonl("signals") == []
+        assert not (Path(state_dir) / "body_pressure_state.json").exists()
+
+
 class TestTickNoOutbound:
     """Tick never creates outbound or user-facing records."""
 

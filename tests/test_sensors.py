@@ -9,8 +9,11 @@ from agent_sensorium.sensors import (
     MAX_REF_CHARS,
     MAX_SUMMARY_CHARS,
     artifact_signal,
+    classify_machine_body_pressure,
     file_content_hash,
+    machine_body_pressure_sample,
     operator_signal,
+    replay_machine_body_pressure,
     session_event_signal,
 )
 
@@ -152,6 +155,141 @@ class TestOperatorSignal:
     def test_custom_kind(self):
         sig = operator_signal(summary="New design requirement", kind="design_decision")
         assert sig["kind"] == "design_decision"
+
+
+class TestMachineBodyPressure:
+    """Body sensor emits only compact global transition signals from cheap samples."""
+
+    def test_healthy_samples_emit_nothing(self):
+        state = {}
+        emitted = []
+        for sample in [
+            {"mem_available_pct": 80.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0},
+            {"mem_available_pct": 75.0, "load_per_cpu": 0.3, "swap_used_pct": 0.0},
+            {"mem_available_pct": 70.0, "load_per_cpu": 0.4, "swap_used_pct": 0.0},
+        ]:
+            sig, state = classify_machine_body_pressure(sample, state=state)
+            emitted.append(sig)
+        assert emitted == [None, None, None]
+        assert state["level"] == "healthy"
+
+    def test_degraded_memory_requires_debounce_and_emits_compact_signal(self):
+        state = {}
+        sample = {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        first, state = classify_machine_body_pressure(sample, state=state)
+        second, state = classify_machine_body_pressure(sample, state=state)
+        third, state = classify_machine_body_pressure(sample, state=state)
+
+        assert first is None
+        assert second is None
+        assert third is not None
+        assert third["sensor"] == "sensorium.machine_body_pressure"
+        assert third["source"] == "machine"
+        assert third["kind"] == "body_pressure"
+        assert third["scope"] == "global"
+        assert third["pressure_level"] == "degraded"
+        assert third["transition"] == "healthy_to_degraded"
+        assert third["metric_family"] == "memory"
+        assert third["window"]["samples"] == 3
+        assert third["sensitivity"] == "local_only"
+        assert third["allowed_surfaces"] == ["local"]
+        assert third["strength_hint"] >= 0.75
+        for forbidden in ("processes", "cmdline", "stdout", "stderr", "transcript", "raw"):
+            assert forbidden not in third
+
+    def test_critical_memory_emits_faster_than_degraded(self):
+        state = {}
+        sample = {"mem_available_pct": 3.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        first, state = classify_machine_body_pressure(sample, state=state)
+        second, state = classify_machine_body_pressure(sample, state=state)
+
+        assert first is None
+        assert second is not None
+        assert second["pressure_level"] == "critical"
+        assert second["transition"] == "healthy_to_critical"
+        assert second["strength_hint"] >= 0.9
+
+    def test_recovery_requires_healthy_window(self):
+        state = {}
+        bad = {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        for _ in range(3):
+            sig, state = classify_machine_body_pressure(bad, state=state)
+        assert sig is not None
+        healthy = {"mem_available_pct": 70.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        emitted = []
+        for _ in range(5):
+            sig, state = classify_machine_body_pressure(healthy, state=state)
+            emitted.append(sig)
+
+        assert emitted[:4] == [None, None, None, None]
+        assert emitted[4] is not None
+        assert emitted[4]["transition"] == "degraded_to_recovered"
+        assert emitted[4]["pressure_level"] == "healthy"
+
+    def test_sustained_pressure_heartbeat_is_rate_limited(self):
+        config = {"degraded_samples": 1, "sustained_samples": 3}
+        state = {}
+        bad = {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        transition, state = classify_machine_body_pressure(bad, state=state, config=config)
+        assert transition is not None
+
+        one, state = classify_machine_body_pressure(bad, state=state, config=config)
+        two, state = classify_machine_body_pressure(bad, state=state, config=config)
+        three, state = classify_machine_body_pressure(bad, state=state, config=config)
+        assert one is None
+        assert two is None
+        assert three is not None
+        assert three["transition"] == "sustained_degraded"
+
+    def test_replay_uses_same_online_classifier_without_runtime_history_scan(self):
+        samples = [
+            {"mem_available_pct": 80.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0},
+            {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0},
+            {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0},
+            {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0},
+        ]
+        signals = replay_machine_body_pressure(samples)
+        assert len(signals) == 1
+        assert signals[0]["transition"] == "healthy_to_degraded"
+
+    def test_procfs_sample_parses_fixture_without_process_lists(self, tmp_path):
+        proc = tmp_path / "proc"
+        proc.mkdir()
+        (proc / "loadavg").write_text("0.50 0.40 0.30 1/100 123\n")
+        (proc / "meminfo").write_text(
+            "MemTotal:       1000000 kB\n"
+            "MemAvailable:    250000 kB\n"
+            "SwapTotal:        500000 kB\n"
+            "SwapFree:         400000 kB\n"
+        )
+        pressure = proc / "pressure"
+        pressure.mkdir()
+        (pressure / "cpu").write_text("some avg10=1.00 avg60=0.50 avg300=0.10 total=10\n")
+        (pressure / "memory").write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        (pressure / "io").write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+
+        sample = machine_body_pressure_sample(proc_root=str(proc), disk_paths=[str(tmp_path)])
+        assert sample["mem_available_pct"] == 25.0
+        assert sample["swap_used_pct"] == 20.0
+        assert sample["psi_cpu_some_avg10"] == 1.0
+        assert "processes" not in sample
+        assert "cmdline" not in sample
+
+    def test_body_pressure_signal_validates_and_ingests(self):
+        from agent_sensorium.schemas import validate_signal
+        from agent_sensorium.tools import handle_sensorium_ingest_signal
+
+        state = {}
+        sample = {"mem_available_pct": 8.0, "load_per_cpu": 0.2, "swap_used_pct": 0.0}
+        sig = None
+        for _ in range(3):
+            sig, state = classify_machine_body_pressure(sample, state=state)
+        assert sig is not None
+        validate_signal(sig)
+        with tempfile.TemporaryDirectory() as td:
+            raw = handle_sensorium_ingest_signal(signal=sig, instance="test", state_dir=td)
+            result = json.loads(raw)
+            assert result["success"] is True
 
 
 class TestFileContentHash:

@@ -30,15 +30,17 @@ class TestProbeInventory:
         assert "session_event_signal" in names
         assert "artifact_signal" in names
         assert "operator_signal" in names
+        assert "machine_body_pressure_sample" in names
 
-    def test_no_wired_live_probes(self):
+    def test_body_pressure_is_only_wired_live_probe(self):
         inv = probe_inventory()
-        assert inv["wired_live_probes"] == []
+        assert inv["wired_live_probes"] == ["sensorium.machine_body_pressure"]
 
-    def test_helpers_marked_not_wired(self):
+    def test_helpers_marked_with_wiring_status(self):
         inv = probe_inventory()
-        for h in inv["implemented_helpers"]:
-            assert h["wired_live"] is False
+        by_function = {h["function"]: h for h in inv["implemented_helpers"]}
+        assert by_function["machine_body_pressure_sample"]["wired_live"] is True
+        assert by_function["session_event_signal"]["wired_live"] is False
 
     def test_blind_spots_listed(self):
         inv = probe_inventory()

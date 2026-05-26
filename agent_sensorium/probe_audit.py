@@ -8,14 +8,15 @@ state without mutating the real default Sensorium.
 import json
 
 from .schemas import VALID_SOURCES
-from .sensors import artifact_signal, operator_signal, session_event_signal
+from .sensors import artifact_signal, machine_body_pressure_sample, operator_signal, session_event_signal
 from .store import SensoriumStore
 from .tools import handle_sensorium_ingest_signal
 
 KNOWN_HELPERS = {
-    "session_event_signal": {"source": "hermes_session", "sensor": "sensorium.session_event"},
-    "artifact_signal": {"source": "artifact", "sensor": "sensorium.artifact"},
-    "operator_signal": {"source": "manual", "sensor": "sensorium.explicit_operator"},
+    "session_event_signal": {"source": "hermes_session", "sensor": "sensorium.session_event", "wired_live": False},
+    "artifact_signal": {"source": "artifact", "sensor": "sensorium.artifact", "wired_live": False},
+    "operator_signal": {"source": "manual", "sensor": "sensorium.explicit_operator", "wired_live": False},
+    machine_body_pressure_sample.__name__: {"source": "machine", "sensor": "sensorium.machine_body_pressure", "wired_live": True},
 }
 
 BLIND_SPOTS = [
@@ -34,11 +35,11 @@ def probe_inventory() -> dict:
                 "function": name,
                 "source": info["source"],
                 "sensor": info["sensor"],
-                "wired_live": False,
+                "wired_live": bool(info.get("wired_live", False)),
             }
             for name, info in KNOWN_HELPERS.items()
         ],
-        "wired_live_probes": [],
+        "wired_live_probes": [info["sensor"] for info in KNOWN_HELPERS.values() if info.get("wired_live")],
         "configured_sources": sorted(VALID_SOURCES),
         "silent_sources": sorted(VALID_SOURCES - {"feedback"}),
         "blind_spots": list(BLIND_SPOTS),
