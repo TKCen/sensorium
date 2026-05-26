@@ -35,6 +35,24 @@ VALID_REQUEST_TYPES = {
     "CREATE_FOLLOWUP",
 }
 
+DIRECT_CONSCIOUS_KINDS = {
+    "body_pressure",
+    "network_pressure",
+    "process_pressure",
+    "hindsight_pressure",
+    "kanban_pressure",
+}
+ADVISORY_SOURCE_EXCLUDED_KINDS = DIRECT_CONSCIOUS_KINDS | {"subconscious_advisory"}
+
+
+def is_direct_conscious_kind(kind: str | None) -> bool:
+    return str(kind or "") in DIRECT_CONSCIOUS_KINDS
+
+
+def is_advisory_source_kind(kind: str | None) -> bool:
+    return str(kind or "") not in ADVISORY_SOURCE_EXCLUDED_KINDS
+
+
 DEFAULT_ADVISORY_CONFIG: dict[str, Any] = {
     "event_limit": 8,
     "candidate_limit": 5,
@@ -123,10 +141,20 @@ def build_advisory_context(store: SensoriumStore, config: dict | None = None) ->
     cfg = _merged_config(config)
     store.ensure_dirs()
 
-    events = store.read_jsonl("events")
-    candidates = [c for c in store.read_jsonl("candidates") if c.get("status", "candidate") == "candidate"]
+    events = [e for e in store.read_jsonl("events") if is_advisory_source_kind(e.get("kind"))]
+    candidates = [
+        c for c in store.read_jsonl("candidates")
+        if c.get("status", "candidate") == "candidate" and is_advisory_source_kind(c.get("kind"))
+    ]
     candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
     decisions = store.read_jsonl("decisions")
+    direct_counts = {
+        "events": sum(1 for e in store.read_jsonl("events") if is_direct_conscious_kind(e.get("kind"))),
+        "candidates": sum(
+            1 for c in store.read_jsonl("candidates")
+            if c.get("status", "candidate") == "candidate" and is_direct_conscious_kind(c.get("kind"))
+        ),
+    }
     from .probe_audit import audit_store, probe_inventory
 
     inventory = probe_inventory()
@@ -143,6 +171,9 @@ def build_advisory_context(store: SensoriumStore, config: dict | None = None) ->
             "allowed_actions": sorted(VALID_ADVISORY_ACTIONS),
             "model_lane_default": "disabled",
             "side_effect_boundary": "internal_candidates_only",
+            "direct_conscious_kinds_excluded": sorted(DIRECT_CONSCIOUS_KINDS),
+            "advisory_source_kinds_excluded": sorted(ADVISORY_SOURCE_EXCLUDED_KINDS),
+            "direct_conscious_material_omitted": direct_counts,
         },
         "top_candidates": [
             _compact_candidate(c, summary_chars=int(cfg["summary_chars"]))
@@ -263,11 +294,10 @@ def _model_prompt(context: dict) -> list[dict]:
         "You are the cheap Subconscious advisory lane for Agent Sensorium. "
         "Read only the bounded JSON context. Do not ask questions. Do not send messages. "
         "Return exactly one JSON object with action DROP, SAVE, or CREATE_CONSCIOUS_TASK. "
-        "Use CREATE_CONSCIOUS_TASK when promoted Events/Candidates merit later conscious attention. "
-        "Important: active Candidates already crossed deterministic sensor thresholds; do not DROP solely because "
-        "candidate pressure is below 0.70. Treat kanban_pressure blocked>=10, failed>=3, or stale_running>=1 as "
-        "conscious-review material unless recent Decisions show it was already handled. Treat hindsight_pressure "
-        "failed>=5, pending>=50, or API unavailable as conscious-review material unless already handled. "
+        "Use CREATE_CONSCIOUS_TASK when semantic/contextual Events/Candidates merit later conscious attention. "
+        "Do not adjudicate directly quantified machine/queue/work-board pressure thresholds; those are routed "
+        "through deterministic consciousness promotion before this Subconscious lane. Your job is semantic linking, "
+        "cross-event correlation, memory/session pattern detection, and ambiguous actionability. "
         "Allowed conscious_task request_type values: THINK, SAVE, UPDATE_MEMORY_OR_SKILL, CREATE_FOLLOWUP. "
         "Never output REACH_OUT. Never invent raw transcript/file/task details."
     )

@@ -22,7 +22,7 @@ def state_dir(tmp_path):
     return str(tmp_path / "sensorium")
 
 
-def _event(idx: int, *, kind="body_pressure", summary=None, sensitivity="local_only", surfaces=None):
+def _event(idx: int, *, kind="design_decision", summary=None, sensitivity="local_only", surfaces=None):
     return {
         "id": f"evt_{idx}",
         "ts": "2026-05-26T10:00:00Z",
@@ -36,15 +36,15 @@ def _event(idx: int, *, kind="body_pressure", summary=None, sensitivity="local_o
     }
 
 
-def _candidate(idx: int, *, pressure=0.7, summary=None):
+def _candidate(idx: int, *, pressure=0.7, summary=None, kind="design_decision"):
     return {
         "id": f"cand_{idx}",
         "status": "candidate",
-        "kind": "body_pressure",
+        "kind": kind,
         "pressure": pressure,
         "summary": summary or f"Candidate {idx}",
         "event_ids": [f"evt_{idx}"],
-        "correlation_keys": ["body_pressure"],
+        "correlation_keys": [kind],
         "sensitivity": "local_only",
         "allowed_surfaces": ["local"],
         "created_at": utc_now_iso(),
@@ -78,6 +78,22 @@ def test_context_builder_is_bounded_and_uses_events_not_raw_signals(state_dir):
     serialized = json.dumps(context)
     assert "RAW SIGNAL SHOULD NOT APPEAR" not in serialized
     assert len(context["recent_events"][0]["summary"]) <= 180
+
+
+def test_context_builder_excludes_direct_quantified_pressure_from_subconscious_context(state_dir):
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    store.ensure_dirs()
+    store.append_jsonl("events", _event(10, kind="kanban_pressure", summary="blocked=17"))
+    store.append_jsonl("events", _event(11, kind="design_decision", summary="semantic link candidate"))
+    store.append_jsonl("candidates", _candidate(10, kind="kanban_pressure", summary="blocked=17", pressure=0.68))
+    store.append_jsonl("candidates", _candidate(11, kind="design_decision", summary="semantic candidate", pressure=0.72))
+    store.append_jsonl("candidates", _candidate(12, kind="subconscious_advisory", summary="prior advisory", pressure=0.8))
+
+    context = build_advisory_context(store)
+
+    assert [e["kind"] for e in context["recent_events"]] == ["design_decision"]
+    assert [c["kind"] for c in context["top_candidates"]] == ["design_decision"]
+    assert context["config_summary"]["direct_conscious_material_omitted"] == {"events": 1, "candidates": 1}
 
 
 def test_advisory_output_schema_rejects_unknown_action():
@@ -225,18 +241,18 @@ def test_minimax_think_wrapper_is_stripped_before_json_parse():
     }
 
 
-def test_model_prompt_treats_degraded_kanban_pressure_as_conscious_material():
-    messages = _model_prompt({"top_candidates": [{"kind": "kanban_pressure", "summary": "blocked=17", "pressure": 0.68}]})
+def test_model_prompt_routes_quantified_thresholds_outside_subconscious():
+    messages = _model_prompt({"top_candidates": [{"kind": "design_decision", "summary": "semantic pattern", "pressure": 0.68}]})
 
     system = messages[0]["content"]
-    assert "do not DROP solely because candidate pressure is below 0.70" in system
-    assert "kanban_pressure blocked>=10" in system
+    assert "Do not adjudicate directly quantified" in system
+    assert "semantic linking" in system
 
 
 def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
-    store.append_jsonl("events", _event(4, kind="hindsight_pressure", summary="failed=9"))
+    store.append_jsonl("events", _event(4, kind="design_decision", summary="repeated session theme"))
 
     def fake_generate(context, *, config):
         assert context["recent_events"]

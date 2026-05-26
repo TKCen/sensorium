@@ -37,11 +37,11 @@ _add_import_path()
 
 from agent_sensorium.schemas import utc_now_iso  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
+from agent_sensorium.subconscious import is_advisory_source_kind, is_direct_conscious_kind  # noqa: E402
 from agent_sensorium.tools import handle_sensorium_subconscious_advisory  # noqa: E402
 
 
-SOURCE_CANDIDATE_KINDS_EXCLUDED = {"subconscious_advisory"}
-ADVISORY_POLICY_VERSION = "2026-05-26.2"
+ADVISORY_POLICY_VERSION = "2026-05-26.3"
 
 
 def _json_write(path: Path, obj: dict) -> None:
@@ -72,16 +72,26 @@ def _lock_nonblocking(lock_path: Path):
 
 
 def _source_material(store: SensoriumStore, *, event_limit: int, candidate_limit: int) -> dict:
-    events = store.read_jsonl("events")[-event_limit:]
+    all_events = store.read_jsonl("events")
+    events = [e for e in all_events if is_advisory_source_kind(e.get("kind"))][-event_limit:]
+    all_candidates = store.read_jsonl("candidates")
     candidates = [
-        c for c in store.read_jsonl("candidates")
+        c for c in all_candidates
         if c.get("status", "candidate") == "candidate"
-        and c.get("kind") not in SOURCE_CANDIDATE_KINDS_EXCLUDED
+        and is_advisory_source_kind(c.get("kind"))
     ]
+    direct_counts = {
+        "events": sum(1 for e in all_events if is_direct_conscious_kind(e.get("kind"))),
+        "source_candidates": sum(
+            1 for c in all_candidates
+            if c.get("status", "candidate") == "candidate" and is_direct_conscious_kind(c.get("kind"))
+        ),
+    }
     candidates.sort(key=lambda c: (str(c.get("kind", "")), str(c.get("id", ""))))
     candidates = candidates[-candidate_limit:]
     return {
         "advisory_policy_version": ADVISORY_POLICY_VERSION,
+        "direct_conscious_material_omitted": direct_counts,
         "events": [
             {
                 "id": e.get("id"),
