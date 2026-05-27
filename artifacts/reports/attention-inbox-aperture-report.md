@@ -91,6 +91,18 @@ SMOKE TEST PASSED
 
 ## Final Commit SHA
 
-`bd636a0` on branch `feat/sensorium-attention-inbox-aperture`
+OMC handoff implementation commit: `9af9690` on branch `feat/sensorium-attention-inbox-aperture`.
+
+Lead closeout may add a report-only verification commit after this marker; use `git rev-parse --short HEAD` on the branch as the authoritative current branch head.
+
+## Lead Closeout Verification Addendum
+
+After the OMC handoff, Sera independently verified:
+
+- `python -m pytest tests -q` passed: 412 tests.
+- `python -m py_compile agent_sensorium/*.py scripts/*.py` passed.
+- `git diff --check` passed.
+- Independent temp-state smoke proved `handle_sensorium_attention_inbox(...)` returns two local inbox items and does not mutate candidates, threads, decisions, signals, or outbox rows.
+- Plugin registration seam exposes and forwards `instance`, `state_dir`, `surface`, `limit`, and `config_path` for `sensorium_attention_inbox`.
 
 SENSORIUM_ATTENTION_INBOX_DONE
