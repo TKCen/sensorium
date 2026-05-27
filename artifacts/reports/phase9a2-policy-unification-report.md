@@ -53,7 +53,7 @@ The gate enforces:
 - `test_missing_config_defaults_local_only`
 - `test_local_works_with_default_config`
 
-**Updated tests (3):**
+**Updated tests (4):**
 - `test_pre_llm_pointer_records_cooldown_receipt` — writes instance config allowing discord
 - `test_pointer_preview_reports_cooldown_reason` — writes instance config allowing discord
 - `test_thread_open_returns_compact_capsule_when_surface_allowed` — writes instance config allowing discord
@@ -74,4 +74,5 @@ git diff --check clean
 
 ## Final git commit hash
 
-See commit on branch `omc/phase9a2-policy-unification` after this report.
+Functional fix: `d1b8d36` on branch `omc/phase9a2-policy-unification`.
+Report fixup: `cd1aebb` on the same branch.
