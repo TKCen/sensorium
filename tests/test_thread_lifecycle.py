@@ -1,6 +1,7 @@
 """Tests for conscious-thread open/update lifecycle."""
 
 import json
+from pathlib import Path
 
 from agent_sensorium.tools import (
     handle_sensorium_attention_pointer,
@@ -40,9 +41,17 @@ def _thread(**overrides):
     return base
 
 
+def _write_config(state_dir, surfaces=None, max_sensitivity="private"):
+    config = {"allowed_surfaces": surfaces or ["local"], "max_sensitivity": max_sensitivity}
+    path = Path(state_dir) / "instance.config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config))
+
+
 def test_thread_open_returns_compact_capsule_when_surface_allowed(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["local", "discord"])
     store.append_jsonl("threads", _thread())
 
     result = json.loads(
@@ -77,6 +86,7 @@ def test_thread_open_refuses_disallowed_surface(tmp_path):
 def test_thread_update_closes_thread_and_removes_pointer_eligibility(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["local", "discord"])
     store.append_jsonl("threads", _thread())
 
     before = json.loads(
@@ -294,3 +304,75 @@ def test_pin_already_pinned_refused(tmp_path):
     )
     assert result["success"] is False
     assert "already pinned" in result["error"]
+
+
+class TestThreadOpenPolicyUnification:
+    """Verify thread_open enforces instance config policy."""
+
+    def test_config_excludes_surface_blocks_open(self, tmp_path):
+        """Thread allows discord+local, config allows local only → discord open refused."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"])
+        store.append_jsonl("threads", _thread(allowed_surfaces=["discord", "local"]))
+
+        result = json.loads(handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path),
+            thread_id="sth_lifecycle", surface="discord",
+        ))
+        assert result["success"] is False
+        assert "not allowed on surface" in result["error"]
+
+    def test_config_allows_surface_permits_open(self, tmp_path):
+        """Thread allows local, config allows local → open succeeds."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"])
+        store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+
+        result = json.loads(handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path),
+            thread_id="sth_lifecycle", surface="local",
+        ))
+        assert result["success"] is True
+        assert result["data"]["thread_id"] == "sth_lifecycle"
+
+    def test_sensitivity_blocks_open(self, tmp_path):
+        """Thread sensitivity=public_safe, config max=private → open refused."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"], max_sensitivity="private")
+        store.append_jsonl("threads", _thread(
+            allowed_surfaces=["local"], sensitivity="public_safe",
+        ))
+
+        result = json.loads(handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path),
+            thread_id="sth_lifecycle", surface="local",
+        ))
+        assert result["success"] is False
+        assert "not allowed on surface" in result["error"]
+
+    def test_missing_config_defaults_local_only(self, tmp_path):
+        """No config → SAFE_DEFAULTS (local only). Discord open refused."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        store.append_jsonl("threads", _thread(allowed_surfaces=["discord", "local"]))
+
+        result = json.loads(handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path),
+            thread_id="sth_lifecycle", surface="discord",
+        ))
+        assert result["success"] is False
+
+    def test_local_works_with_default_config(self, tmp_path):
+        """No config → local still works via SAFE_DEFAULTS."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+
+        result = json.loads(handle_sensorium_thread_open(
+            instance="test", state_dir=str(tmp_path),
+            thread_id="sth_lifecycle", surface="local",
+        ))
+        assert result["success"] is True

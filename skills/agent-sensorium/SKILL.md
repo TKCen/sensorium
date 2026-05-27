@@ -142,7 +142,7 @@ The active-session pointer is a doorway, not awareness itself. It may reveal onl
 - the thread id and short title;
 - the operator phrase for opening it, such as “take it up”.
 
-The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium_thread_open` after the requested surface passes the thread’s `allowed_surfaces` gate.
+The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium_thread_open` after the requested surface passes the unified visibility gate (`config.visible_on_surface`), which checks BOTH the item’s `allowed_surfaces` AND the instance config `allowed_surfaces`, plus sensitivity. This same gate is enforced by the attention inbox, pointer selection, `pre_llm_call` pointer injection, and `sensorium_thread_open`. Missing config fails closed to local-only.
 
 There are two pointer paths:
 

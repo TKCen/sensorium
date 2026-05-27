@@ -1,5 +1,7 @@
 """Tests for active-session Sensorium pointers."""
 
+import json
+
 from agent_sensorium.pointers import (
     handle_pointer_pre_llm,
     pointer_context_for_llm,
@@ -38,6 +40,14 @@ def _thread(**overrides):
     return base
 
 
+def _write_config(state_dir, surfaces=None, max_sensitivity="private"):
+    from pathlib import Path
+    config = {"allowed_surfaces": surfaces or ["local"], "max_sensitivity": max_sensitivity}
+    path = Path(state_dir) / "instance.config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config))
+
+
 def test_pointer_requires_allowed_surface(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
@@ -55,6 +65,7 @@ def test_pointer_requires_allowed_surface(tmp_path):
 def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
 
     first = handle_pointer_pre_llm(
@@ -103,6 +114,7 @@ def test_pointer_context_is_door_handle_not_capsule():
 def test_pointer_preview_reports_cooldown_reason(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
 
     first = handle_pointer_pre_llm(
@@ -125,3 +137,72 @@ def test_truncate_text_avoids_mid_word_guillotine():
     assert out.endswith("…")
     assert "continuit…" not in out
     assert len(out) <= 62
+
+
+class TestPointerPolicyUnification:
+    """Verify pointer selection enforces instance config policy."""
+
+    def test_config_excludes_surface_returns_no_pointer(self, tmp_path):
+        """Thread allows discord+local, config allows local only → discord no_pointer."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"])
+        store.append_jsonl("threads", _thread(allowed_surfaces=["discord", "local"]))
+
+        result = select_attention_pointer(store, surface="discord")
+        assert result["action"] == "no_pointer"
+        assert result["reason"] == "no_visible_thread_for_surface"
+
+    def test_config_allows_surface_returns_pointer(self, tmp_path):
+        """Thread allows local, config allows local → pointer available."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"])
+        store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+
+        result = select_attention_pointer(store, surface="local")
+        assert result["action"] == "pointer_available"
+
+    def test_pre_llm_no_receipt_when_config_excludes_surface(self, tmp_path):
+        """pre_llm on excluded surface → None, no pointer.presented receipt."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"])
+        store.append_jsonl("threads", _thread(allowed_surfaces=["discord", "local"]))
+
+        result = handle_pointer_pre_llm(
+            instance="test", platform="discord",
+            session_id="s1", state_dir=str(tmp_path),
+        )
+        assert result is None
+        assert store.read_jsonl("decisions") == []
+
+    def test_sensitivity_gate_blocks_pointer(self, tmp_path):
+        """Thread sensitivity=public_safe, config max_sensitivity=private → no pointer."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        _write_config(tmp_path, surfaces=["local"], max_sensitivity="private")
+        store.append_jsonl("threads", _thread(
+            allowed_surfaces=["local"], sensitivity="public_safe",
+        ))
+
+        result = select_attention_pointer(store, surface="local")
+        assert result["action"] == "no_pointer"
+
+    def test_missing_config_defaults_to_local_only(self, tmp_path):
+        """No config file → SAFE_DEFAULTS (local only). Discord pointer blocked."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+
+        result = select_attention_pointer(store, surface="discord")
+        assert result["action"] == "no_pointer"
+
+    def test_local_still_works_with_default_config(self, tmp_path):
+        """No config file → local still works since SAFE_DEFAULTS allows local."""
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+
+        result = select_attention_pointer(store, surface="local")
+        assert result["action"] == "pointer_available"

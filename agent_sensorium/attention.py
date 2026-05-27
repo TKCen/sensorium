@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from .config import load_instance_config
-from .schemas import SENSITIVITY_RANK, truncate_text, utc_now_iso
+from .config import load_instance_config, visible_on_surface
+from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 CANDIDATE_DECISIONS = ["open", "suppress", "hold", "mark_reviewed"]
@@ -45,22 +45,6 @@ def _freshness(updated_at: str | None, now: datetime) -> str:
     if hours < 24:
         return "recent"
     return "stale"
-
-
-def visible_on_surface(item: dict, surface: str, config: dict) -> bool:
-    """Return True only if item is allowed on the requested surface per policy.
-
-    Fails closed: missing surfaces or sensitivity data hides the item.
-    """
-    if not surface:
-        return False
-    item_surfaces = set(item.get("allowed_surfaces") or [])
-    config_surfaces = set(config.get("allowed_surfaces") or [])
-    if surface not in item_surfaces or surface not in config_surfaces:
-        return False
-    item_rank = SENSITIVITY_RANK.get(item.get("sensitivity", "private"), 1)
-    max_rank = SENSITIVITY_RANK.get(config.get("max_sensitivity", "private"), 1)
-    return item_rank <= max_rank
 
 
 def _candidate_item(candidate: dict, now: datetime) -> dict:

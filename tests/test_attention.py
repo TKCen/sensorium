@@ -11,8 +11,8 @@ from agent_sensorium.attention import (
     CANDIDATE_DECISIONS,
     THREAD_DECISIONS,
     build_attention_inbox,
-    visible_on_surface,
 )
+from agent_sensorium.config import visible_on_surface
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.tools import handle_sensorium_attention_inbox
 
