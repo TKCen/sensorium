@@ -1002,8 +1002,9 @@ def handle_sensorium_attention_inbox(
     limit: int = 50,
     config_path: str | None = None,
 ) -> str:
+    # Read-only aperture: do not call ensure_dirs() or create default state
+    # just because an operator/dashboard looked at the inbox.
     store = SensoriumStore(instance=instance, state_dir=state_dir)
-    store.ensure_dirs()
     inbox = build_attention_inbox(
         store, surface=surface, config_path=config_path, limit=limit,
     )

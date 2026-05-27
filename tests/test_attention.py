@@ -1,5 +1,7 @@
 """Tests for the Attention Inbox / conscious aperture surface."""
 
+import asyncio
+import importlib.util
 import json
 import os
 
@@ -351,6 +353,16 @@ class TestToolHandler:
         assert result["success"] is True
         assert result["data"]["counts"]["total"] == 0
 
+    def test_handler_missing_state_is_read_only(self, tmp_path):
+        missing = tmp_path / "missing-state"
+        assert not missing.exists()
+        result = json.loads(handle_sensorium_attention_inbox(
+            instance="test", state_dir=str(missing), surface="local",
+        ))
+        assert result["success"] is True
+        assert result["data"]["counts"]["total"] == 0
+        assert not missing.exists()
+
     def test_handler_with_data(self, state_dir):
         store = SensoriumStore(instance="test", state_dir=state_dir)
         store.ensure_dirs()
@@ -401,7 +413,23 @@ class TestDashboardDefaultInstance:
         assert default_instance_name("default") == "env-inst"
 
     def test_missing_state_returns_empty_inbox(self, tmp_path):
-        store = SensoriumStore(instance="nonexistent", state_dir=str(tmp_path / "missing"))
-        store.ensure_dirs()
+        missing = tmp_path / "missing"
+        store = SensoriumStore(instance="nonexistent", state_dir=str(missing))
         inbox = build_attention_inbox(store, surface="local")
         assert inbox["counts"]["total"] == 0
+        assert not missing.exists()
+
+    def test_dashboard_attention_missing_state_is_read_only(self, tmp_path, monkeypatch):
+        state_root = tmp_path / "dashboard-missing"
+        monkeypatch.setenv("SENSORIUM_STATE_DIR", str(state_root))
+        module_path = os.path.join(os.getcwd(), "dashboard", "plugin_api.py")
+        spec = importlib.util.spec_from_file_location("sensorium_dashboard_attention_test", module_path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        result = asyncio.run(mod.attention(surface="local", limit=5))
+
+        assert result["ok"] is True
+        assert result["counts"]["total"] == 0
+        assert not state_root.exists()

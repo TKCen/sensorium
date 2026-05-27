@@ -224,7 +224,8 @@ async def attention(instance: str | None = None, surface: str = "local", limit: 
     root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
     store = SensoriumStore(instance=effective_instance, state_dir=str(root))
     try:
-        store.ensure_dirs()
+        # Read-only dashboard endpoint: SensoriumStore.read_jsonl returns empty
+        # rows for missing files, so avoid ensure_dirs() here.
         inbox = build_attention_inbox(store, surface=surface, limit=limit)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
