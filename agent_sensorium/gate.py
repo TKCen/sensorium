@@ -62,6 +62,12 @@ def event_fingerprint(event: dict) -> str:
 
 def should_promote_signal(signal: dict, config: dict | None = None) -> tuple[bool, str]:
     cfg = config or DEFAULT_CONFIG
+
+    if signal.get("source") == "feedback":
+        promote, reason = should_promote_feedback(signal, cfg)
+        if not promote:
+            return False, reason
+
     thresholds = dict(DEFAULT_CONFIG["thresholds"])
     if isinstance(cfg.get("thresholds"), dict):
         thresholds.update(cfg["thresholds"])
@@ -135,7 +141,7 @@ def event_to_candidate(event: dict, config: dict | None = None) -> dict:
     return candidate
 
 
-_SENSORIUM_ID_PREFIXES = ("sth_", "cand_", "ctask_", "evt_", "sig_", "dispatch_")
+_SENSORIUM_ID_PREFIXES = ("sth_", "cand_", "ctask_", "evt_", "sig_", "dispatch_", "tact_", "wreq_")
 
 
 def is_feedback_self_loop(candidate: dict) -> bool:
@@ -151,6 +157,50 @@ def is_feedback_self_loop(candidate: dict) -> bool:
         if isinstance(val, str) and any(val.startswith(p) for p in _SENSORIUM_ID_PREFIXES):
             return True
     return False
+
+
+_SENSORIUM_FEEDBACK_SENSORS = frozenset({
+    "sensorium.action_result",
+    "sensorium.thread_update",
+    "sensorium.worker_result",
+})
+
+_PROMOTABLE_FEEDBACK_OUTCOMES = frozenset({
+    "failed", "timeout", "operator_rejected",
+})
+
+_REGRESSION_KEYWORDS = ("regression", "reopen", "blocker", "escalat")
+
+
+def is_settled_feedback_signal(signal: dict) -> bool:
+    if signal.get("source") != "feedback":
+        return False
+    if signal.get("sensor", "") not in _SENSORIUM_FEEDBACK_SENSORS:
+        return False
+    outcome = signal.get("outcome", "")
+    if outcome in _PROMOTABLE_FEEDBACK_OUTCOMES:
+        return False
+    if signal.get("promote_feedback"):
+        return False
+    summary_lower = signal.get("summary", "").lower()
+    if any(kw in summary_lower for kw in _REGRESSION_KEYWORDS):
+        return False
+    caused_by = signal.get("caused_by")
+    if not isinstance(caused_by, dict):
+        return False
+    return any(
+        isinstance(v, str) and any(v.startswith(p) for p in _SENSORIUM_ID_PREFIXES)
+        for v in caused_by.values()
+    )
+
+
+def should_promote_feedback(signal: dict, config: dict | None = None) -> tuple[bool, str]:
+    if not is_settled_feedback_signal(signal):
+        return True, ""
+    cfg = config or {}
+    if cfg.get("promote_all_feedback"):
+        return True, "config: promote_all_feedback override"
+    return False, "settled_feedback: ordinary internal completion feedback suppressed"
 
 
 def candidate_fingerprint(candidate: dict) -> str:
