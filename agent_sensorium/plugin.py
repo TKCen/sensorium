@@ -53,6 +53,10 @@ def register(ctx) -> None:
         handle_sensorium_subconscious_advisory,
         handle_sensorium_thread_open,
         handle_sensorium_thread_update,
+        handle_sensorium_worker_dispatch,
+        handle_sensorium_worker_prepare,
+        handle_sensorium_worker_result,
+        handle_sensorium_worker_status,
     )
 
     common = {
@@ -488,6 +492,167 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="Dispatch a prepared Sensorium outbox request.",
+    )
+    ctx.register_tool(
+        name="sensorium_worker_prepare",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_worker_prepare",
+            "Prepare a worker request from a conscious Sensorium thread. Internal record only; does not dispatch or execute.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Sensorium thread ID to create the worker request for.",
+                },
+                "worker_type": {
+                    "type": "string",
+                    "enum": ["manual", "hermes_subagent", "kanban_task", "script"],
+                    "description": "Type of worker to prepare.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the worker request.",
+                },
+                "task_summary": {
+                    "type": "string",
+                    "description": "Bounded task description (truncated to max_prompt_chars).",
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Optional target/ref metadata.",
+                },
+                "profile": {
+                    "type": "object",
+                    "description": "Optional profile/toolsets/model hints.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional worker config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_worker_prepare(
+            thread_id=args.get("thread_id", ""),
+            worker_type=args.get("worker_type", ""),
+            title=args.get("title", ""),
+            task_summary=args.get("task_summary", ""),
+            target=args.get("target"),
+            profile=args.get("profile"),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Prepare a worker request from a conscious Sensorium thread.",
+    )
+    ctx.register_tool(
+        name="sensorium_worker_dispatch",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_worker_dispatch",
+            "Dispatch a prepared worker request. No-op unless execute=True AND config.direct_dispatch_enabled=True. No adapter is wired by default.",
+            {
+                **common,
+                "worker_request_id": {
+                    "type": "string",
+                    "description": "Worker request ID to dispatch.",
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": "Must be true to attempt dispatch. Default false (dry-run).",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional worker config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_worker_dispatch(
+            worker_request_id=args.get("worker_request_id", ""),
+            execute=bool(args.get("execute", False)),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Dispatch a prepared worker request (requires execute + config opt-in).",
+    )
+    ctx.register_tool(
+        name="sensorium_worker_result",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_worker_result",
+            "Record a worker result: update request status, write receipt, and emit feedback signal with causal refs.",
+            {
+                **common,
+                "worker_request_id": {
+                    "type": "string",
+                    "description": "Worker request ID to record result for.",
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["completed", "failed", "cancelled", "timeout"],
+                    "description": "Worker outcome.",
+                },
+                "result_summary": {
+                    "type": "string",
+                    "description": "Compact result summary (truncated to max_result_chars).",
+                },
+                "output_refs": {
+                    "type": "array",
+                    "description": "Optional list of output reference metadata dicts (not raw content).",
+                },
+                "error_summary": {
+                    "type": "string",
+                    "description": "Compact error summary if outcome is failed/timeout.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional worker config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_worker_result(
+            worker_request_id=args.get("worker_request_id", ""),
+            outcome=args.get("outcome", ""),
+            result_summary=args.get("result_summary", ""),
+            output_refs=args.get("output_refs"),
+            error_summary=args.get("error_summary", ""),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Record worker result with feedback signal emission.",
+    )
+    ctx.register_tool(
+        name="sensorium_worker_status",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_worker_status",
+            "List worker requests with optional thread/status filters.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional thread ID filter.",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Optional status filter (prepared, dispatched, completed, failed, cancelled).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max items to return. Defaults to 20.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_worker_status(
+            thread_id=args.get("thread_id"),
+            status=args.get("status"),
+            limit=int(args.get("limit") or 20),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="List worker requests with optional filters.",
     )
     ctx.register_command(
         "sensorium",

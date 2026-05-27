@@ -26,6 +26,12 @@ from .schemas import (
 )
 from .store import SensoriumStore
 from .subconscious import run_subconscious_advisory
+from .workers import (
+    dispatch_worker_request,
+    list_worker_requests,
+    prepare_worker_request,
+    record_worker_result,
+)
 
 ARCHIVED_STATUSES = {"archived", "closed"}
 
@@ -1081,3 +1087,121 @@ def handle_sensorium_outbox_dispatch(
     if result.get("success"):
         return _ok(instance, result)
     return _err(instance, result.get("detail") or result.get("error", "outbox_dispatch_failed"))
+
+
+def handle_sensorium_worker_prepare(
+    *,
+    thread_id: str,
+    worker_type: str,
+    title: str,
+    task_summary: str = "",
+    target: dict | None = None,
+    profile: dict | None = None,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = prepare_worker_request(
+        store,
+        thread_id=thread_id,
+        worker_type=worker_type,
+        title=title,
+        task_summary=task_summary,
+        target=target,
+        profile=profile,
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(instance, result.get("detail") or result.get("error", "worker_prepare_failed"))
+
+
+def handle_sensorium_worker_dispatch(
+    *,
+    worker_request_id: str,
+    execute: bool = False,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    result = dispatch_worker_request(
+        store,
+        worker_request_id=worker_request_id,
+        config=config,
+        execute=execute,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(instance, result.get("detail") or result.get("error", "worker_dispatch_failed"))
+
+
+def handle_sensorium_worker_result(
+    *,
+    worker_request_id: str,
+    outcome: str,
+    result_summary: str = "",
+    output_refs: list[dict] | None = None,
+    error_summary: str = "",
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = record_worker_result(
+        store,
+        worker_request_id=worker_request_id,
+        outcome=outcome,
+        result_summary=result_summary,
+        output_refs=output_refs,
+        error_summary=error_summary,
+        config=config,
+    )
+    if not result.get("success"):
+        return _err(instance, result.get("detail") or result.get("error", "worker_result_failed"))
+
+    feedback_signal = result.get("feedback_signal")
+    feedback_signal_id = ""
+    if feedback_signal:
+        feedback_raw = handle_sensorium_ingest_signal(
+            signal=feedback_signal,
+            instance=instance,
+            state_dir=state_dir,
+        )
+        feedback_result = json.loads(feedback_raw)
+        if feedback_result.get("success"):
+            feedback_signal_id = (feedback_result.get("data") or {}).get("signal_id", "")
+
+        now = utc_now_iso()
+        feedback_receipt = {
+            "ts": now,
+            "type": "worker.feedback_emitted",
+            "thread_id": result["data"].get("origin_thread_id"),
+            "worker_request_id": worker_request_id,
+            "feedback_signal_id": feedback_signal_id,
+            "outcome": outcome,
+            "feedback_scope": "system_action",
+        }
+        store.append_jsonl("decisions", feedback_receipt)
+
+    result_data = {
+        "data": result["data"],
+        "receipt": result["receipt"],
+        "feedback_signal_id": feedback_signal_id,
+    }
+    return _ok(instance, result_data)
+
+
+def handle_sensorium_worker_status(
+    *,
+    thread_id: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    items = list_worker_requests(store, thread_id=thread_id, status=status, limit=limit)
+    return _ok(instance, {"worker_requests": items, "count": len(items)})

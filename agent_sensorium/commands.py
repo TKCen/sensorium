@@ -9,6 +9,7 @@ from .tools import (
     handle_sensorium_status,
     handle_sensorium_thread_open,
     handle_sensorium_thread_update,
+    handle_sensorium_worker_status,
 )
 
 
@@ -39,6 +40,8 @@ def handle_sensorium_command(
         return _fmt_compact(**kw)
     elif sub == "outbox":
         return _fmt_outbox(args=parts[1:], **kw)
+    elif sub == "workers":
+        return _fmt_workers(args=parts[1:], **kw)
     elif sub == "help":
         return _help()
     else:
@@ -196,6 +199,22 @@ def _fmt_outbox(*, instance: str, state_dir: str | None, args: list[str]) -> str
     return "\n".join(lines)
 
 
+def _fmt_workers(*, instance: str, state_dir: str | None, args: list[str]) -> str:
+    raw = handle_sensorium_worker_status(instance=instance, state_dir=state_dir)
+    data = json.loads(raw)["data"]
+    items = data.get("worker_requests", [])
+    if not items:
+        return f"Sensorium [{instance}] workers: no requests."
+    lines = [f"Sensorium [{instance}] workers ({data['count']} requests):"]
+    for req in items[-10:]:
+        outcome = f" -> {req['outcome']}" if req.get("outcome") else ""
+        lines.append(
+            f"  [{req.get('status', '?')}] {req.get('id', '?')} "
+            f"{req.get('worker_type', '?')}: {req.get('title', '')}{outcome}"
+        )
+    return "\n".join(lines)
+
+
 def _help() -> str:
     return (
         "Usage: /sensorium [subcommand]\n"
@@ -208,6 +227,7 @@ def _help() -> str:
         "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
         "  dispatch       Dry-run dispatch preview\n"
         "  compact        Archive expired items\n"
-        "  outbox        List recent outbox requests\n"
+        "  outbox         List recent outbox requests\n"
+        "  workers        List worker requests\n"
         "  help           This message"
     )

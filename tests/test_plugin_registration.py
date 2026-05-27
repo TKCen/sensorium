@@ -49,6 +49,10 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_subconscious_advisory",
         "sensorium_outbox_prepare",
         "sensorium_outbox_dispatch",
+        "sensorium_worker_prepare",
+        "sensorium_worker_dispatch",
+        "sensorium_worker_result",
+        "sensorium_worker_status",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"agent-sensorium"}
     help_output = ctx.commands["sensorium"]["handler"]("help")

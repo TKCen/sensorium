@@ -82,6 +82,40 @@ The outbox layer is the first safe bridge between internal Sensorium threads and
 
 Default allowed delivery modes are only `peripheral_reference` and `context_pointer`. Direct replyable modes (`discord_channel_thread`, `discord_dm_bound_session`) fail closed unless config explicitly sets both `direct_modes_enabled: true` and includes the mode in `allowed_delivery_modes`; Discord dispatch also requires `outbox.discord.enabled: true`, `execute=True`, and an adapter. The current plugin exposes the policy/idempotency/receipt surface and a fake adapter for tests; live Discord REST/gateway consumption is a follow-up, not enabled by default.
 
+## Conscious delegation boundary (Phase 9B)
+
+The worker request lifecycle adds a conscious delegation boundary. A conscious thread can prepare bounded worker requests, optionally dispatch them, and record results that re-enter the pipeline as feedback signals.
+
+**Preparing is NOT executing.** `sensorium_worker_prepare` creates an internal `worker_requests.jsonl` record with status `prepared`, idempotency key, compact metadata, and causal refs to the originating thread. It does not trigger any external work.
+
+**Dispatch requires explicit double opt-in.** `sensorium_worker_dispatch` is a no-op unless BOTH `execute=True` is passed AND `config.direct_dispatch_enabled=True`. Even then, an adapter must be provided. Default config has `direct_dispatch_enabled: false`. Live worker adapters are policy-gated/deferred; only a fake test adapter exists.
+
+**Results re-enter as feedback signals.** `sensorium_worker_result` updates the request to `completed`/`failed`, writes a `worker.result` decision receipt, and emits a feedback signal with `caused_by` containing `worker_request_id` and `origin_thread_id`. The feedback signal uses `feedback_scope: system_action` — which means the self-loop filter in the dispatcher prevents it from autonomously waking consciousness without operator evaluation evidence.
+
+**Subconscious may propose but not execute.** The advisory layer accepts `DELEGATE_WORK` as a valid `conscious_task.request_type`, allowing it to propose worker delegation. But advisory can only create an internal candidate — it cannot prepare or dispatch worker requests.
+
+### Worker lifecycle state machine
+
+```
+prepared -> dispatched -> completed
+prepared -> dispatched -> failed
+prepared -> completed (manual result without dispatch)
+prepared -> failed (dispatch adapter failure or manual)
+prepared -> cancelled
+```
+
+### Worker config defaults
+
+```json
+{
+  "enabled": true,
+  "allowed_worker_types": ["manual", "hermes_subagent", "kanban_task", "script"],
+  "direct_dispatch_enabled": false,
+  "max_prompt_chars": 2000,
+  "max_result_chars": 2000
+}
+```
+
 ## Tools
 
 | Tool | Description |
@@ -98,6 +132,10 @@ Default allowed delivery modes are only `peripheral_reference` and `context_poin
 | `sensorium_subconscious_advisory` | Bounded advisory context/output validator; disabled by default; may create only internal conscious-task candidates when explicitly enabled |
 | `sensorium_outbox_prepare` | Prepare an idempotent internal outbox/context request for a Sensorium thread; dry-run by default; no live Discord side effect |
 | `sensorium_outbox_dispatch` | Dispatch a prepared outbox request only when `execute=True` and explicit policy/adapter gates allow it |
+| `sensorium_worker_prepare` | Prepare a bounded worker request from a conscious thread; internal record only, does not dispatch or execute |
+| `sensorium_worker_dispatch` | Dispatch a prepared worker request; no-op unless `execute=True` AND `config.direct_dispatch_enabled=True` AND adapter provided |
+| `sensorium_worker_result` | Record worker result, write receipt, and emit feedback signal with causal refs |
+| `sensorium_worker_status` | List worker requests with optional thread/status filters |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Instance config and policy boundary
@@ -154,7 +192,7 @@ The injected pointer context is model-facing validation scaffolding. It can incl
 ## Command
 
 ```
-/sensorium [status|threads|pointer|open|thread|outbox|dispatch|compact|help]
+/sensorium [status|threads|pointer|open|thread|outbox|workers|dispatch|compact|help]
 ```
 
 - **status** (default) — compact overview with counts and top items

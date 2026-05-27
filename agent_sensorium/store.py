@@ -11,6 +11,7 @@ _STATE_NAMES = {
     "threads": "threads.jsonl",
     "decisions": "decisions.jsonl",
     "outbox": "outbox.jsonl",
+    "worker_requests": "worker_requests.jsonl",
 }
 
 _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
