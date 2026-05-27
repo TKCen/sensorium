@@ -549,11 +549,6 @@ def _find_thread(threads: list[dict], thread_id: str | None = None) -> dict | No
     return None
 
 
-def _thread_allowed_on_surface(thread: dict, surface: str) -> bool:
-    allowed = set(thread.get("allowed_surfaces") or [])
-    return bool(surface and surface in allowed)
-
-
 def _compact_thread_capsule(thread: dict) -> dict:
     task = thread.get("conscious_task", {})
     return {
@@ -590,16 +585,24 @@ def handle_sensorium_thread_open(
     surface: str = "local",
     instance: str = "default",
     state_dir: str | None = None,
+    config_path: str | None = None,
 ) -> str:
+    from .config import load_instance_config, visible_on_surface
+
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
+
+    instance_config, _ = load_instance_config(
+        config_path=config_path, state_dir=str(store.root),
+    )
+
     threads = store.read_jsonl("threads")
     target = _find_thread(threads, thread_id)
     if target is None:
         return _err(instance, f"Thread '{thread_id or 'latest'}' not found.")
     if target.get("status") not in _VISIBLE_STATUSES:
         return _err(instance, f"Thread '{target.get('id')}' is {target.get('status')} and cannot be opened.")
-    if not _thread_allowed_on_surface(target, surface):
+    if not visible_on_surface(target, surface, instance_config):
         return _err(instance, f"Thread '{target.get('id')}' is not allowed on surface '{surface}'.")
     return _ok(instance, _compact_thread_capsule(target))
 
@@ -826,10 +829,18 @@ def handle_sensorium_attention_pointer(
     state_dir: str | None = None,
     surface: str = "local",
     config: dict | None = None,
+    config_path: str | None = None,
 ) -> str:
+    from .config import load_instance_config
+
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
-    return _ok(instance, select_attention_pointer(store, surface=surface, config=config))
+    instance_config, _ = load_instance_config(
+        config_path=config_path, state_dir=str(store.root),
+    )
+    return _ok(instance, select_attention_pointer(
+        store, surface=surface, config=config, instance_config=instance_config,
+    ))
 
 
 def handle_sensorium_compact(

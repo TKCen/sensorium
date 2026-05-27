@@ -223,7 +223,7 @@ Phase 8 Subconscious advisory plus the explicit cheap model lane are implemented
 
 Immediate next work should therefore split into two parts:
 
-1. **Attention review surface before outbox:** make pending candidates/conscious tasks easy to inspect, suppress, hold, close, or open as conscious threads. Active chats should receive compact pointers only; full capsules open only on request.
+1. **Attention review surface before outbox:** make pending candidates/conscious tasks easy to inspect, suppress, hold, close, or open as conscious threads. Active chats should receive compact pointers only; full capsules open only on request. **Status (Phase 9A.2a):** Attention Inbox exists and is read-only. Policy unification is complete — a single `config.visible_on_surface` gate enforces both item AND instance-config `allowed_surfaces` plus `max_sensitivity` across the inbox, pointer selection, `pre_llm_call` pointer injection, `sensorium_thread_open`, and the dashboard attention endpoint. Missing config fails closed to local-only. This is the safety gate before any dashboard/operator surface or outbox expansion.
 2. **Extension documentation and contracts:** keep `docs/extending-sensors-and-subconscious-jobs.md` current so adding a new deterministic sensor or bounded Subconscious job is boring, testable, and safe.
 
 Then validate the advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:

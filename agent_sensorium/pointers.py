@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from .config import load_instance_config, visible_on_surface
 from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -26,14 +27,6 @@ def _parse_utc(ts: str | None) -> datetime | None:
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except Exception:
         return None
-
-
-def _surface_allowed(thread: dict, surface: str) -> bool:
-    allowed = set(thread.get("allowed_surfaces") or [])
-    if not allowed:
-        return False
-    normalized = surface or "local"
-    return normalized in allowed
 
 
 def _recent_pointer_receipts(store: SensoriumStore, thread_id: str) -> list[dict]:
@@ -63,11 +56,16 @@ def select_attention_pointer(
     *,
     surface: str = "local",
     config: dict | None = None,
+    instance_config: dict | None = None,
 ) -> dict:
     """Return a candidate pointer without mutating state."""
     cfg = {**DEFAULT_POINTER_CONFIG, **(config or {})}
     if not cfg.get("enabled", True):
         return {"action": "no_pointer", "reason": "disabled"}
+
+    inst_cfg = instance_config
+    if inst_cfg is None:
+        inst_cfg, _ = load_instance_config(state_dir=str(store.root))
 
     threads = [
         t for t in store.read_jsonl("threads")
@@ -77,7 +75,7 @@ def select_attention_pointer(
 
     cooldown_blocked: dict | None = None
     for thread in threads:
-        if not _surface_allowed(thread, surface):
+        if not visible_on_surface(thread, surface, inst_cfg):
             continue
         open_, reason = _cooldown_open(store, thread.get("id", ""), int(cfg.get("cooldown_minutes", 120)))
         if not open_:
@@ -156,12 +154,18 @@ def handle_pointer_pre_llm(
     session_id: str = "",
     state_dir: str | None = None,
     config: dict | None = None,
+    config_path: str | None = None,
 ) -> dict | None:
     """pre_llm_call hook entrypoint. Returns {context} or None."""
     surface = platform or "local"
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
-    pointer = select_attention_pointer(store, surface=surface, config=config)
+    instance_config, _ = load_instance_config(
+        config_path=config_path, state_dir=str(store.root),
+    )
+    pointer = select_attention_pointer(
+        store, surface=surface, config=config, instance_config=instance_config,
+    )
     if pointer.get("action") != "pointer_available":
         return None
     record_pointer_presented(store, pointer, session_id=session_id, surface=surface)
