@@ -62,7 +62,9 @@ def event_fingerprint(event: dict) -> str:
 
 def should_promote_signal(signal: dict, config: dict | None = None) -> tuple[bool, str]:
     cfg = config or DEFAULT_CONFIG
-    thresholds = cfg.get("thresholds", DEFAULT_CONFIG["thresholds"])
+    thresholds = dict(DEFAULT_CONFIG["thresholds"])
+    if isinstance(cfg.get("thresholds"), dict):
+        thresholds.update(cfg["thresholds"])
     promote_kinds = cfg.get("promote_kinds", DEFAULT_CONFIG["promote_kinds"])
     strength = signal.get("strength_hint", 0.0)
     kind = signal.get("kind", "")

@@ -1,6 +1,6 @@
 # Agent Sensorium
 
-Bounded autonomous inner lifecycle for Hermes agents: compact signals, filtered events, candidates, dormant conscious thread capsules, and pull-based review.
+Bounded autonomous inner lifecycle for Hermes agents: compact signals, filtered events, candidates, dormant conscious thread capsules, and pull-based review. The aim is not a smarter notification system; it is an environment-reactive inner-life substrate that can shape attention over time and, eventually, support emotion-like salience.
 
 ## MVP stance
 
@@ -30,6 +30,7 @@ Explicitly out of scope for MVP:
 - `docs/agent-sensorium-plugin-mvp.md` — architecture/spec working doc.
 - `docs/agent-sensorium-mvp-implementation-plan.md` — original MVP build plan and acceptance gates.
 - `docs/agent-sensorium-buildout-plan-2026-05-25.md` — post-MVP full build-out backlog and phase gates.
+- `docs/extending-sensors-and-subconscious-jobs.md` — extension contract for adding cheap deterministic sensors and bounded Subconscious reasoning jobs.
 
 ## Development shape
 

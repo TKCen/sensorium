@@ -3,6 +3,7 @@
 import json
 from datetime import datetime, timezone, timedelta
 
+from .attention import build_attention_inbox
 from .dispatcher import dispatch_once as _dispatch_once
 from .gate import (
     DEFAULT_CONFIG,
@@ -55,7 +56,7 @@ def handle_sensorium_status(
     store.ensure_dirs()
 
     _, config_diag = load_instance_config(
-        config_path=config_path, state_dir=state_dir,
+        config_path=config_path, state_dir=str(store.root),
     )
 
     signals = store.read_jsonl("signals")
@@ -914,8 +915,10 @@ def handle_sensorium_service_threads(
     threads = store.read_jsonl("threads")
 
     cfg = config or {}
-    starvation_hours = cfg.get("starvation_hours", 72)
-    expiring_window_hours = cfg.get("expiring_window_hours", 24)
+    raw_thresholds = cfg.get("thresholds")
+    thresholds = raw_thresholds if isinstance(raw_thresholds, dict) else {}
+    starvation_hours = cfg.get("starvation_hours", thresholds.get("starvation_hours", 72))
+    expiring_window_hours = cfg.get("expiring_window_hours", thresholds.get("expiring_window_hours", 24))
 
     active_statuses = {"dormant", "held"}
     archived_ids: list[str] = []
@@ -989,6 +992,22 @@ def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
     with open(path, "w") as f:
         for item in items:
             f.write(json.dumps(item, separators=(",", ":")) + "\n")
+
+
+def handle_sensorium_attention_inbox(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    surface: str = "local",
+    limit: int = 50,
+    config_path: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    inbox = build_attention_inbox(
+        store, surface=surface, config_path=config_path, limit=limit,
+    )
+    return _ok(instance, inbox)
 
 
 def handle_sensorium_outbox_prepare(

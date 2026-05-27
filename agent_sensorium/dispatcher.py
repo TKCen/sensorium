@@ -34,6 +34,12 @@ DEFAULT_DISPATCH_CONFIG: dict = {
         "conscious": {"capacity": 3, "window_seconds": 3600},
         "advisory": {"capacity": 0, "window_seconds": 3600},
     },
+    "operational_pointer": {
+        "enabled": False,
+        "kinds": [],
+        "surfaces": [],
+        "sensitivity": "private",
+    },
 }
 
 
@@ -244,7 +250,7 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
     summary = candidate.get("summary", "")
     kind = candidate.get("kind", "")
 
-    return {
+    thread = {
         "id": new_id("sth"),
         "status": "dormant",
         "origin": "candidate",
@@ -272,6 +278,35 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
         "created_at": now,
         "updated_at": now,
         "expires_at": expires,
+    }
+    _apply_operational_pointer_policy(thread, candidate, cfg)
+    return thread
+
+
+def _apply_operational_pointer_policy(thread: dict, candidate: dict, cfg: dict) -> None:
+    """Optionally make operational threads visible on configured pointer surfaces.
+
+    This only changes the internal conscious-thread door handle created by the
+    dispatcher. Raw signals/events/candidates remain local, and outbox/direct
+    delivery is controlled separately by outbox policy.
+    """
+    policy = cfg.get("operational_pointer") or {}
+    if not policy.get("enabled"):
+        return
+    kind = candidate.get("kind", "")
+    kinds = set(policy.get("kinds") or [])
+    if kinds and kind not in kinds:
+        return
+    surfaces = sorted(set(thread.get("allowed_surfaces") or []) | set(policy.get("surfaces") or []))
+    if surfaces:
+        thread["allowed_surfaces"] = surfaces
+    sensitivity = policy.get("sensitivity")
+    if isinstance(sensitivity, str) and sensitivity:
+        thread["sensitivity"] = sensitivity
+    thread["visibility_policy"] = {
+        "mode": "operational_pointer",
+        "source_kind": kind,
+        "surfaces": list(policy.get("surfaces") or []),
     }
 
 

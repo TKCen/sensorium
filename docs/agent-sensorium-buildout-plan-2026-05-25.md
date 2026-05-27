@@ -219,13 +219,20 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 
 ## Immediate next slice
 
-Phase 8 Subconscious advisory plus the explicit cheap model lane are implemented. The next slice should **not** add outbound action yet. First validate this advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
+Phase 8 Subconscious advisory plus the explicit cheap model lane are implemented. The next slice should **not** add outbound action yet. The product target is now explicit: Sensorium should become an environment-reactive inner-life substrate. Attention routing is the operational mechanism: it should proactively surface information requiring conscious attention while making new sensors and deeper Subconscious jobs easy to add safely. The larger aim is that environmental salience shapes attention over time and may eventually contribute to emotion-like internal pressure.
+
+Immediate next work should therefore split into two parts:
+
+1. **Attention review surface before outbox:** make pending candidates/conscious tasks easy to inspect, suppress, hold, close, or open as conscious threads. Active chats should receive compact pointers only; full capsules open only on request.
+2. **Extension documentation and contracts:** keep `docs/extending-sensors-and-subconscious-jobs.md` current so adding a new deterministic sensor or bounded Subconscious job is boring, testable, and safe.
+
+Then validate the advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
 
 - verify advisory context stays bounded and contains only Events/Candidates/Decisions/probe summary;
 - measure how often real pressure Events produce useful `DROP`/`SAVE`/`CREATE_CONSCIOUS_TASK` advisory outputs with the cheap lane enabled;
 - tune pressure/candidate thresholds before creating more conscious-task candidates;
 - keep tick invocation opt-in (`--subconscious-advisory --subconscious-model`) and avoid model calls unless explicitly requested;
-- decide whether Phase 9 should add a conscious-task review surface, an outbox proposal schema, or dashboard visibility first.
+- decide the Phase 9 surface order with this bias: conscious-task/candidate review first, dashboard visibility second, outbox proposal schema third, direct delivery last.
 
 Gate:
 

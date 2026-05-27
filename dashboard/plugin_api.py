@@ -16,7 +16,23 @@ from fastapi import APIRouter
 
 router = APIRouter()
 
-DEFAULT_ROOT = Path(os.environ.get("SENSORIUM_STATE_DIR", Path.home() / ".hermes" / "agent-sensorium" / "default"))
+
+def _default_instance() -> str:
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.config import default_instance_name
+
+        return default_instance_name("default")
+    except Exception:
+        return os.environ.get("AGENT_SENSORIUM_DEFAULT_INSTANCE") or os.environ.get("SENSORIUM_INSTANCE") or "default"
+
+
+DEFAULT_INSTANCE = _default_instance()
+DEFAULT_ROOT = Path(os.environ.get("SENSORIUM_STATE_DIR", Path.home() / ".hermes" / "agent-sensorium" / DEFAULT_INSTANCE))
 STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
     "events": "events.jsonl",
@@ -190,11 +206,38 @@ def _health(counts: dict[str, int], active_threads: int, open_outbox: int, state
     }
 
 
+@router.get("/attention")
+async def attention(instance: str | None = None, surface: str = "local", limit: int = 50) -> dict[str, Any]:
+    """Read-only attention inbox: candidates and threads filtered by surface."""
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.attention import build_attention_inbox
+        from agent_sensorium.store import SensoriumStore
+    except ImportError:
+        return {"ok": False, "error": "agent_sensorium not importable"}
+
+    effective_instance = instance or DEFAULT_INSTANCE
+    root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
+    store = SensoriumStore(instance=effective_instance, state_dir=str(root))
+    try:
+        store.ensure_dirs()
+        inbox = build_attention_inbox(store, surface=surface, limit=limit)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "generated_at": _now(), "instance": effective_instance, **inbox}
+
+
 @router.get("/snapshot")
-async def snapshot(instance: str = "default") -> dict[str, Any]:
-    # The current plugin supports the default local instance. `instance` is surfaced
-    # for future multi-instance UI without allowing arbitrary path traversal.
-    root = DEFAULT_ROOT if instance == "default" else DEFAULT_ROOT.parent / instance
+async def snapshot(instance: str | None = None) -> dict[str, Any]:
+    # `instance` is surfaced for multi-instance UI without allowing arbitrary
+    # path traversal. Omitted and legacy `default` requests both resolve to the
+    # configured default instance.
+    effective_instance = instance or DEFAULT_INSTANCE
+    root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
     state = _read_json(root / "state.latest.json", {})
     config = _read_json(root / "instance.config.json", {})
 
@@ -234,12 +277,12 @@ async def snapshot(instance: str = "default") -> dict[str, Any]:
     return {
         "ok": True,
         "generated_at": _now(),
-        "instance": instance,
+        "instance": effective_instance,
         "state_dir": str(root),
         "state_exists": root.exists(),
         "state_mtime": _mtime(root / "state.latest.json"),
         "config": {
-            "instance_name": config.get("instance_name") or instance,
+            "instance_name": config.get("instance_name") or effective_instance,
             "allowed_surfaces": config.get("allowed_surfaces") or ["local"],
             "max_sensitivity": config.get("max_sensitivity") or "private",
             "policy_card_ref": config.get("policy_card_ref"),

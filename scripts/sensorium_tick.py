@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_sensorium.config import default_instance_name, load_instance_config
 from agent_sensorium.schemas import utc_now_iso
 from agent_sensorium.sensors import (
     classify_hindsight_pressure,
@@ -71,6 +72,7 @@ def _run_transition_sensor(
     store: SensoriumStore,
     dry_run: bool,
     kw: dict,
+    config: dict,
     sample_fn,
     classify_fn,
 ) -> tuple[dict, str | None]:
@@ -86,7 +88,7 @@ def _run_transition_sensor(
     if signal is not None:
         step["transition"] = signal.get("transition")
         if not dry_run:
-            raw = json.loads(handle_sensorium_ingest_signal(signal=signal, **kw))
+            raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=config, **kw))
             if raw.get("success"):
                 step["ingest"] = raw["data"]
             else:
@@ -99,7 +101,7 @@ def _run_transition_sensor(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agent Sensorium deterministic tick")
-    parser.add_argument("--instance", default="default")
+    parser.add_argument("--instance", default=default_instance_name())
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--config-path", default=None)
     parser.add_argument(
@@ -109,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Skip mutations (compact, service archival, receipt)",
+    )
+    parser.add_argument(
+        "--enable-dispatch", action="store_true",
+        help="Allow the dispatch scheduler to create one dormant internal thread; otherwise preview only",
     )
     parser.add_argument(
         "--body-pressure", action="store_true",
@@ -136,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--subconscious-model-base-url", default=None, help="Override OpenAI-compatible base URL")
     args = parser.parse_args(argv)
 
+    store_for_config = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+    instance_config, config_diag = load_instance_config(
+        config_path=args.config_path,
+        state_dir=str(store_for_config.root),
+    )
     kw: dict = {"instance": args.instance, "state_dir": args.state_dir}
     steps: dict = {}
     errors: list[str] = []
@@ -156,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             if signal is not None:
                 body_step["transition"] = signal.get("transition")
                 if not args.dry_run:
-                    raw = json.loads(handle_sensorium_ingest_signal(signal=signal, **kw))
+                    raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=instance_config, **kw))
                     if raw.get("success"):
                         body_step["ingest"] = raw["data"]
                     else:
@@ -182,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                     store=store,
                     dry_run=args.dry_run,
                     kw=kw,
+                    config=instance_config,
                     sample_fn=sample_fn,
                     classify_fn=classify_fn,
                 )
@@ -197,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                 errors.append(f"compact: {raw.get('error', 'unknown')}")
 
         if not args.dry_run:
-            raw = json.loads(handle_sensorium_service_threads(**kw))
+            raw = json.loads(handle_sensorium_service_threads(config=instance_config, **kw))
             if raw.get("success"):
                 steps["service"] = raw["data"]
             else:
@@ -226,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 errors.append(f"subconscious_advisory: {raw.get('error', 'unknown')}")
 
-        raw = json.loads(handle_sensorium_dispatch_once(dry_run=True, **kw))
+        dispatch_dry_run = args.dry_run or not args.enable_dispatch
+        raw = json.loads(handle_sensorium_dispatch_once(dry_run=dispatch_dry_run, config=instance_config, **kw))
         if raw.get("success"):
             steps["dispatch"] = raw["data"]
         else:
@@ -246,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             "success": False,
             "instance": args.instance,
             "dry_run": args.dry_run,
+            "config": config_diag,
             "errors": [str(exc)],
         }
         if args.print_json:
@@ -275,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         "success": len(errors) == 0,
         "instance": args.instance,
         "dry_run": args.dry_run,
+        "config": config_diag,
         **steps,
     }
     if errors:

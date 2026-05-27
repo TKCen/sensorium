@@ -10,6 +10,7 @@ or allowed_surfaces beyond what the item already has.
 """
 
 import json
+import os
 from pathlib import Path
 
 from .schemas import SENSITIVITY_RANK, VALID_SENSITIVITIES
@@ -24,7 +25,44 @@ SAFE_DEFAULTS: dict = {
         "expiring_window_hours": 24,
     },
     "budgets": {},
+    "thread_ttl_hours": 168,
+    "operational_pointer": {
+        "enabled": False,
+        "kinds": [],
+        "surfaces": [],
+        "sensitivity": "private",
+    },
+    "pointer": {},
+    "outbox": {},
 }
+
+
+def default_instance_name(default: str = "default") -> str:
+    """Resolve the default Sensorium instance outside the Hermes tool wrapper.
+
+    Tool calls get the Hermes runtime context through the plugin wrapper, but
+    cron scripts and dashboard plugin APIs can run as plain Python modules.
+    Keep all entrypoints aligned: environment override, Hermes config, then a
+    safe generic fallback.
+    """
+    for env_name in ("AGENT_SENSORIUM_DEFAULT_INSTANCE", "SENSORIUM_INSTANCE"):
+        value = os.environ.get(env_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    try:
+        from importlib import import_module
+
+        config_mod = import_module("hermes_cli.config")
+        value = config_mod.cfg_get(
+            config_mod.load_config(), "agent_sensorium", "default_instance", default=default
+        )
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+
+    return default
 
 
 def resolve_config_path(
@@ -53,6 +91,10 @@ def _validate_config(raw: dict) -> dict:
         "max_sensitivity": SAFE_DEFAULTS["max_sensitivity"],
         "thresholds": dict(SAFE_DEFAULTS["thresholds"]),
         "budgets": dict(SAFE_DEFAULTS["budgets"]),
+        "thread_ttl_hours": SAFE_DEFAULTS["thread_ttl_hours"],
+        "operational_pointer": dict(SAFE_DEFAULTS["operational_pointer"]),
+        "pointer": dict(SAFE_DEFAULTS["pointer"]),
+        "outbox": dict(SAFE_DEFAULTS["outbox"]),
     }
     if "instance_name" in raw:
         val = raw["instance_name"]
@@ -77,13 +119,32 @@ def _validate_config(raw: dict) -> dict:
     if "thresholds" in raw:
         val = raw["thresholds"]
         if isinstance(val, dict):
-            for k in ("starvation_hours", "expiring_window_hours"):
+            for k in ("starvation_hours", "expiring_window_hours", "dispatch_pressure"):
                 if k in val and isinstance(val[k], (int, float)) and val[k] > 0:
                     config["thresholds"][k] = val[k]
     if "budgets" in raw:
         val = raw["budgets"]
         if isinstance(val, dict):
             config["budgets"] = val
+    if "thread_ttl_hours" in raw:
+        val = raw["thread_ttl_hours"]
+        if isinstance(val, (int, float)) and val > 0:
+            config["thread_ttl_hours"] = val
+    if "operational_pointer" in raw and isinstance(raw["operational_pointer"], dict):
+        val = raw["operational_pointer"]
+        op = dict(config["operational_pointer"])
+        if isinstance(val.get("enabled"), bool):
+            op["enabled"] = val["enabled"]
+        if isinstance(val.get("kinds"), list) and all(isinstance(k, str) for k in val["kinds"]):
+            op["kinds"] = sorted({k.strip() for k in val["kinds"] if k.strip()})
+        if isinstance(val.get("surfaces"), list) and all(isinstance(s, str) for s in val["surfaces"]):
+            op["surfaces"] = sorted({s.strip() for s in val["surfaces"] if s.strip()})
+        if val.get("sensitivity") in VALID_SENSITIVITIES:
+            op["sensitivity"] = val["sensitivity"]
+        config["operational_pointer"] = op
+    for key in ("pointer", "outbox"):
+        if key in raw and isinstance(raw[key], dict):
+            config[key] = raw[key]
     return config
 
 

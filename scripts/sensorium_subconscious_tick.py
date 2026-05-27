@@ -35,6 +35,7 @@ def _add_import_path() -> None:
 
 _add_import_path()
 
+from agent_sensorium.config import default_instance_name  # noqa: E402
 from agent_sensorium.schemas import utc_now_iso  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
 from agent_sensorium.subconscious import is_advisory_source_kind, is_direct_conscious_kind  # noqa: E402
@@ -244,7 +245,7 @@ def run_once(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Event-gated Agent Sensorium Subconscious tick")
-    parser.add_argument("--instance", default="default")
+    parser.add_argument("--instance", default=default_instance_name())
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--event-limit", type=int, default=50)
     parser.add_argument("--candidate-limit", type=int, default=50)

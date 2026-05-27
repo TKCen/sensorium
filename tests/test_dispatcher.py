@@ -80,6 +80,40 @@ class TestCandidateToThread:
         assert thread["created_at"]
         assert thread["expires_at"]
 
+    def test_operational_pointer_policy_can_expose_thread_without_changing_candidate(self):
+        c = _make_candidate()
+        c["kind"] = "process_pressure"
+        c["sensitivity"] = "local_only"
+        c["allowed_surfaces"] = ["local"]
+        thread = candidate_to_thread(c, {
+            "operational_pointer": {
+                "enabled": True,
+                "kinds": ["process_pressure"],
+                "surfaces": ["discord"],
+                "sensitivity": "private",
+            }
+        })
+        assert c["allowed_surfaces"] == ["local"]
+        assert c["sensitivity"] == "local_only"
+        assert thread["allowed_surfaces"] == ["discord", "local"]
+        assert thread["sensitivity"] == "private"
+        assert thread["visibility_policy"]["mode"] == "operational_pointer"
+
+    def test_operational_pointer_policy_does_not_expose_unlisted_kinds(self):
+        c = _make_candidate()
+        c["kind"] = "body_pressure"
+        c["allowed_surfaces"] = ["local"]
+        thread = candidate_to_thread(c, {
+            "operational_pointer": {
+                "enabled": True,
+                "kinds": ["process_pressure"],
+                "surfaces": ["discord"],
+                "sensitivity": "private",
+            }
+        })
+        assert thread["allowed_surfaces"] == ["local"]
+        assert "visibility_policy" not in thread
+
 
 class TestDispatchOnce:
     def test_no_candidates(self, store):

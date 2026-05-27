@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_sensorium.config import default_instance_name
 from agent_sensorium.probe_audit import audit_store, probe_inventory, run_smoke_probes
 
 
@@ -140,7 +141,7 @@ def _add_common_args(p: argparse.ArgumentParser, *, suppress_defaults: bool = Fa
     else:
         p.add_argument("--json", action="store_true", dest="print_json")
         p.add_argument("--state-dir", default=None)
-        p.add_argument("--instance", default="default")
+        p.add_argument("--instance", default=default_instance_name())
 
 
 def main(argv: list[str] | None = None) -> int:

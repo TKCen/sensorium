@@ -10,18 +10,9 @@ _TOOLSET = "agent-sensorium"
 
 def _default_instance() -> str:
     """Return configured default instance for commands/tools without explicit instance."""
-    try:
-        from importlib import import_module
+    from .config import default_instance_name
 
-        config_mod = import_module("hermes_cli.config")
-        value = config_mod.cfg_get(
-            config_mod.load_config(), "agent_sensorium", "default_instance", default="default"
-        )
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    except Exception:
-        pass
-    return "default"
+    return default_instance_name("default")
 
 
 def _arg_instance(args: dict[str, Any]) -> str:
@@ -48,6 +39,7 @@ def register(ctx) -> None:
     from .commands import handle_sensorium_command
     from .pointers import handle_pointer_pre_llm
     from .tools import (
+        handle_sensorium_attention_inbox,
         handle_sensorium_attention_pointer,
         handle_sensorium_candidate_update,
         handle_sensorium_compact,
@@ -372,6 +364,37 @@ def register(ctx) -> None:
         description="Run bounded Subconscious advisory over local Sensorium Events.",
     )
 
+    ctx.register_tool(
+        name="sensorium_attention_inbox",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_attention_inbox",
+            "Read-only attention inbox: active candidates and visible conscious threads filtered by surface and sensitivity policy, with allowed decisions per item.",
+            {
+                **common,
+                "surface": {
+                    "type": "string",
+                    "description": "Surface to filter for, e.g. local, dashboard, discord. Defaults to local.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max items to return. Defaults to 50.",
+                },
+                "config_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to instance config JSON file.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_attention_inbox(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            surface=args.get("surface") or "local",
+            limit=int(args.get("limit") or 50),
+            config_path=args.get("config_path"),
+        ),
+        description="Read-only attention inbox with surface/sensitivity filtering.",
+    )
     ctx.register_tool(
         name="sensorium_outbox_prepare",
         toolset=_TOOLSET,
