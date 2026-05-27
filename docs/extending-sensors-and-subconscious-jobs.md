@@ -218,7 +218,7 @@ Before merging a new sensor or Subconscious job:
 
 1. **Attention review surface** — make pending conscious tasks/candidates easy to inspect, suppress, hold, and open.
 2. **Live advisory validation** — run the existing bounded advisory lane against real accumulated Events/Candidates/Decisions, mostly dry-run/receipt-only, and tune thresholds before creating more conscious-task candidates.
-3. **Low-frequency Hindsight reflection substrate** — run fixed, infrequent reflection jobs that distill unresolved pressure, repeated corrections, pending decisions, private creative/emotional pressure, and recurring operational loops into compact Subconscious material. This is slow semantic substrate, not an always-on deterministic Sensor.
+3. **Low-frequency Hindsight reflection substrate** — run fixed, infrequent memory-pressure jobs that distill unresolved pressure, repeated corrections, pending decisions, private creative/emotional pressure, and recurring operational loops into compact Subconscious material. This is slow semantic substrate, not an always-on deterministic Sensor. Probe result 2026-05-27: direct Hindsight `reflect` is currently too slow/flaky and sometimes returns no retrieved data despite useful `recall` results, so v0 should be recall-backed (`recall -> bounded facts -> Subconscious advisory`) unless the reflect LLM lane is fixed/rerouted first.
 4. **Cron/job result pressure sensor** — notices repeated background failures without reading full logs.
 5. **Session-summary hook sensor** — compact session outcome metadata only, global only for repeated same-component issues.
 6. **Artifact/file metadata sensor** — hashes/paths/types only, no file contents.
