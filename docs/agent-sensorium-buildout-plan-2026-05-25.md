@@ -206,6 +206,8 @@ Sensor history is intentionally tiny: keep only the last few samples/minutes nee
 - outbox delivery is disabled by default and requires policy plus conscious decision;
 - one bounded external task proposal can be generated with idempotency key, not executed automatically.
 
+**Status (Phase 9C):** Generic thread_actions substrate implemented. `agent_sensorium/actions.py` provides a generic prepared-action / motor-plan layer attached to conscious threads. Intent is a free string — the reusable core validates structure, bounds, refs, and state transitions but does not enforce an expression taxonomy. Concrete artifact/expression forms are instance-level and emerge at Conscious time. Four tool surfaces: `sensorium_action_prepare`, `sensorium_action_attach`, `sensorium_action_result`, `sensorium_action_status`. Thread open includes compact visible actions; pointer hints include action count without leaking content. Feedback signals emitted on result with causal refs. 54 new tests covering prepare/attach/result/status, denials, idempotency, bounding, thread/pointer integration, surface visibility, and live-pressure fixtures. All 513 tests pass.
+
 ### Phase 10 — Relational/autonomous presence policy
 
 **Why:** This is the high-trust layer and must be policy-gated, cooldowned, and silence-aware.

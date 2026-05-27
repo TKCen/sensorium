@@ -26,6 +26,13 @@ from .schemas import (
 )
 from .store import SensoriumStore
 from .subconscious import run_subconscious_advisory
+from .actions import (
+    attach_action_ref,
+    compact_actions_for_thread,
+    list_thread_actions,
+    prepare_action,
+    record_action_result,
+)
 from .workers import (
     dispatch_worker_request,
     list_worker_requests,
@@ -610,7 +617,16 @@ def handle_sensorium_thread_open(
         return _err(instance, f"Thread '{target.get('id')}' is {target.get('status')} and cannot be opened.")
     if not visible_on_surface(target, surface, instance_config):
         return _err(instance, f"Thread '{target.get('id')}' is not allowed on surface '{surface}'.")
-    return _ok(instance, _compact_thread_capsule(target))
+
+    capsule = _compact_thread_capsule(target)
+    actions = compact_actions_for_thread(
+        store, target.get("id", ""),
+        surface=surface, instance_config=instance_config,
+    )
+    if actions:
+        capsule["actions"] = actions
+        capsule["action_count"] = len(actions)
+    return _ok(instance, capsule)
 
 
 def _thread_feedback_outcome(action: str) -> str:
@@ -1205,3 +1221,140 @@ def handle_sensorium_worker_status(
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     items = list_worker_requests(store, thread_id=thread_id, status=status, limit=limit)
     return _ok(instance, {"worker_requests": items, "count": len(items)})
+
+
+# --- Thread action tool handlers (Phase 9C) ---
+
+
+def handle_sensorium_action_prepare(
+    *,
+    thread_id: str,
+    intent: str,
+    title: str,
+    summary: str = "",
+    why_now: str = "",
+    refs: dict | None = None,
+    resume_trigger: str = "",
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = prepare_action(
+        store,
+        thread_id=thread_id,
+        intent=intent,
+        title=title,
+        summary=summary,
+        why_now=why_now,
+        refs=refs,
+        resume_trigger=resume_trigger,
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "action_prepare_failed"),
+    )
+
+
+def handle_sensorium_action_attach(
+    *,
+    action_id: str,
+    kind: str,
+    ref_id: str,
+    metadata: dict | None = None,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = attach_action_ref(
+        store,
+        action_id=action_id,
+        kind=kind,
+        ref_id=ref_id,
+        metadata=metadata,
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "action_attach_failed"),
+    )
+
+
+def handle_sensorium_action_result(
+    *,
+    action_id: str,
+    outcome: str,
+    result_summary: str = "",
+    closed_reason: str = "",
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = record_action_result(
+        store,
+        action_id=action_id,
+        outcome=outcome,
+        result_summary=result_summary,
+        closed_reason=closed_reason,
+        config=config,
+    )
+    if not result.get("success"):
+        return _err(
+            instance,
+            result.get("detail") or result.get("error", "action_result_failed"),
+        )
+
+    feedback_signal = result.get("feedback_signal")
+    feedback_signal_id = ""
+    if feedback_signal:
+        feedback_raw = handle_sensorium_ingest_signal(
+            signal=feedback_signal,
+            instance=instance,
+            state_dir=state_dir,
+        )
+        feedback_result = json.loads(feedback_raw)
+        if feedback_result.get("success"):
+            feedback_signal_id = (
+                (feedback_result.get("data") or {}).get("signal_id", "")
+            )
+
+        now = utc_now_iso()
+        feedback_receipt = {
+            "ts": now,
+            "type": "action.feedback_emitted",
+            "thread_id": result["data"].get("origin_thread_id"),
+            "action_id": action_id,
+            "feedback_signal_id": feedback_signal_id,
+            "outcome": outcome,
+            "feedback_scope": "system_action",
+        }
+        store.append_jsonl("decisions", feedback_receipt)
+
+    result_data = {
+        "data": result["data"],
+        "receipt": result["receipt"],
+        "feedback_signal_id": feedback_signal_id,
+    }
+    return _ok(instance, result_data)
+
+
+def handle_sensorium_action_status(
+    *,
+    thread_id: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    items = list_thread_actions(
+        store, thread_id=thread_id, status=status, limit=limit,
+    )
+    return _ok(instance, {"thread_actions": items, "count": len(items)})

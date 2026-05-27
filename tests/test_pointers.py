@@ -94,7 +94,11 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
         session_id="session-1",
         state_dir=str(tmp_path),
     )
-    assert second is None
+    assert second is not None
+    assert "Pending thread: sth_testpointer" in second["context"]
+
+    receipts = store.read_jsonl("decisions")
+    assert len(receipts) == 2
 
 
 def test_pointer_context_is_door_handle_not_capsule():
@@ -111,7 +115,7 @@ def test_pointer_context_is_door_handle_not_capsule():
     assert "sth_x" in context
 
 
-def test_pointer_preview_reports_cooldown_reason(tmp_path):
+def test_pointer_preview_bypasses_cooldown_when_every_visible_thread_is_blocked(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["discord"])
@@ -126,6 +130,32 @@ def test_pointer_preview_reports_cooldown_reason(tmp_path):
     assert first is not None
 
     preview = select_attention_pointer(store, surface="discord")
+    assert preview["action"] == "pointer_available"
+    assert preview["thread_id"] == "sth_testpointer"
+    assert preview["cooldown_bypassed"] is True
+    assert preview["reason"].startswith("cooldown_bypassed_all_visible_threads:cooldown_until:")
+
+
+def test_pointer_preview_can_still_fail_closed_on_cooldown_when_fallback_disabled(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+
+    first = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-1",
+        state_dir=str(tmp_path),
+        config={"fallback_when_all_visible_on_cooldown": False},
+    )
+    assert first is not None
+
+    preview = select_attention_pointer(
+        store,
+        surface="discord",
+        config={"fallback_when_all_visible_on_cooldown": False},
+    )
     assert preview["action"] == "no_pointer"
     assert preview["thread_id"] == "sth_testpointer"
     assert preview["reason"].startswith("cooldown_until:")

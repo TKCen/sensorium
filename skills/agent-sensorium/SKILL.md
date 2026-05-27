@@ -116,6 +116,46 @@ prepared -> cancelled
 }
 ```
 
+## Generic thread actions boundary (Phase 9C)
+
+Thread actions are a generic prepared-action / motor-plan substrate attached to conscious threads. A thread action represents "this thread has an intended/prepared/offerable next movement" without forcing a concrete medium or expression type.
+
+**Intent is a free string, not an enum.** The reusable core validates structure, bounds, refs, and state transitions. It does not enforce an expression taxonomy. Concrete artifact/expression forms (audio, image, text, research, triage) are instance-level and emerge from continued interaction, loaded skills, identity, and Conscious choice at runtime.
+
+**Attachment kinds are storage categories, not expression types.** The four allowed attachment kinds (`worker_request`, `outbox_request`, `artifact_ref`, `external_ref`) classify what a ref points to for structural validation, not what the action expresses.
+
+**Thread open includes visible actions.** When opening a thread capsule, compact action summaries are included for actions that pass the surface/sensitivity visibility gate. Terminal actions (acted/closed/expired/cancelled/rejected) are excluded.
+
+**Pointers hint at action count without leaking content.** The pointer invitation may mention that prepared actions exist but does not reveal intent, title, summary, or attachment details.
+
+**Results emit feedback signals.** Recording an action result writes a decision receipt and emits a feedback signal with `caused_by` containing `action_id`, `origin_thread_id`, and `origin_candidate_id`. The signal uses `feedback_scope: system_action`, so the self-loop filter prevents autonomous re-promotion without operator evaluation.
+
+### Thread action state machine
+
+```
+proposed -> prepared -> offered -> acted (outcome: completed)
+proposed -> closed (outcome: failed/superseded)
+proposed -> rejected (outcome: rejected)
+proposed -> cancelled (outcome: cancelled)
+proposed -> expired (outcome: expired)
+```
+
+### Action config defaults
+
+```json
+{
+  "enabled": true,
+  "max_title_chars": 200,
+  "max_intent_chars": 500,
+  "max_summary_chars": 1500,
+  "max_why_now_chars": 500,
+  "max_refs": 10,
+  "max_attachments": 20,
+  "max_attachment_metadata_chars": 500,
+  "allowed_attachment_kinds": ["worker_request", "outbox_request", "artifact_ref", "external_ref"]
+}
+```
+
 ## Tools
 
 | Tool | Description |
@@ -136,6 +176,10 @@ prepared -> cancelled
 | `sensorium_worker_dispatch` | Dispatch a prepared worker request; no-op unless `execute=True` AND `config.direct_dispatch_enabled=True` AND adapter provided |
 | `sensorium_worker_result` | Record worker result, write receipt, and emit feedback signal with causal refs |
 | `sensorium_worker_status` | List worker requests with optional thread/status filters |
+| `sensorium_action_prepare` | Prepare a generic thread action (motor-plan) from a dormant/held thread; internal record only, no side effects |
+| `sensorium_action_attach` | Attach a compact ref (worker_request, outbox_request, artifact_ref, external_ref) to an existing action |
+| `sensorium_action_result` | Mark action acted/closed/rejected/expired/cancelled; write receipt; emit feedback signal with causal refs |
+| `sensorium_action_status` | List thread actions with optional thread_id/status filters |
 | `sensorium_compact` | Archive expired candidates and threads with receipts |
 
 ## Instance config and policy boundary

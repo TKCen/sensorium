@@ -152,7 +152,8 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
     assert "thread_id=\"sth_hooktest\"" in result["context"]
 
     result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
-    assert result2 is None
+    assert result2 is not None
+    assert "thread_id=\"sth_hooktest\"" in result2["context"]
 
 
 def test_root_plugin_entrypoint_reexports_register():

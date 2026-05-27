@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from .actions import count_active_actions_for_thread
 from .config import load_instance_config, visible_on_surface
 from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
@@ -17,6 +18,10 @@ DEFAULT_POINTER_CONFIG: dict = {
     "enabled": True,
     "cooldown_minutes": 120,
     "max_title_chars": 96,
+    # Cooldown is a de-spam preference, not an invisibility rule. If every
+    # visible thread was recently injected, still return one door handle so
+    # the operator can pick it up instead of blacking out attention for hours.
+    "fallback_when_all_visible_on_cooldown": True,
 }
 
 
@@ -73,24 +78,15 @@ def select_attention_pointer(
     ]
     threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
-    cooldown_blocked: dict | None = None
-    for thread in threads:
-        if not visible_on_surface(thread, surface, inst_cfg):
-            continue
-        open_, reason = _cooldown_open(store, thread.get("id", ""), int(cfg.get("cooldown_minutes", 120)))
-        if not open_:
-            cooldown_blocked = {
-                "action": "no_pointer",
-                "reason": reason,
-                "thread_id": thread.get("id"),
-                "task_id": thread.get("conscious_task", {}).get("id"),
-                "origin_candidate_id": thread.get("origin_candidate_id"),
-                "surface": surface or "local",
-            }
-            continue
+    def _build_pointer(thread: dict, reason: str, *, cooldown_bypassed: bool = False) -> dict:
         title = thread.get("conscious_task", {}).get("title") or thread.get("next_prompt_to_operator") or "Sensorium thread"
         title = truncate_text(title, int(cfg.get("max_title_chars", 96)))
-        return {
+        action_count = count_active_actions_for_thread(store, thread.get("id", ""))
+        invitation = f"Sensorium has a pending thread: {title}."
+        if action_count:
+            invitation += f" ({action_count} prepared action{'s' if action_count != 1 else ''}.)"
+        invitation += " Say ‘take it up’ if you want me to open it."
+        pointer = {
             "action": "pointer_available",
             "thread_id": thread.get("id"),
             "task_id": thread.get("conscious_task", {}).get("id"),
@@ -101,11 +97,41 @@ def select_attention_pointer(
             "sensitivity": thread.get("sensitivity", "private"),
             "allowed_surfaces": thread.get("allowed_surfaces", []),
             "reason": reason,
-            "invitation": f"Sensorium has a pending thread: {title}. Say ‘take it up’ if you want me to open it.",
+            "invitation": invitation,
         }
+        if action_count:
+            pointer["action_count"] = action_count
+        if cooldown_bypassed:
+            pointer["cooldown_bypassed"] = True
+        return pointer
+
+    cooldown_blocked: list[tuple[dict, str]] = []
+    for thread in threads:
+        if not visible_on_surface(thread, surface, inst_cfg):
+            continue
+        open_, reason = _cooldown_open(store, thread.get("id", ""), int(cfg.get("cooldown_minutes", 120)))
+        if not open_:
+            cooldown_blocked.append((thread, reason))
+            continue
+        return _build_pointer(thread, reason)
 
     if cooldown_blocked:
-        return cooldown_blocked
+        if cfg.get("fallback_when_all_visible_on_cooldown", True):
+            thread, reason = cooldown_blocked[0]
+            return _build_pointer(
+                thread,
+                f"cooldown_bypassed_all_visible_threads:{reason}",
+                cooldown_bypassed=True,
+            )
+        thread, reason = cooldown_blocked[0]
+        return {
+            "action": "no_pointer",
+            "reason": reason,
+            "thread_id": thread.get("id"),
+            "task_id": thread.get("conscious_task", {}).get("id"),
+            "origin_candidate_id": thread.get("origin_candidate_id"),
+            "surface": surface or "local",
+        }
     return {"action": "no_pointer", "reason": "no_visible_thread_for_surface", "surface": surface or "local"}
 
 
