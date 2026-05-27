@@ -217,10 +217,12 @@ Before merging a new sensor or Subconscious job:
 ## Recommended next extension order
 
 1. **Attention review surface** — make pending conscious tasks/candidates easy to inspect, suppress, hold, and open.
-2. **Gateway delivery pressure sensor** — shared substrate, cheap, operationally valuable.
-3. **Cron/job result pressure sensor** — notices repeated background failures without reading full logs.
-4. **Session-summary hook sensor** — compact session outcome metadata only, global only for repeated same-component issues.
-5. **Artifact/file metadata sensor** — hashes/paths/types only, no file contents.
-6. **Deeper advisory jobs** — only after the above produce enough real Event substrate.
+2. **Live advisory validation** — run the existing bounded advisory lane against real accumulated Events/Candidates/Decisions, mostly dry-run/receipt-only, and tune thresholds before creating more conscious-task candidates.
+3. **Low-frequency Hindsight reflection substrate** — run fixed, infrequent reflection jobs that distill unresolved pressure, repeated corrections, pending decisions, private creative/emotional pressure, and recurring operational loops into compact Subconscious material. This is slow semantic substrate, not an always-on deterministic Sensor.
+4. **Cron/job result pressure sensor** — notices repeated background failures without reading full logs.
+5. **Session-summary hook sensor** — compact session outcome metadata only, global only for repeated same-component issues.
+6. **Artifact/file metadata sensor** — hashes/paths/types only, no file contents.
+7. **Gateway delivery pressure sensor** — deferred plumbing; useful for voice/body-channel health, but not the next product-critical nerve unless delivery failures recur.
+8. **Deeper advisory jobs** — after the above produce enough real Event substrate.
 
 This order keeps the system useful before it becomes expressive.
