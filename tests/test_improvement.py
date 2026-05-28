@@ -93,6 +93,83 @@ def test_validation_canary_drops_do_not_create_default_policy_review(store):
     assert opt_in[0]["kind"] == "attention_policy_harness_canary"
 
 
+def test_attention_policy_rule_controls_repeated_drop_threshold(store):
+    for idx in range(3):
+        store.append_jsonl("decisions", _drop_receipt(f"cand_{idx}"))
+
+    evidence = collect_improvement_evidence(
+        store,
+        config={
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {"min_count": 4}
+                }
+            }
+        },
+    )
+
+    assert evidence == []
+
+
+def test_attention_policy_rule_controls_actionable_key_requirement(store):
+    for idx in range(3):
+        store.append_jsonl("decisions", _unkeyed_drop_receipt(f"cand_unkeyed_{idx}"))
+
+    evidence = collect_improvement_evidence(
+        store,
+        config={
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {"require_actionable_key": False}
+                }
+            }
+        },
+    )
+
+    assert evidence
+    assert evidence[0]["evidence_key"] == "unknown"
+    assert evidence[0]["policy_rule"]["require_actionable_key"] is False
+
+
+def test_attention_policy_rule_controls_ignored_correlation_keys(store):
+    for idx in range(3):
+        store.append_jsonl("decisions", _canary_drop_receipt(f"cand_canary_{idx}"))
+
+    evidence = collect_improvement_evidence(
+        store,
+        config={
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {"ignore_correlation_keys": []}
+                }
+            }
+        },
+    )
+
+    assert evidence
+    assert evidence[0]["kind"] == "attention_policy_harness_canary"
+    assert evidence[0]["policy_rule"]["ignore_correlation_keys"] == []
+
+
+def test_attention_policy_rule_takes_precedence_over_legacy_knobs(store):
+    for idx in range(3):
+        store.append_jsonl("decisions", _drop_receipt(f"cand_{idx}"))
+
+    evidence = collect_improvement_evidence(
+        store,
+        config={
+            "repeated_drop_threshold": 3,
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {"min_count": 4}
+                }
+            },
+        },
+    )
+
+    assert evidence == []
+
+
 def test_collector_creates_single_attention_policy_candidate(store):
     for idx in range(3):
         store.append_jsonl("decisions", _drop_receipt(f"cand_{idx}"))

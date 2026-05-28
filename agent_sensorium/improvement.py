@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from copy import deepcopy
 from typing import Any
 
 from .schemas import new_id, truncate_text, utc_now_iso
@@ -20,25 +21,37 @@ from .store import SensoriumStore
 ATTENTION_POLICY_KIND = "attention_policy_review"
 ATTENTION_POLICY_KEY = "attention-policy-review"
 
+DEFAULT_ATTENTION_POLICY: dict[str, Any] = {
+    "evidence_rules": {
+        "repeated_suppression_or_drop": {
+            "min_count": 3,
+            "require_actionable_key": True,
+            # Validation/proof canaries are intentionally synthetic. They prove
+            # the harness path once; they should not become future wake pressure.
+            "ignore_correlation_keys": [
+                "attention-policy-harness-canary",
+                "sensorium-self-improvement-proof",
+            ],
+        },
+        "settlement_gap": {"min_count": 1},
+        "manual_intervention": {"min_count": 1},
+        "completed_task_outcomes": {"min_count": 2},
+    }
+}
+
 DEFAULT_IMPROVEMENT_CONFIG: dict[str, Any] = {
+    "decision_limit": 500,
+    "candidate_pressure": 0.74,
+    "max_evidence_items": 8,
+    "attention_policy": DEFAULT_ATTENTION_POLICY,
+    # Deprecated compatibility shims. New tuning should use
+    # attention_policy.evidence_rules so normal adaptation stays declarative.
     "repeated_drop_threshold": 3,
     "settlement_gap_threshold": 1,
     "manual_intervention_threshold": 1,
     "completed_outcome_threshold": 2,
-    "decision_limit": 500,
-    "candidate_pressure": 0.74,
-    "max_evidence_items": 8,
-    # Low-information historical validation residue often lacks both candidate
-    # kind and correlation keys. Treat those rows as evidence-quality debt, not
-    # as a wake-worthy policy-review cluster by default; actionable reviews need
-    # a stable kind/key so Conscious can tune the right threshold/coalescing path.
     "include_unkeyed_drop_evidence": False,
-    # Validation/proof canaries are intentionally synthetic. They prove the
-    # harness path once; they should not become future wake pressure.
-    "ignored_drop_correlation_keys": [
-        "attention-policy-harness-canary",
-        "sensorium-self-improvement-proof",
-    ],
+    "ignored_drop_correlation_keys": DEFAULT_ATTENTION_POLICY["evidence_rules"]["repeated_suppression_or_drop"]["ignore_correlation_keys"],
 }
 
 VALID_ATTENTION_DECISIONS = {
@@ -53,11 +66,63 @@ VALID_ATTENTION_DECISIONS = {
 _REVIEWED_TASK_STATUSES = {"done", "completed", "archived"}
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = deepcopy(base)
+    for key, value in (override or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def _merged_config(config: dict | None = None) -> dict:
-    cfg = dict(DEFAULT_IMPROVEMENT_CONFIG)
+    cfg = _deep_merge(DEFAULT_IMPROVEMENT_CONFIG, config or {})
+    rules = cfg.setdefault("attention_policy", {}).setdefault("evidence_rules", {})
+    repeated = rules.setdefault("repeated_suppression_or_drop", {})
+    settlement = rules.setdefault("settlement_gap", {})
+    manual = rules.setdefault("manual_intervention", {})
+    completed = rules.setdefault("completed_task_outcomes", {})
+
+    # Compatibility: old top-level knobs still work, but explicit nested policy
+    # is the canonical tuning surface from here on.
     if config:
-        cfg.update({k: v for k, v in config.items() if v is not None})
+        raw_rules = (((config.get("attention_policy") or {}).get("evidence_rules") or {}))
+        raw_repeated = raw_rules.get("repeated_suppression_or_drop") or {}
+        raw_settlement = raw_rules.get("settlement_gap") or {}
+        raw_manual = raw_rules.get("manual_intervention") or {}
+        raw_completed = raw_rules.get("completed_task_outcomes") or {}
+
+        if "repeated_drop_threshold" in config and "min_count" not in raw_repeated:
+            repeated["min_count"] = config["repeated_drop_threshold"]
+        if "include_unkeyed_drop_evidence" in config and "require_actionable_key" not in raw_repeated:
+            repeated["require_actionable_key"] = not bool(config["include_unkeyed_drop_evidence"])
+        if "ignored_drop_correlation_keys" in config and "ignore_correlation_keys" not in raw_repeated:
+            repeated["ignore_correlation_keys"] = list(config.get("ignored_drop_correlation_keys") or [])
+        if "settlement_gap_threshold" in config and "min_count" not in raw_settlement:
+            settlement["min_count"] = config["settlement_gap_threshold"]
+        if "manual_intervention_threshold" in config and "min_count" not in raw_manual:
+            manual["min_count"] = config["manual_intervention_threshold"]
+        if "completed_outcome_threshold" in config and "min_count" not in raw_completed:
+            completed["min_count"] = config["completed_outcome_threshold"]
+
     return cfg
+
+
+def _policy_rule(cfg: dict, evidence_type: str) -> dict:
+    rules = ((cfg.get("attention_policy") or {}).get("evidence_rules") or {})
+    rule = rules.get(evidence_type) or {}
+    return dict(rule) if isinstance(rule, dict) else {}
+
+
+def _rule_min_count(rule: dict, fallback: int) -> int:
+    try:
+        value = int(rule.get("min_count", fallback))
+    except (TypeError, ValueError):
+        value = fallback
+    return max(1, value)
 
 
 def _short_hash(payload: Any) -> str:
@@ -128,8 +193,9 @@ def _collect_repeated_drop_evidence(
     threshold: int,
     max_items: int,
     *,
-    include_unkeyed: bool = False,
+    require_actionable_key: bool = True,
     ignored_keys: list[str] | None = None,
+    policy_rule: dict | None = None,
 ) -> list[dict]:
     ignored = {str(k).strip() for k in (ignored_keys or []) if str(k or "").strip()}
     groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"items": [], "count": 0})
@@ -146,7 +212,7 @@ def _collect_repeated_drop_evidence(
         keys = _decision_keys(decision)
         if ignored and ({kind, *keys} & ignored):
             continue
-        if kind == "unknown" and not keys and not include_unkeyed:
+        if kind == "unknown" and not keys and require_actionable_key:
             continue
         key = _evidence_key(kind, keys)
         group = groups[key]
@@ -171,6 +237,7 @@ def _collect_repeated_drop_evidence(
             "count": group["count"],
             "kind": group.get("kind", "unknown"),
             "correlation_keys": group.get("correlation_keys", []),
+            "policy_rule": dict(policy_rule or {}),
             "summary": (
                 f"{group['count']} DROP/suppress receipts clustered around "
                 f"{group.get('kind', 'unknown')} suggest noisy salience or a threshold/coalescing issue."
@@ -295,21 +362,34 @@ def collect_improvement_evidence(
     decisions = store.read_jsonl("decisions", limit=int(cfg["decision_limit"]))
     max_items = int(cfg["max_evidence_items"])
     evidence: list[dict] = []
+    settlement_rule = _policy_rule(cfg, "settlement_gap")
+    repeated_rule = _policy_rule(cfg, "repeated_suppression_or_drop")
+    manual_rule = _policy_rule(cfg, "manual_intervention")
+    completed_rule = _policy_rule(cfg, "completed_task_outcomes")
+
     evidence.extend(_collect_settlement_gap_evidence(
-        decisions, bridge_state, int(cfg["settlement_gap_threshold"]), max_items
+        decisions,
+        bridge_state,
+        _rule_min_count(settlement_rule, int(cfg["settlement_gap_threshold"])),
+        max_items,
     ))
     evidence.extend(_collect_repeated_drop_evidence(
         decisions,
-        int(cfg["repeated_drop_threshold"]),
+        _rule_min_count(repeated_rule, int(cfg["repeated_drop_threshold"])),
         max_items,
-        include_unkeyed=bool(cfg.get("include_unkeyed_drop_evidence")),
-        ignored_keys=list(cfg.get("ignored_drop_correlation_keys") or []),
+        require_actionable_key=bool(repeated_rule.get("require_actionable_key", True)),
+        ignored_keys=list(repeated_rule.get("ignore_correlation_keys") or []),
+        policy_rule=repeated_rule,
     ))
     evidence.extend(_collect_manual_intervention_evidence(
-        decisions, int(cfg["manual_intervention_threshold"]), max_items
+        decisions,
+        _rule_min_count(manual_rule, int(cfg["manual_intervention_threshold"])),
+        max_items,
     ))
     evidence.extend(_collect_completed_task_outcome_evidence(
-        kanban_tasks, int(cfg["completed_outcome_threshold"]), max_items
+        kanban_tasks,
+        _rule_min_count(completed_rule, int(cfg["completed_outcome_threshold"])),
+        max_items,
     ))
     rank = {"settlement_gap": 0, "manual_intervention": 1, "repeated_suppression_or_drop": 2, "completed_task_outcomes": 3}
     evidence.sort(key=lambda e: (rank.get(str(e.get("type")), 99), -int(e.get("count") or 0)))
