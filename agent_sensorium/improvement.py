@@ -28,6 +28,11 @@ DEFAULT_IMPROVEMENT_CONFIG: dict[str, Any] = {
     "decision_limit": 500,
     "candidate_pressure": 0.74,
     "max_evidence_items": 8,
+    # Low-information historical validation residue often lacks both candidate
+    # kind and correlation keys. Treat those rows as evidence-quality debt, not
+    # as a wake-worthy policy-review cluster by default; actionable reviews need
+    # a stable kind/key so Conscious can tune the right threshold/coalescing path.
+    "include_unkeyed_drop_evidence": False,
 }
 
 VALID_ATTENTION_DECISIONS = {
@@ -112,7 +117,9 @@ def _recent_decision_for_evidence(decisions: list[dict], evidence_key: str) -> d
     return None
 
 
-def _collect_repeated_drop_evidence(decisions: list[dict], threshold: int, max_items: int) -> list[dict]:
+def _collect_repeated_drop_evidence(
+    decisions: list[dict], threshold: int, max_items: int, *, include_unkeyed: bool = False
+) -> list[dict]:
     groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"items": [], "count": 0})
     for decision in decisions:
         dtype = decision.get("type")
@@ -125,6 +132,8 @@ def _collect_repeated_drop_evidence(decisions: list[dict], threshold: int, max_i
             continue
         kind = _decision_kind(decision)
         keys = _decision_keys(decision)
+        if kind == "unknown" and not keys and not include_unkeyed:
+            continue
         key = _evidence_key(kind, keys)
         group = groups[key]
         group["count"] += 1
@@ -276,7 +285,10 @@ def collect_improvement_evidence(
         decisions, bridge_state, int(cfg["settlement_gap_threshold"]), max_items
     ))
     evidence.extend(_collect_repeated_drop_evidence(
-        decisions, int(cfg["repeated_drop_threshold"]), max_items
+        decisions,
+        int(cfg["repeated_drop_threshold"]),
+        max_items,
+        include_unkeyed=bool(cfg.get("include_unkeyed_drop_evidence")),
     ))
     evidence.extend(_collect_manual_intervention_evidence(
         decisions, int(cfg["manual_intervention_threshold"]), max_items

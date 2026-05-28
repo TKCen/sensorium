@@ -31,6 +31,17 @@ def _drop_receipt(candidate_id: str, *, kind: str = "kanban_pressure", reason: s
     }
 
 
+def _unkeyed_drop_receipt(candidate_id: str, *, reason: str = "historical validation residue") -> dict:
+    return {
+        "ts": "2026-05-28T00:00:00Z",
+        "type": "kanban.settlement.applied",
+        "decision": "DROP",
+        "candidate_id": candidate_id,
+        "intake_task_id": f"t_{candidate_id[-4:]}",
+        "reason": reason,
+    }
+
+
 def test_collect_repeated_drop_evidence_crosses_threshold(store):
     for idx in range(3):
         store.append_jsonl("decisions", _drop_receipt(f"cand_{idx}"))
@@ -41,6 +52,19 @@ def test_collect_repeated_drop_evidence_crosses_threshold(store):
     assert evidence[0]["type"] == "repeated_suppression_or_drop"
     assert evidence[0]["count"] == 3
     assert evidence[0]["kind"] == "kanban_pressure"
+
+
+def test_unkeyed_repeated_drops_do_not_create_default_policy_review(store):
+    for idx in range(14):
+        store.append_jsonl("decisions", _unkeyed_drop_receipt(f"cand_{idx}"))
+
+    evidence = collect_improvement_evidence(store)
+
+    assert evidence == []
+
+    opt_in = collect_improvement_evidence(store, config={"include_unkeyed_drop_evidence": True})
+    assert opt_in
+    assert opt_in[0]["evidence_key"] == "unknown"
 
 
 def test_collector_creates_single_attention_policy_candidate(store):
