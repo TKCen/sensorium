@@ -53,7 +53,7 @@ class TestThreadsCommand:
 
     def test_threads_after_dispatch(self, state_dir):
         _ingest_strong(state_dir)
-        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         out = handle_sensorium_command("threads", instance="test", state_dir=state_dir)
         assert "threads:" in out
         assert "[dormant]" in out
@@ -68,7 +68,7 @@ class TestDispatchCommand:
     def test_dispatch_preview(self, state_dir):
         _ingest_strong(state_dir)
         out = handle_sensorium_command("dispatch", instance="test", state_dir=state_dir)
-        assert "would promote" in out
+        assert "activation is Kanban-only" in out
         assert "pressure" in out
 
 
@@ -100,7 +100,7 @@ class TestHelpCommand:
 class TestStatusTerminalDisplay:
     def test_status_shows_terminal_counts(self, state_dir):
         _ingest_strong(state_dir)
-        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         thread_id = json.loads(raw)["data"]["thread_id"]
         handle_sensorium_thread_update(
             thread_id=thread_id, action="close", reason="resolved",

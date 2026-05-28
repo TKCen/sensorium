@@ -1,0 +1,525 @@
+"""Kanban-native activation regression invariants.
+
+These tests lock in the architectural decision that Hermes Kanban is the only
+activation/ticketing substrate for Sensorium. They guard against the split-brain
+regression where a clean Kanban board could coexist with a hidden Sensorium
+`would_promote`/dormant-thread lane.
+
+Scope:
+- Default `sensorium_dispatch_once` mutating call must not create internal
+  Sensorium threads (legacy gate fails closed).
+- Default `sensorium_conscious_claim` must not claim dormant threads.
+- Status surface must mask the legacy `promoted`/`would_promote` action labels.
+- Kanban sensor-bridge primitives (`event_incident_key`,
+  `coalesce_suppression_reason`, `apply_kanban_settlement`) must route a
+  `hindsight_pressure`-shaped event through intake → deterministic DROP rather
+  than letting it sit as an invisible Sensorium candidate.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from agent_sensorium.conscious import claim_dormant_thread, complete_claim
+from agent_sensorium.dispatcher import dispatch_once
+from agent_sensorium.settlement import (
+    DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
+    apply_kanban_settlement,
+    candidate_intake_idempotency_key,
+    candidate_route,
+    coalesce_suppression_reason,
+    event_incident_key,
+    plan_candidate_reconciliation,
+    represented_candidate_ids,
+    select_active_above_threshold,
+)
+from agent_sensorium.store import SensoriumStore
+from agent_sensorium.tools import (
+    handle_sensorium_conscious_claim,
+    handle_sensorium_dispatch_once,
+    handle_sensorium_ingest_event,
+    handle_sensorium_ingest_signal,
+    handle_sensorium_status,
+)
+
+
+@pytest.fixture
+def state_dir(tmp_path):
+    return str(tmp_path / "sensorium")
+
+
+@pytest.fixture
+def store(state_dir):
+    s = SensoriumStore(instance="test", state_dir=state_dir)
+    s.ensure_dirs()
+    return s
+
+
+def _strong_signal(kind: str = "design_decision", summary: str = "Strong test signal") -> dict:
+    return {
+        "sensor": "test",
+        "source": "manual",
+        "kind": kind,
+        "summary": summary,
+        "strength_hint": 0.9,
+        "correlation_keys": [f"{kind}-corr"],
+    }
+
+
+def _seed_candidate(state_dir: str, *, kind: str = "design_decision") -> str:
+    raw = handle_sensorium_ingest_signal(
+        signal=_strong_signal(kind=kind),
+        instance="test",
+        state_dir=state_dir,
+    )
+    return json.loads(raw)["data"]["candidate_id"]
+
+
+class TestDispatchActivationGate:
+    """Sensorium dispatch must not become a second activation substrate."""
+
+    def test_default_mutating_dispatch_creates_no_dormant_thread(self, store):
+        """In default (Kanban-only) mode, mutation must fail closed."""
+        _seed_candidate(str(store.root))
+        result = dispatch_once(store, dry_run=False)
+        assert result["action"] == "legacy_dispatch_disabled"
+        assert result["recommended_activation"] == "kanban_bridge"
+        assert store.read_jsonl("threads") == []
+        # No promotion receipt either: the dispatcher must not even record a
+        # silent `dispatch.promoted_to_thread` decision in Kanban mode.
+        decisions = store.read_jsonl("decisions")
+        assert not any(
+            d.get("type") == "dispatch.promoted_to_thread" for d in decisions
+        )
+
+    def test_default_dry_run_returns_kanban_review_required(self, store):
+        _seed_candidate(str(store.root))
+        result = dispatch_once(store, dry_run=True)
+        assert result["action"] == "kanban_review_required"
+        assert result["recommended_activation"] == "kanban_bridge"
+        # Dry-run must remain side-effect-free.
+        assert store.read_jsonl("threads") == []
+        assert store.read_jsonl("decisions") == []
+
+    def test_status_surface_masks_raw_promoted_legacy_action(self, tmp_path):
+        """Even when legacy was explicitly enabled, status surface presents the
+        Kanban activation contract so dashboards/agents do not silently learn
+        about a hidden Sensorium-internal promotion."""
+        state_dir = str(tmp_path / "sensorium")
+        _seed_candidate(state_dir)
+
+        promoted_raw = json.loads(handle_sensorium_dispatch_once(
+            instance="test",
+            state_dir=state_dir,
+            dry_run=False,
+            config={"legacy_thread_dispatch_enabled": True},
+        ))
+        # The raw dispatcher response still describes what really happened
+        # under explicit legacy opt-in -- that is the audit truth for tests.
+        assert promoted_raw["data"]["action"] == "promoted"
+
+        status = json.loads(
+            handle_sensorium_status(instance="test", state_dir=state_dir)
+        )["data"]
+        legacy = status["legacy_dispatch_result"]
+        assert legacy["action"] == "kanban_review_required"
+        assert legacy["raw_legacy_action"] == "promoted"
+        assert legacy["deprecated"] is True
+        assert legacy["activation_substrate"] == "kanban"
+        assert legacy["ignored_as_activation"] is True
+
+
+class TestConsciousClaimGate:
+    """Background-conscious claim/complete must not be a parallel scheduler."""
+
+    def test_claim_disabled_by_default_returns_conscious_disabled(self, store):
+        result = claim_dormant_thread(store)
+        assert result["success"] is False
+        assert result["error"] == "conscious_disabled"
+
+    def test_handler_claim_returns_error_envelope_by_default(self, state_dir):
+        raw = handle_sensorium_conscious_claim(
+            instance="test", state_dir=state_dir,
+        )
+        result = json.loads(raw)
+        assert result["success"] is False
+        # `_err` surfaces the human-readable detail, which must point callers
+        # at the Kanban substrate rather than at a flag they can flip silently.
+        message = result.get("error") or ""
+        assert "deprecated" in message
+        assert "Kanban" in message
+
+    def test_claim_only_under_explicit_legacy_opt_in_still_works(self, store):
+        """We keep the legacy path runnable for migration/tests but only when
+        callers explicitly pass `config.enabled=True`."""
+        _seed_candidate(str(store.root))
+        dispatch = dispatch_once(
+            store,
+            dry_run=False,
+            config={"legacy_thread_dispatch_enabled": True},
+        )
+        assert dispatch["action"] == "promoted"
+
+        claim = claim_dormant_thread(store, config={"enabled": True})
+        assert claim["success"] is True
+        thread_id = claim["data"]["thread"]["thread_id"]
+        lease_id = claim["data"]["lease_id"]
+
+        complete = complete_claim(
+            store,
+            thread_id=thread_id,
+            lease_id=lease_id,
+            outcome="completed",
+        )
+        assert complete["success"] is True
+
+
+class TestKanbanBridgePrimitives:
+    """`hindsight_pressure` must flow through Kanban intake / settlement.
+
+    The live bridge script `live-scripts/sensorium_kanban_sensor_tick.py`
+    consumes Sensorium events and either mirrors them into Kanban intake tasks
+    or coalesces repeats via `apply_kanban_settlement(DROP, ...)`. We test the
+    bridge primitives directly so the invariant survives any rewording of the
+    wrapper.
+    """
+
+    def _hindsight_event(self, *, eid: str, summary: str, fingerprint: str) -> dict:
+        # `handle_sensorium_ingest_event` recomputes `fingerprint` from a
+        # canonical content hash, so callers that need to settle by fingerprint
+        # must read the candidate's recomputed value. Tests below settle by
+        # `event_id` instead, which the bridge already does in the live path.
+        return {
+            "id": eid,
+            "ts": "2026-05-28T10:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "hindsight_pressure",
+            "summary": summary,
+            "strength": 0.84,
+            "source_signal_ids": [f"sig_{eid}"],
+            "correlation_keys": ["hindsight-pressure"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "fingerprint": fingerprint,
+        }
+
+    def test_incident_key_is_stable_per_fingerprint(self):
+        ev1 = self._hindsight_event(
+            eid="evt_a", summary="pending=210", fingerprint="hp_abc",
+        )
+        ev2 = self._hindsight_event(
+            eid="evt_b", summary="pending=212", fingerprint="hp_abc",
+        )
+        assert event_incident_key(ev1) == event_incident_key(ev2)
+        assert event_incident_key(ev1).startswith("hindsight_pressure:")
+
+    def test_first_event_is_not_suppressed(self):
+        ev = self._hindsight_event(
+            eid="evt_first", summary="pending=210", fingerprint="hp_first",
+        )
+        # No prior incident_context -> no suppression -> bridge would mint a
+        # `sensor:intake:hindsight_pressure` task.
+        assert coalesce_suppression_reason(ev, state={}) is None
+        assert coalesce_suppression_reason(ev, state={"incident_context": {}}) is None
+
+    def test_repeat_event_is_coalesced_when_intake_already_exists(self):
+        ev = self._hindsight_event(
+            eid="evt_repeat", summary="pending=215", fingerprint="hp_repeat",
+        )
+        key = event_incident_key(ev)
+        state = {
+            "incident_context": {
+                key: {
+                    "intake_task_id": "kanban_task_42",
+                    "first_event_id": "evt_prior",
+                },
+            },
+        }
+        reason = coalesce_suppression_reason(ev, state)
+        assert reason is not None
+        assert reason.startswith("coalesced_repeat:")
+
+    def test_repeat_event_is_settled_via_apply_kanban_settlement(self, state_dir):
+        """End-to-end invariant: a repeat hindsight_pressure event drops the
+        active Sensorium candidate so it cannot remain `would_promote` while
+        the Kanban board is clean."""
+        # Promote a hindsight_pressure event through the normal ingest path so
+        # there is a real candidate in the active promotion pool.
+        first = self._hindsight_event(
+            eid="evt_hp_1", summary="pending=300", fingerprint="hp_active",
+        )
+        ingest_raw = handle_sensorium_ingest_event(
+            event=first, instance="test", state_dir=state_dir,
+        )
+        ingest = json.loads(ingest_raw)
+        candidate_id = ingest["data"]["candidate_id"]
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        active = [
+            c for c in store.read_jsonl("candidates")
+            if c.get("status") == "candidate"
+        ]
+        assert any(c.get("id") == candidate_id for c in active)
+
+        # Simulate the bridge deciding this is a coalesced repeat of an
+        # already-contextualized incident: it propagates DROP back into
+        # Sensorium so the active candidate disappears from the promotion pool.
+        repeat = self._hindsight_event(
+            eid="evt_hp_2", summary="pending=305", fingerprint="hp_active",
+        )
+        settlement = apply_kanban_settlement(
+            store,
+            decision="DROP",
+            event_id="evt_hp_1",
+            fingerprint=str(repeat.get("fingerprint")),
+            correlation_keys=list(repeat.get("correlation_keys") or []),
+            intake_task_id="kanban_intake_42",
+            review_task_id="",
+            reason="Deterministic Kanban coalescing for repeat hindsight_pressure.",
+        )
+        assert settlement["action"] == "settled"
+        assert candidate_id in settlement["updated_candidate_ids"]
+
+        # After settlement, the candidate is no longer eligible for dispatch:
+        # this is the invariant that closes the split-brain gap.
+        remaining_active = [
+            c for c in store.read_jsonl("candidates")
+            if c.get("status") == "candidate"
+        ]
+        assert not any(c.get("id") == candidate_id for c in remaining_active)
+        result = dispatch_once(store, dry_run=True)
+        # No other candidate is above threshold, so the dispatcher cannot find
+        # the dropped one even in dry-run advisory mode.
+        assert result["action"] == "no_candidate"
+
+    def test_settlement_is_idempotent_for_repeated_drop(self, state_dir):
+        first = self._hindsight_event(
+            eid="evt_idem", summary="pending=300", fingerprint="hp_idem",
+        )
+        handle_sensorium_ingest_event(
+            event=first, instance="test", state_dir=state_dir,
+        )
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        s1 = apply_kanban_settlement(
+            store,
+            decision="DROP",
+            event_id="evt_idem",
+            fingerprint="hp_idem",
+            correlation_keys=["hindsight-pressure"],
+            reason="first drop",
+        )
+        s2 = apply_kanban_settlement(
+            store,
+            decision="DROP",
+            event_id="evt_idem",
+            fingerprint="hp_idem",
+            correlation_keys=["hindsight-pressure"],
+            reason="repeat drop",
+        )
+        assert s1["action"] == "settled"
+        assert s2["action"] == "already_settled"
+        # Idempotency means the candidate is not double-mutated and no new
+        # settlement receipt is appended for the repeat call.
+        assert s2["updated_candidate_ids"] == []
+
+
+class TestStaleCandidateReconciliation:
+    """Stale active above-threshold candidates must reach Kanban or settlement.
+
+    The regression: a candidate crossed the dispatch threshold earlier (before
+    the bridge's event watermark, or with no fresh sample this tick), so the
+    event-driven path mirrors nothing. `dispatch_once(dry_run=True)` reports
+    `kanban_review_required` while the board is empty -- a quiet pending
+    activation. The reconciliation planner closes that gap deterministically:
+    it mints an intake for routable kinds (`hindsight_pressure`) or settles
+    non-routable kinds with a receipt, and coalesces so no duplicate intake is
+    minted while one is already open.
+    """
+
+    def _hindsight_event(self, *, eid: str, summary: str, fingerprint: str) -> dict:
+        return {
+            "id": eid,
+            "ts": "2026-05-28T10:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "hindsight_pressure",
+            "summary": summary,
+            "strength": 0.84,
+            "source_signal_ids": [f"sig_{eid}"],
+            "correlation_keys": ["hindsight-pressure"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "fingerprint": fingerprint,
+        }
+
+    def _feedback_self_loop_candidate(self) -> dict:
+        # is_feedback_self_loop: feedback_meta with a caused_by value carrying a
+        # Sensorium id prefix and a non-operator_evaluation scope.
+        return {
+            "id": "cand_selfloop",
+            "status": "candidate",
+            "kind": "thread_update",
+            "pressure": 0.9,
+            "summary": "internal sensorium echo",
+            "event_ids": ["evt_loop"],
+            "correlation_keys": ["loop"],
+            "feedback_meta": {
+                "caused_by": {"thread_id": "sth_internal"},
+                "outcome": "completed",
+                "feedback_scope": "internal",
+            },
+        }
+
+    def test_idempotency_key_is_stable_and_candidate_scoped(self):
+        cand = {"id": "cand_12617f0ee225"}
+        key = candidate_intake_idempotency_key(cand)
+        assert key == "sensorium:intake:candidate:cand_12617f0ee225"
+        # Stable across calls; distinct per candidate id.
+        assert key == candidate_intake_idempotency_key(dict(cand))
+        assert candidate_intake_idempotency_key({"id": "cand_other"}) != key
+
+    def test_select_active_above_threshold_filters_status_and_pressure(self):
+        candidates = [
+            {"id": "a", "status": "candidate", "pressure": 0.77},
+            {"id": "b", "status": "candidate", "pressure": 0.10},
+            {"id": "c", "status": "suppressed", "pressure": 0.99},
+            {"id": "d", "status": "reviewed", "pressure": 0.99},
+        ]
+        active = select_active_above_threshold(candidates)
+        assert [c["id"] for c in active] == ["a"]
+
+    def test_routable_hindsight_pressure_routes_to_intake(self):
+        cand = {"id": "cand_hp", "status": "candidate", "kind": "hindsight_pressure", "pressure": 0.77}
+        assert candidate_route(cand) == "intake"
+
+    def test_feedback_self_loop_routes_to_settle_drop(self):
+        assert candidate_route(self._feedback_self_loop_candidate()) == "settle_drop"
+
+    def test_planner_mints_intake_for_stale_above_threshold_hindsight_pressure(self, state_dir):
+        """THE regression: an active above-threshold hindsight_pressure candidate
+        with no open intake must be planned for a fresh Kanban intake."""
+        event = self._hindsight_event(
+            eid="evt_stale", summary="pending=210 critical", fingerprint="hp_stale",
+        )
+        ingest = json.loads(
+            handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
+        )
+        candidate_id = ingest["data"]["candidate_id"]
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        candidates = store.read_jsonl("candidates")
+        # The seeded candidate is genuinely above threshold (strength 0.84).
+        cand = next(c for c in candidates if c["id"] == candidate_id)
+        assert cand["pressure"] >= DEFAULT_DISPATCH_PRESSURE_THRESHOLD
+
+        # Board is clean: nothing represented yet.
+        plan = plan_candidate_reconciliation(candidates, represented_candidate_ids=set())
+        minted_ids = [m["candidate_id"] for m in plan["mint"]]
+        assert candidate_id in minted_ids
+        mint = next(m for m in plan["mint"] if m["candidate_id"] == candidate_id)
+        assert mint["kind"] == "hindsight_pressure"
+        assert mint["idempotency_key"] == f"sensorium:intake:candidate:{candidate_id}"
+        assert plan["settle"] == []
+
+    def test_planner_coalesces_when_candidate_already_represented(self, state_dir):
+        """Once an intake is open for the candidate, the planner must not mint a
+        second one -- it coalesces into a skip."""
+        event = self._hindsight_event(
+            eid="evt_rep", summary="pending=210", fingerprint="hp_rep",
+        )
+        ingest = json.loads(
+            handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
+        )
+        candidate_id = ingest["data"]["candidate_id"]
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        candidates = store.read_jsonl("candidates")
+
+        plan = plan_candidate_reconciliation(
+            candidates, represented_candidate_ids={candidate_id}
+        )
+        assert plan["mint"] == []
+        assert any(s["candidate_id"] == candidate_id for s in plan["skip"])
+
+    def test_planner_settles_non_routable_feedback_self_loop(self):
+        candidates = [self._feedback_self_loop_candidate()]
+        plan = plan_candidate_reconciliation(candidates, represented_candidate_ids=set())
+        assert plan["mint"] == []
+        assert len(plan["settle"]) == 1
+        assert plan["settle"][0]["candidate_id"] == "cand_selfloop"
+        assert "feedback_self_loop" in plan["settle"][0]["reason"]
+
+    def test_planner_ignores_below_threshold_candidate(self):
+        candidates = [
+            {"id": "low", "status": "candidate", "kind": "hindsight_pressure", "pressure": 0.10},
+        ]
+        plan = plan_candidate_reconciliation(candidates, represented_candidate_ids=set())
+        assert plan["mint"] == []
+        assert plan["settle"] == []
+        assert plan["active_count"] == 0
+
+    def test_planner_is_bounded_and_reports_truncation(self):
+        candidates = [
+            {"id": f"cand_{i}", "status": "candidate", "kind": "hindsight_pressure", "pressure": 0.8}
+            for i in range(30)
+        ]
+        plan = plan_candidate_reconciliation(
+            candidates, represented_candidate_ids=set(), max_intakes=25
+        )
+        assert len(plan["mint"]) == 25
+        # Overflow is surfaced, never silently dropped.
+        assert plan["truncated"] == 5
+        assert plan["active_count"] == 30
+
+    def test_represented_candidate_ids_tracks_open_intakes_only(self):
+        reconciled = {
+            "cand_open": {"intake_task_id": "task_1", "decision": "intake"},
+            "cand_archived": {"intake_task_id": "task_2", "decision": "intake"},
+            "cand_settled": {"decision": "settled_drop"},
+        }
+        # Only task_1 is still open on the board.
+        rep = represented_candidate_ids(reconciled, {"task_1"})
+        assert rep == {"cand_open"}
+        # If an intake was archived without settling its candidate, that
+        # candidate is NOT represented and must be re-mirrored next tick.
+        assert "cand_archived" not in rep
+        # Settle-drop entries never count as represented.
+        assert "cand_settled" not in rep
+
+    def test_end_to_end_stale_candidate_minted_then_drops_out_after_settlement(self, state_dir):
+        """Full invariant: stale above-threshold hindsight_pressure candidate is
+        planned for intake while active; once settled it leaves the active pool
+        and the planner no longer surfaces it."""
+        event = self._hindsight_event(
+            eid="evt_e2e", summary="pending=300 critical", fingerprint="hp_e2e",
+        )
+        ingest = json.loads(
+            handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
+        )
+        candidate_id = ingest["data"]["candidate_id"]
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+
+        # Stage 1: active + board-clean -> planner mints an intake (not silent).
+        plan = plan_candidate_reconciliation(
+            store.read_jsonl("candidates"), represented_candidate_ids=set()
+        )
+        assert candidate_id in [m["candidate_id"] for m in plan["mint"]]
+
+        # Stage 2: a Subconscious review settles the candidate (DROP) via the
+        # bridge. It now leaves the active promotion pool.
+        settlement = apply_kanban_settlement(
+            store,
+            decision="DROP",
+            candidate_id=candidate_id,
+            reason="Subconscious DROP after reconciliation intake review.",
+        )
+        assert settlement["action"] == "settled"
+
+        # Stage 3: planner no longer surfaces it, and the dispatcher dry-run sees
+        # no candidate -- the split-brain pending activation is closed.
+        plan_after = plan_candidate_reconciliation(
+            store.read_jsonl("candidates"), represented_candidate_ids=set()
+        )
+        assert candidate_id not in [m["candidate_id"] for m in plan_after["mint"]]
+        assert candidate_id not in [s["candidate_id"] for s in plan_after["settle"]]
+        assert dispatch_once(store, dry_run=True)["action"] == "no_candidate"

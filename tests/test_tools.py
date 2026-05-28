@@ -299,10 +299,10 @@ class TestSensoriumDispatchOnce:
         raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=True)
         result = json.loads(raw)
         assert result["success"] is True
-        assert result["data"]["action"] == "would_promote"
+        assert result["data"]["action"] == "kanban_review_required"
         assert result["data"]["dry_run"] is True
 
-    def test_dispatch_real_creates_thread(self, state_dir):
+    def test_dispatch_real_disabled_by_default(self, state_dir):
         signal = {
             "sensor": "test",
             "source": "manual",
@@ -314,8 +314,7 @@ class TestSensoriumDispatchOnce:
         raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
         result = json.loads(raw)
         assert result["success"] is True
-        assert result["data"]["action"] == "promoted"
-        assert result["data"]["thread_id"].startswith("sth_")
+        assert result["data"]["action"] == "legacy_dispatch_disabled"
 
     def test_status_shows_dormant_thread(self, state_dir):
         signal = {
@@ -326,7 +325,7 @@ class TestSensoriumDispatchOnce:
             "strength_hint": 0.9,
         }
         handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
-        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         raw = handle_sensorium_status(instance="test", state_dir=state_dir)
         result = json.loads(raw)
         assert result["data"]["counts"]["dormant_threads"] == 1
@@ -429,7 +428,7 @@ class TestStatusTerminalCounts:
             "strength_hint": 0.9,
         }
         handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
-        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         thread_id = json.loads(raw)["data"]["thread_id"]
 
         handle_sensorium_thread_update(
@@ -451,7 +450,7 @@ class TestStatusTerminalCounts:
             "strength_hint": 0.9,
         }
         handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
-        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        raw = handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         thread_id = json.loads(raw)["data"]["thread_id"]
 
         handle_sensorium_thread_update(

@@ -152,15 +152,13 @@ def _fmt_dispatch(*, instance: str, state_dir: str | None) -> str:
     action = data["action"]
     if action == "no_candidate":
         return f"Sensorium [{instance}] dispatch: no eligible candidate."
-    elif action == "would_promote":
+    elif action == "kanban_review_required":
         cid = data["candidate_id"]
         pressure = data.get("candidate_pressure", "?")
-        preview = data.get("thread_preview", {})
-        title = preview.get("conscious_task", {}).get("title", "")
+        kind = data.get("candidate_kind", "?")
         return (
-            f"Sensorium [{instance}] dispatch would promote:\n"
-            f"  {cid} (pressure {pressure})\n"
-            f"  -> {title}"
+            f"Sensorium [{instance}] activation is Kanban-only:\n"
+            f"  candidate {cid} ({kind}, pressure {pressure}) needs sensor:intake/subconscious review."
         )
     elif action == "already_exists":
         return (
@@ -225,7 +223,7 @@ def _help() -> str:
         "  pointer [surf] Show the active-session pointer for a surface\n"
         "  open [id] [surf] Open a compact thread capsule if allowed on surface\n"
         "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
-        "  dispatch       Dry-run dispatch preview\n"
+        "  dispatch       Deprecated read-only Kanban activation advisory\n"
         "  compact        Archive expired items\n"
         "  outbox         List recent outbox requests\n"
         "  workers        List worker requests\n"

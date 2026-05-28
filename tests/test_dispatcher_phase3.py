@@ -41,7 +41,7 @@ class TestDispatcherStateLatest:
         candidate_id = _seed_candidate(state_dir)
 
         raw = handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         )
         result = json.loads(raw)
 
@@ -60,7 +60,15 @@ class TestDispatcherStateLatest:
 
         status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
         assert status["state_version"] == 1
-        assert status["last_dispatch_result"]["action"] == "promoted"
+        # Status surface masks raw `promoted` (a legacy mutation) as
+        # `kanban_review_required` so a clean Kanban board cannot split-brain
+        # from a hidden Sensorium activation lane; the raw legacy action is
+        # preserved on the same record for audit traceability.
+        assert status["legacy_dispatch_result"]["action"] == "kanban_review_required"
+        assert status["legacy_dispatch_result"]["raw_legacy_action"] == "promoted"
+        assert status["legacy_dispatch_result"]["deprecated"] is True
+        assert status["legacy_dispatch_result"]["activation_substrate"] == "kanban"
+        assert status["legacy_dispatch_result"]["ignored_as_activation"] is True
         assert set(status["budgets"]) >= {"dispatch", "pointer", "conscious", "advisory"}
 
     def test_dry_run_updates_state_latest_without_consuming_dispatch_budget(self, tmp_path):
@@ -71,11 +79,11 @@ class TestDispatcherStateLatest:
             instance="test", state_dir=state_dir, dry_run=True
         )
         result = json.loads(raw)
-        assert result["data"]["action"] == "would_promote"
+        assert result["data"]["action"] == "kanban_review_required"
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
         state = store.read_state()
-        assert state["last_dispatch_result"]["action"] == "would_promote"
+        assert state["last_dispatch_result"]["action"] == "kanban_review_required"
         assert state["budgets"]["dispatch"]["remaining"] == state["budgets"]["dispatch"]["capacity"]
         assert store.read_jsonl("threads") == []
 
@@ -96,7 +104,7 @@ class TestDispatcherLocksAndBudgets:
         }))
 
         raw = handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         )
         result = json.loads(raw)
 
@@ -120,7 +128,7 @@ class TestDispatcherLocksAndBudgets:
         }))
 
         raw = handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         )
         result = json.loads(raw)
 
@@ -137,7 +145,7 @@ class TestDispatcherLocksAndBudgets:
         }
 
         raw = handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False, config=config
+            instance="test", state_dir=state_dir, dry_run=False, config={**config, "legacy_thread_dispatch_enabled": True}
         )
         result = json.loads(raw)
 
@@ -155,7 +163,7 @@ class TestDispatcherLocksAndBudgets:
             instance="test", state_dir=state_dir, dry_run=True, config=config
         )
         result = json.loads(raw)
-        assert result["data"]["action"] == "would_promote"
+        assert result["data"]["action"] == "kanban_review_required"
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
         dispatch_budget = store.read_state()["budgets"]["dispatch"]
@@ -168,10 +176,10 @@ class TestDispatcherLocksAndBudgets:
         _seed_candidate(state_dir)
 
         first = json.loads(handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         ))
         second = json.loads(handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         ))
 
         assert first["data"]["action"] == "promoted"

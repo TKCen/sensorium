@@ -1,9 +1,11 @@
-"""Dispatcher: select candidate, create dormant thread capsule.
+"""Legacy dispatcher advisory for Agent Sensorium.
 
-Phase 3 keeps dispatch as the single attention scheduler by adding:
-- a local lock/lease for mutating dispatch;
-- small token-bucket state for dispatcher lanes;
-- state.latest updates for observability.
+Kanban is now the only activation and ticketing substrate. This module still
+selects eligible candidates and can build a compatibility thread preview, but
+`dispatch_once` no longer creates dormant Sensorium threads unless callers pass
+an explicit legacy opt-in (`legacy_thread_dispatch_enabled=True`). Normal use is
+read-only advisory/status so a clean Kanban board cannot split from a hidden
+Sensorium `would_promote` lane.
 """
 
 from __future__ import annotations
@@ -19,6 +21,10 @@ from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 STATE_VERSION = 1
+
+BACKGROUND_SAFE_REQUEST_TYPES = {
+    "THINK", "SAVE", "UPDATE_MEMORY_OR_SKILL", "DELEGATE_WORK",
+}
 
 DEFAULT_DISPATCH_CONFIG: dict = {
     "thresholds": {
@@ -39,6 +45,16 @@ DEFAULT_DISPATCH_CONFIG: dict = {
         "kinds": [],
         "surfaces": [],
         "sensitivity": "private",
+    },
+    # Compatibility only. New activation must flow through the Sensorium-on-Kanban
+    # bridge, which creates sensor:intake -> subconscious:review ->
+    # conscious:review Kanban tasks. Keep this false by default so no live tool or
+    # cron can silently create internal conscious threads as a second scheduler.
+    "legacy_thread_dispatch_enabled": False,
+    "kanban_bridge": {
+        "board": "sensorium",
+        "intake_prefix": "sensor:intake:",
+        "review_prefix": "subconscious:review:",
     },
 }
 
@@ -250,13 +266,14 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
     summary = candidate.get("summary", "")
     kind = candidate.get("kind", "")
 
+    request_type = "THINK"
     thread = {
         "id": new_id("sth"),
         "status": "dormant",
         "origin": "candidate",
         "conscious_task": {
             "id": new_id("ctask"),
-            "request_type": "THINK",
+            "request_type": request_type,
             "title": f"Review {kind}: {truncate_text(summary, 80)}",
             "why": f"Candidate pressure {candidate.get('pressure', 0)} crossed dispatch threshold.",
             "expected_decision": "Suppress, hold for later, save as workflow guidance, or create bounded follow-up.",
@@ -275,12 +292,27 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
         "resume_trigger": "",
         "last_interaction_at": now,
         "source_refs": [],
+        "pickup": _default_pickup(
+            request_type=request_type,
+            allowed_surfaces=candidate.get("allowed_surfaces", ["local"]),
+        ),
+        "active_lease": None,
         "created_at": now,
         "updated_at": now,
         "expires_at": expires,
     }
     _apply_operational_pointer_policy(thread, candidate, cfg)
     return thread
+
+
+def _default_pickup(*, request_type: str, allowed_surfaces: list[str]) -> dict:
+    """Conservative pickup policy: background-eligible only for safe request types."""
+    background = request_type in BACKGROUND_SAFE_REQUEST_TYPES
+    return {
+        "background": bool(background),
+        "surfaces": list(allowed_surfaces or ["local"]),
+        "requires_user_open": not background,
+    }
 
 
 def _apply_operational_pointer_policy(thread: dict, candidate: dict, cfg: dict) -> None:
@@ -351,11 +383,31 @@ def _dispatch_core(
 
     if dry_run:
         return {
-            "action": "would_promote",
+            "action": "kanban_review_required",
             "dry_run": True,
             "candidate_id": selected["id"],
             "candidate_pressure": selected.get("pressure"),
-            "thread_preview": thread,
+            "candidate_kind": selected.get("kind", ""),
+            "candidate_summary": truncate_text(selected.get("summary", ""), 200),
+            "recommended_activation": "kanban_bridge",
+            "kanban_bridge": cfg.get("kanban_bridge", {}),
+            "legacy_thread_preview": thread,
+            "deprecated_actions": ["would_promote", "promoted"],
+        }
+
+    if not cfg.get("legacy_thread_dispatch_enabled"):
+        return {
+            "action": "legacy_dispatch_disabled",
+            "dry_run": False,
+            "candidate_id": selected["id"],
+            "candidate_pressure": selected.get("pressure"),
+            "candidate_kind": selected.get("kind", ""),
+            "recommended_activation": "kanban_bridge",
+            "kanban_bridge": cfg.get("kanban_bridge", {}),
+            "reason": (
+                "Internal Sensorium thread dispatch is deprecated and disabled; "
+                "mirror this candidate into Kanban intake/review instead."
+            ),
         }
 
     if not _consume_budget(budgets, "dispatch"):
@@ -403,6 +455,16 @@ def dispatch_once(
             result=result,
             budgets=budgets,
             lock_status={"status": "not_acquired", "reason": "dry_run"},
+        )
+        return result
+
+    if not cfg.get("legacy_thread_dispatch_enabled"):
+        result = _dispatch_core(store, dry_run=False, cfg=cfg, budgets=budgets)
+        _write_latest(
+            store,
+            result=result,
+            budgets=budgets,
+            lock_status={"status": "not_acquired", "reason": "legacy_dispatch_disabled"},
         )
         return result
 

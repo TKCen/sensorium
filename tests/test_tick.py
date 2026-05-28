@@ -74,12 +74,12 @@ class TestTickSilence:
 class TestTickOperations:
     """Tick runs all deterministic operations."""
 
-    def test_runs_compact_service_dispatch_status(self, state_dir):
+    def test_runs_compact_service_status(self, state_dir):
         out = _run_tick(state_dir)
         assert out["success"] is True
         assert "compact" in out
         assert "service" in out
-        assert "dispatch" in out
+        assert "dispatch" not in out
         assert "status" in out
 
     def test_dry_run_skips_compact_and_service(self, state_dir):
@@ -88,14 +88,14 @@ class TestTickOperations:
         assert out["dry_run"] is True
         assert "compact" not in out
         assert "service" not in out
-        assert "dispatch" in out
+        assert "dispatch" not in out
         assert "status" in out
 
-    def test_dispatch_always_dry_run_preview(self, state_dir):
+    def test_tick_does_not_run_legacy_dispatch_preview(self, state_dir):
         _seed_signal(state_dir, "Dispatch preview test")
         out = _run_tick(state_dir)
-        assert out["dispatch"]["action"] == "would_promote"
-        assert out["dispatch"]["dry_run"] is True
+        assert "dispatch" not in out
+        assert out["status"]["counts"]["candidates"] == 1
 
     def test_dispatch_does_not_create_threads(self, state_dir):
         _seed_signal(state_dir, "No thread creation")
@@ -124,7 +124,7 @@ class TestTickReceipts:
         assert r["dry_run"] is False
         assert "compact" in r["steps"]
         assert "service" in r["steps"]
-        assert "dispatch" in r["steps"]
+        assert "dispatch" not in r["steps"]
         assert "status" in r["steps"]
         assert "errors" not in r
 
@@ -275,13 +275,13 @@ class TestTickDryRunCompat:
         assert out["success"] is True
         assert out["dry_run"] is True
         assert "compact" not in out
-        assert out["dispatch"]["action"] == "no_candidate"
+        assert "dispatch" not in out
         assert out["status"]["counts"]["signals"] == 0
 
     def test_dry_run_with_signal(self, state_dir):
         _seed_signal(state_dir, "Tick dry-run test")
         out = _run_tick(state_dir, dry_run=True)
-        assert out["dispatch"]["action"] == "would_promote"
+        assert "dispatch" not in out
         assert out["status"]["counts"]["candidates"] == 1
 
 
@@ -293,7 +293,7 @@ class TestTickNormalRun:
         out = _run_tick(state_dir)
         assert out["success"] is True
         assert out["dry_run"] is False
-        assert out["dispatch"]["action"] == "would_promote"
+        assert "dispatch" not in out
         assert out["status"]["counts"]["candidates"] == 1
         assert out["status"]["counts"]["dormant_threads"] == 0
 

@@ -1,10 +1,9 @@
-"""Generic thread actions: prepared-action / motor-plan substrate.
+"""Deprecated Sensorium-local thread action compatibility layer.
 
-Phase 9C adds a generic action layer attached to conscious threads.
-A thread can have prepared actions representing intended movements
-without forcing a concrete medium or expression type. Intent is a free
-string -- the reusable core validates structure, bounds, refs, and state
-transitions; it does not enforce an expression taxonomy.
+The generic motor-plan shape remains useful as compact refs/receipts, but live
+action/work ticketing now belongs to Kanban. Prefer Kanban task comments,
+child tasks, artifacts, and settlement refs over creating hidden Sensorium-only
+action queues.
 """
 
 from __future__ import annotations
@@ -355,6 +354,43 @@ def _build_action_feedback_signal(action: dict, *, store: SensoriumStore) -> dic
     }
 
 
+def _attach_action_result_to_thread(
+    store: SensoriumStore,
+    *,
+    origin_thread_id: str,
+    action_id: str,
+    outcome: str,
+    attachments: list[dict],
+    now: str,
+) -> None:
+    """Attach compact action-result ref to origin thread, mark summary_dirty."""
+    if not origin_thread_id:
+        return
+    threads = store.read_jsonl("threads")
+    thread = _find_thread_by_id(threads, origin_thread_id)
+    if thread is None:
+        return
+    output_refs: list[dict] = []
+    for att in attachments or []:
+        kind = att.get("kind", "")
+        ref_id = att.get("ref_id", "")
+        if not kind or not ref_id:
+            continue
+        output_refs.append({"type": kind, "ref_id": ref_id})
+    thread.setdefault("interaction_refs", []).append({
+        "type": "action_result",
+        "action_id": action_id,
+        "outcome": outcome,
+        "output_refs": output_refs,
+        "ts": now,
+    })
+    thread["summary_dirty"] = True
+    if not thread.get("dirty_since"):
+        thread["dirty_since"] = now
+    thread["updated_at"] = now
+    _rewrite_jsonl(store, "threads", threads)
+
+
 def record_action_result(
     store: SensoriumStore,
     *,
@@ -423,6 +459,15 @@ def record_action_result(
     }
     store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "thread_actions", actions)
+
+    _attach_action_result_to_thread(
+        store,
+        origin_thread_id=action.get("origin_thread_id", ""),
+        action_id=action_id,
+        outcome=outcome,
+        attachments=action.get("attachments") or [],
+        now=now,
+    )
 
     feedback_signal = _build_action_feedback_signal(action, store=store)
 

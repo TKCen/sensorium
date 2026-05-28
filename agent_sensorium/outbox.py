@@ -1,7 +1,9 @@
-"""Sensorium-owned outbox for replyable Discord/context requests.
+"""Deprecated Sensorium-local outbox compatibility layer.
 
-Authority flows from the Sensorium thread, not from external platforms.
-Discord threads and channels are viewports, not source of truth.
+Kanban is now the live activation/ticketing substrate. Outbox records remain as
+compact compatibility receipts for existing thread capsules; new expression or
+delivery work should be a Kanban-reviewed action/artifact/outbox decision with
+Sensorium refs, not a hidden Sensorium-local queue.
 
 Safety defaults:
 - All direct/replyable Discord modes disabled by default

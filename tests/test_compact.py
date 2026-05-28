@@ -207,7 +207,7 @@ class TestCompactEndToEnd:
             "strength_hint": 0.9,
         }
         handle_sensorium_ingest_signal(signal=signal, instance="test", state_dir=state_dir)
-        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
 
         status_before = json.loads(
             handle_sensorium_status(instance="test", state_dir=state_dir)

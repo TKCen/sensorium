@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Deterministic sensorium tick with optional cheap Subconscious advisory.
+"""Deterministic sensorium tick.
 
-Runs compaction, thread service, dispatch preview, and status.
+Runs compaction, thread service, deterministic pressure sensors, optional bounded
+Subconscious advisory, and status. It deliberately does not run the legacy
+Sensorium dispatcher: Kanban is the only activation/ticketing substrate.
 Pressure sensors remain deterministic/no-model. Subconscious model advisory runs only
 when explicitly requested with --subconscious-advisory --subconscious-model.
 Writes a local tick receipt. Silent on stdout by default for cron use.
@@ -32,7 +34,6 @@ from agent_sensorium.sensors import (
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.tools import (
     handle_sensorium_compact,
-    handle_sensorium_dispatch_once,
     handle_sensorium_ingest_signal,
     handle_sensorium_service_threads,
     handle_sensorium_status,
@@ -114,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--enable-dispatch", action="store_true",
-        help="Allow the dispatch scheduler to create one dormant internal thread; otherwise preview only",
+        help="Deprecated/no-op: internal Sensorium dispatch is disabled; Kanban bridge owns activation.",
     )
     parser.add_argument(
         "--body-pressure", action="store_true",
@@ -238,12 +239,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 errors.append(f"subconscious_advisory: {raw.get('error', 'unknown')}")
 
-        dispatch_dry_run = args.dry_run or not args.enable_dispatch
-        raw = json.loads(handle_sensorium_dispatch_once(dry_run=dispatch_dry_run, config=instance_config, **kw))
-        if raw.get("success"):
-            steps["dispatch"] = raw["data"]
-        else:
-            errors.append(f"dispatch: {raw.get('error', 'unknown')}")
+        if args.enable_dispatch:
+            steps["activation"] = {
+                "action": "legacy_dispatch_disabled",
+                "activation_substrate": "kanban",
+                "reason": "--enable-dispatch is deprecated; use the Sensorium-on-Kanban bridge instead.",
+            }
 
         status_kw = dict(kw)
         if args.config_path:

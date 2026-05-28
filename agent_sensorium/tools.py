@@ -33,6 +33,10 @@ from .actions import (
     prepare_action,
     record_action_result,
 )
+from .conscious import (
+    claim_dormant_thread,
+    complete_claim,
+)
 from .workers import (
     dispatch_worker_request,
     list_worker_requests,
@@ -166,7 +170,18 @@ def handle_sensorium_status(
         if "state_version" in state:
             data["state_version"] = state.get("state_version")
         if "last_dispatch_result" in state:
-            data["last_dispatch_result"] = state.get("last_dispatch_result")
+            legacy_result = dict(state.get("last_dispatch_result") or {})
+            raw_legacy_action = legacy_result.get("action")
+            if raw_legacy_action in {"would_promote", "promoted"}:
+                legacy_result["raw_legacy_action"] = raw_legacy_action
+                legacy_result["action"] = "kanban_review_required"
+                legacy_result["recommended_activation"] = "kanban_bridge"
+            data["legacy_dispatch_result"] = {
+                **legacy_result,
+                "deprecated": True,
+                "activation_substrate": "kanban",
+                "ignored_as_activation": True,
+            }
         if "budgets" in state:
             data["budgets"] = state.get("budgets")
         if "locks" in state:
@@ -453,6 +468,12 @@ def handle_sensorium_dispatch_once(
     dry_run: bool = True,
     config: dict | None = None,
 ) -> str:
+    """Compatibility dispatcher surface.
+
+    Default is read-only advisory. Mutating dormant-thread creation is disabled
+    unless config.legacy_thread_dispatch_enabled=True so Kanban remains the only
+    activation/ticketing substrate.
+    """
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
     result = _dispatch_once(store, dry_run=dry_run, config=config)
@@ -1358,3 +1379,56 @@ def handle_sensorium_action_status(
         store, thread_id=thread_id, status=status, limit=limit,
     )
     return _ok(instance, {"thread_actions": items, "count": len(items)})
+
+
+# --- Background conscious lease tool handlers ---
+
+
+def handle_sensorium_conscious_claim(
+    *,
+    actor: str = "",
+    mode: str = "",
+    thread_id: str = "",
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = claim_dormant_thread(
+        store,
+        actor=actor,
+        mode=mode,
+        thread_id=thread_id,
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "conscious_claim_failed"),
+    )
+
+
+def handle_sensorium_conscious_complete(
+    *,
+    thread_id: str,
+    lease_id: str,
+    outcome: str = "",
+    notes: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = complete_claim(
+        store,
+        thread_id=thread_id,
+        lease_id=lease_id,
+        outcome=outcome,
+        notes=notes,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "conscious_complete_failed"),
+    )

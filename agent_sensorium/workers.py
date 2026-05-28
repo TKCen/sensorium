@@ -1,9 +1,9 @@
-"""Conscious delegation: worker request lifecycle.
+"""Deprecated Sensorium-local worker request compatibility layer.
 
-Phase 9B adds the conscious delegation boundary. A conscious thread can
-prepare a worker request, optionally dispatch it, and record results as
-feedback signals. Preparing is NOT executing -- dispatch requires explicit
-execute=True AND config direct_dispatch_enabled=True.
+Kanban is now the live worker/ticketing substrate. These prepared records remain
+for old thread capsules and migration tests; new work should be represented as
+Kanban child tasks/comments/artifact refs with Sensorium receipts pointing back
+to the originating candidate/thread.
 """
 
 from __future__ import annotations
@@ -382,6 +382,36 @@ def _build_worker_feedback_signal(request: dict, *, store: SensoriumStore) -> di
     }
 
 
+def _attach_worker_result_to_thread(
+    store: SensoriumStore,
+    *,
+    origin_thread_id: str,
+    worker_request_id: str,
+    outcome: str,
+    output_refs: list[dict],
+    now: str,
+) -> None:
+    """Attach compact result ref to origin thread, mark summary_dirty."""
+    if not origin_thread_id:
+        return
+    threads = store.read_jsonl("threads")
+    thread = _find_thread_by_id(threads, origin_thread_id)
+    if thread is None:
+        return
+    thread.setdefault("interaction_refs", []).append({
+        "type": "worker_result",
+        "worker_request_id": worker_request_id,
+        "outcome": outcome,
+        "output_refs": list(output_refs or []),
+        "ts": now,
+    })
+    thread["summary_dirty"] = True
+    if not thread.get("dirty_since"):
+        thread["dirty_since"] = now
+    thread["updated_at"] = now
+    _rewrite_jsonl(store, "threads", threads)
+
+
 def record_worker_result(
     store: SensoriumStore,
     *,
@@ -443,6 +473,15 @@ def record_worker_result(
     }
     store.append_jsonl("decisions", receipt)
     _rewrite_jsonl(store, "worker_requests", requests)
+
+    _attach_worker_result_to_thread(
+        store,
+        origin_thread_id=target_req.get("origin_thread_id", ""),
+        worker_request_id=worker_request_id,
+        outcome=outcome,
+        output_refs=target_req.get("output_refs") or [],
+        now=now,
+    )
 
     feedback_signal = _build_worker_feedback_signal(target_req, store=store)
 

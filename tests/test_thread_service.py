@@ -75,7 +75,7 @@ def test_thread_creation_initializes_phase4_fields(tmp_path):
 
     result = json.loads(
         handle_sensorium_dispatch_once(
-            instance="test", state_dir=str(tmp_path), dry_run=False
+            instance="test", state_dir=str(tmp_path), dry_run=False, config={"legacy_thread_dispatch_enabled": True}
         )
     )
     assert result["success"] is True

@@ -123,14 +123,22 @@ class TestDispatchOnce:
     def test_dry_run_does_not_mutate(self, store):
         store.append_jsonl("candidates", _make_candidate(pressure=0.8))
         result = dispatch_once(store, dry_run=True)
-        assert result["action"] == "would_promote"
+        assert result["action"] == "kanban_review_required"
         assert result["dry_run"] is True
         assert store.read_jsonl("threads") == []
         assert store.read_jsonl("decisions") == []
 
-    def test_real_dispatch_creates_thread(self, store):
+    def test_real_dispatch_disabled_by_default(self, store):
         store.append_jsonl("candidates", _make_candidate(pressure=0.8))
         result = dispatch_once(store, dry_run=False)
+        assert result["action"] == "legacy_dispatch_disabled"
+        assert result["recommended_activation"] == "kanban_bridge"
+        assert store.read_jsonl("threads") == []
+        assert store.read_jsonl("decisions") == []
+
+    def test_legacy_dispatch_opt_in_creates_thread(self, store):
+        store.append_jsonl("candidates", _make_candidate(pressure=0.8))
+        result = dispatch_once(store, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         assert result["action"] == "promoted"
         assert result["thread_id"].startswith("sth_")
         threads = store.read_jsonl("threads")
@@ -142,9 +150,9 @@ class TestDispatchOnce:
 
     def test_idempotent_no_duplicate(self, store):
         store.append_jsonl("candidates", _make_candidate(pressure=0.8))
-        r1 = dispatch_once(store, dry_run=False)
+        r1 = dispatch_once(store, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         assert r1["action"] == "promoted"
-        r2 = dispatch_once(store, dry_run=False)
+        r2 = dispatch_once(store, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         assert r2["action"] == "already_exists"
         assert r2["thread_id"] == r1["thread_id"]
         assert len(store.read_jsonl("threads")) == 1
@@ -168,13 +176,17 @@ class TestDispatchOnce:
         store = SensoriumStore(instance="test", state_dir=state_dir)
 
         dry = dispatch_once(store, dry_run=True)
-        assert dry["action"] == "would_promote"
+        assert dry["action"] == "kanban_review_required"
         assert store.read_jsonl("threads") == []
 
         real1 = dispatch_once(store, dry_run=False)
+        assert real1["action"] == "legacy_dispatch_disabled"
+        assert store.read_jsonl("threads") == []
+
+        real1 = dispatch_once(store, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         assert real1["action"] == "promoted"
 
-        real2 = dispatch_once(store, dry_run=False)
+        real2 = dispatch_once(store, dry_run=False, config={"legacy_thread_dispatch_enabled": True})
         assert real2["action"] == "already_exists"
         assert real2["thread_id"] == real1["thread_id"]
 

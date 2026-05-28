@@ -318,7 +318,10 @@ class TestThreadUpdateFeedbackEmission:
         handle_sensorium_ingest_signal(signal=sig, instance="test", state_dir=state_dir)
         from agent_sensorium.tools import handle_sensorium_dispatch_once
         handle_sensorium_dispatch_once(
-            instance="test", state_dir=state_dir, dry_run=False
+            instance="test",
+            state_dir=state_dir,
+            dry_run=False,
+            config={"legacy_thread_dispatch_enabled": True},
         )
         threads = store.read_jsonl("threads")
         return threads[0]["id"]
@@ -433,7 +436,12 @@ class TestPluginFeedbackSchema:
         }
         handle_sensorium_ingest_signal(signal=sig, instance="test", state_dir=state_dir)
         from agent_sensorium.tools import handle_sensorium_dispatch_once
-        handle_sensorium_dispatch_once(instance="test", state_dir=state_dir, dry_run=False)
+        handle_sensorium_dispatch_once(
+            instance="test",
+            state_dir=state_dir,
+            dry_run=False,
+            config={"legacy_thread_dispatch_enabled": True},
+        )
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
         threads = store.read_jsonl("threads")

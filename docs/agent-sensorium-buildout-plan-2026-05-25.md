@@ -228,19 +228,15 @@ Phase 8 Subconscious advisory plus the explicit cheap model lane are implemented
 Immediate next work should therefore split into two parts:
 
 1. **Attention review surface before outbox:** make pending candidates/conscious tasks easy to inspect, suppress, hold, close, or open as conscious threads. Active chats should receive compact pointers only; full capsules open only on request. **Status (Phase 9A.2a):** Attention Inbox exists and is read-only. Policy unification is complete — a single `config.visible_on_surface` gate enforces both item AND instance-config `allowed_surfaces` plus `max_sensitivity` across the inbox, pointer selection, `pre_llm_call` pointer injection, `sensorium_thread_open`, and the dashboard attention endpoint. Missing config fails closed to local-only. This is the safety gate before any dashboard/operator surface or outbox expansion.
-2. **Live advisory validation + slow memory reflection substrate:** validate the advisory lane against live accumulated Event substrate, then add a low-frequency Hindsight memory-pressure job that produces compact reflection material for Subconscious. Hindsight reflection is slow semantic substrate, not an always-on Sensor; it must run infrequently, use bounded prompts/outputs, hash or watermark unchanged reflections, and never act externally. Probe result 2026-05-27: direct Hindsight `reflect` currently performs poorly for this use case, so v0 should be recall-backed unless the reflect LLM lane is fixed/rerouted first.
+2. **Extension documentation and contracts:** keep `docs/extending-sensors-and-subconscious-jobs.md` current so adding a new deterministic sensor or bounded Subconscious job is boring, testable, and safe.
 
-Then validate the advisory/reflection lane while keeping it dry-run/receipt-only by default:
+Then validate the advisory lane against live accumulated Event substrate while keeping it dry-run/receipt-only:
 
 - verify advisory context stays bounded and contains only Events/Candidates/Decisions/probe summary;
 - measure how often real pressure Events produce useful `DROP`/`SAVE`/`CREATE_CONSCIOUS_TASK` advisory outputs with the cheap lane enabled;
-- define fixed Hindsight reflection queries for unresolved pressure, repeated user corrections, pending conscious decisions, private creative/emotional pressure, and recurring operational loops;
-- convert Hindsight reflections into compact signals/events with refs/hashes only, not raw memory text;
-- skip unchanged reflection hashes and apply long cooldowns before creating another candidate for the same theme;
 - tune pressure/candidate thresholds before creating more conscious-task candidates;
 - keep tick invocation opt-in (`--subconscious-advisory --subconscious-model`) and avoid model calls unless explicitly requested;
-- defer `sensorium.gateway_pressure`; gateway delivery health is useful plumbing, but it is not the next product-critical nerve;
-- decide the Phase 9 surface order with this bias: conscious-task/candidate review first, live advisory/reflection validation second, dashboard visibility third, outbox proposal schema fourth, direct delivery last.
+- decide the Phase 9 surface order with this bias: conscious-task/candidate review first, dashboard visibility second, outbox proposal schema third, direct delivery last.
 
 Gate:
 
