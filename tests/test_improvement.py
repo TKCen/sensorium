@@ -42,6 +42,19 @@ def _unkeyed_drop_receipt(candidate_id: str, *, reason: str = "historical valida
     }
 
 
+def _canary_drop_receipt(candidate_id: str) -> dict:
+    return _drop_receipt(
+        candidate_id,
+        kind="attention_policy_harness_canary",
+        reason="Controlled canary should not become durable policy-review pressure.",
+    ) | {
+        "correlation_keys": [
+            "attention-policy-harness-canary",
+            "sensorium-self-improvement-proof",
+        ]
+    }
+
+
 def test_collect_repeated_drop_evidence_crosses_threshold(store):
     for idx in range(3):
         store.append_jsonl("decisions", _drop_receipt(f"cand_{idx}"))
@@ -65,6 +78,19 @@ def test_unkeyed_repeated_drops_do_not_create_default_policy_review(store):
     opt_in = collect_improvement_evidence(store, config={"include_unkeyed_drop_evidence": True})
     assert opt_in
     assert opt_in[0]["evidence_key"] == "unknown"
+
+
+def test_validation_canary_drops_do_not_create_default_policy_review(store):
+    for idx in range(3):
+        store.append_jsonl("decisions", _canary_drop_receipt(f"cand_canary_{idx}"))
+
+    evidence = collect_improvement_evidence(store)
+
+    assert evidence == []
+
+    opt_in = collect_improvement_evidence(store, config={"ignored_drop_correlation_keys": []})
+    assert opt_in
+    assert opt_in[0]["kind"] == "attention_policy_harness_canary"
 
 
 def test_collector_creates_single_attention_policy_candidate(store):

@@ -33,6 +33,12 @@ DEFAULT_IMPROVEMENT_CONFIG: dict[str, Any] = {
     # as a wake-worthy policy-review cluster by default; actionable reviews need
     # a stable kind/key so Conscious can tune the right threshold/coalescing path.
     "include_unkeyed_drop_evidence": False,
+    # Validation/proof canaries are intentionally synthetic. They prove the
+    # harness path once; they should not become future wake pressure.
+    "ignored_drop_correlation_keys": [
+        "attention-policy-harness-canary",
+        "sensorium-self-improvement-proof",
+    ],
 }
 
 VALID_ATTENTION_DECISIONS = {
@@ -118,8 +124,14 @@ def _recent_decision_for_evidence(decisions: list[dict], evidence_key: str) -> d
 
 
 def _collect_repeated_drop_evidence(
-    decisions: list[dict], threshold: int, max_items: int, *, include_unkeyed: bool = False
+    decisions: list[dict],
+    threshold: int,
+    max_items: int,
+    *,
+    include_unkeyed: bool = False,
+    ignored_keys: list[str] | None = None,
 ) -> list[dict]:
+    ignored = {str(k).strip() for k in (ignored_keys or []) if str(k or "").strip()}
     groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"items": [], "count": 0})
     for decision in decisions:
         dtype = decision.get("type")
@@ -132,6 +144,8 @@ def _collect_repeated_drop_evidence(
             continue
         kind = _decision_kind(decision)
         keys = _decision_keys(decision)
+        if ignored and ({kind, *keys} & ignored):
+            continue
         if kind == "unknown" and not keys and not include_unkeyed:
             continue
         key = _evidence_key(kind, keys)
@@ -289,6 +303,7 @@ def collect_improvement_evidence(
         int(cfg["repeated_drop_threshold"]),
         max_items,
         include_unkeyed=bool(cfg.get("include_unkeyed_drop_evidence")),
+        ignored_keys=list(cfg.get("ignored_drop_correlation_keys") or []),
     ))
     evidence.extend(_collect_manual_intervention_evidence(
         decisions, int(cfg["manual_intervention_threshold"]), max_items
