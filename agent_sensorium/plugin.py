@@ -50,6 +50,9 @@ def register(ctx) -> None:
         handle_sensorium_conscious_claim,
         handle_sensorium_conscious_complete,
         handle_sensorium_dispatch_once,
+        handle_sensorium_improvement_collect,
+        handle_sensorium_improvement_status,
+        handle_sensorium_attention_policy_decide,
         handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
         handle_sensorium_outbox_dispatch,
@@ -372,6 +375,102 @@ def register(ctx) -> None:
             config=args.get("config"),
         ),
         description="Run bounded Subconscious advisory over local Sensorium Events.",
+    )
+
+    ctx.register_tool(
+        name="sensorium_improvement_collect",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_improvement_collect",
+            "Run deterministic Sensorium self-improvement evidence collection. It may create at most one internal attention_policy_review candidate and never mutates wake behavior directly.",
+            {
+                **common,
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, preview without creating a candidate or receipt.",
+                },
+                "bridge_state": {
+                    "type": "object",
+                    "description": "Optional Sensorium-on-Kanban bridge state snapshot for settlement-gap evidence.",
+                },
+                "kanban_tasks": {
+                    "type": "array",
+                    "description": "Optional compact Kanban task rows for completed-outcome evidence.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional threshold/config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_improvement_collect(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+            dry_run=bool(args.get("dry_run", False)),
+            bridge_state=args.get("bridge_state"),
+            kanban_tasks=args.get("kanban_tasks"),
+            config=args.get("config"),
+        ),
+        description="Collect Sensorium-internal attention-policy evidence.",
+    )
+    ctx.register_tool(
+        name="sensorium_attention_policy_decide",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_attention_policy_decide",
+            "Record a Conscious attention-policy-review decision receipt with future_tendency_delta, verification_condition, and rollback_condition. Does not apply policy mutations directly.",
+            {
+                **common,
+                "candidate_id": {"type": "string", "description": "attention_policy_review candidate id."},
+                "decision": {
+                    "type": "string",
+                    "enum": [
+                        "NO_CHANGE",
+                        "THRESHOLD_COALESCING_TWEAK_PROPOSAL",
+                        "SENSOR_ADDITION_TASK",
+                        "PRIORITY_MAP_CHANGE",
+                        "MEMORY_SKILL_PATCH",
+                        "HOLD",
+                    ],
+                    "description": "Bounded conscious decision.",
+                },
+                "reason": {"type": "string", "description": "Short reason for the decision."},
+                "future_tendency_delta": {"type": "string", "description": "How future salience should change."},
+                "verification_condition": {"type": "string", "description": "How a later run verifies this helped."},
+                "rollback_condition": {"type": "string", "description": "When to undo/revisit the decision."},
+                "decided_by": {"type": "string", "description": "Actor label; defaults to conscious."},
+                "decision_ref": {"type": "string", "description": "Optional Kanban/thread/session ref."},
+                "implementation_ref": {"type": "string", "description": "Optional implementation/task ref."},
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_attention_policy_decide(
+            candidate_id=args.get("candidate_id", ""),
+            decision=args.get("decision", ""),
+            reason=args.get("reason", ""),
+            future_tendency_delta=args.get("future_tendency_delta", ""),
+            verification_condition=args.get("verification_condition", ""),
+            rollback_condition=args.get("rollback_condition", ""),
+            decided_by=args.get("decided_by") or "conscious",
+            decision_ref=args.get("decision_ref") or "",
+            implementation_ref=args.get("implementation_ref") or "",
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Record a conscious Sensorium attention-policy decision receipt.",
+    )
+    ctx.register_tool(
+        name="sensorium_improvement_status",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_improvement_status",
+            "Read Sensorium self-improvement harness status and recent attention-policy-review receipts.",
+            common,
+        ),
+        handler=lambda args, **kw: handle_sensorium_improvement_status(
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Read self-improvement harness status.",
     )
 
     ctx.register_tool(

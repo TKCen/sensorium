@@ -45,6 +45,7 @@ from agent_sensorium.settlement import (  # noqa: E402
     represented_candidate_ids as _represented_candidate_ids,
     select_active_above_threshold,
 )
+from agent_sensorium.improvement import run_improvement_collector  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
 
 STATE_DIR = HOME / ".hermes" / "agent-sensorium" / "kanban"
@@ -366,6 +367,10 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         "sensitivity": candidate.get("sensitivity"),
         "allowed_surfaces": list(candidate.get("allowed_surfaces") or []),
     }
+    if isinstance(candidate.get("conscious_task"), dict):
+        payload["conscious_task"] = candidate.get("conscious_task")
+    if isinstance(candidate.get("improvement_meta"), dict):
+        payload["improvement_meta"] = candidate.get("improvement_meta")
     return (
         "Sensorium Kanban reconciliation intake v1. This is substrate, not "
         "executable user work.\n\n"
@@ -545,6 +550,7 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         "- Do not send messages, schedule crons, start gateways, or create external workers.\n"
         "- For DROP/SAVE: comment concise evidence on intake tasks, archive or complete settled intakes.\n"
         "- For PROMOTE_CONSCIOUS: create exactly one `conscious:review:` task assigned to `default`, preferably with this review as parent, include cited intake IDs and stop condition.\n"
+        "- For `attention_policy_review` intakes: this is Sensorium self-improvement evidence, not ordinary noise. Unless an equivalent conscious review is already active, PROMOTE_CONSCIOUS to `default`; Conscious must decide NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, and must record future_tendency_delta, verification_condition, and rollback_condition. Subconscious must not mutate wake behavior directly.\n"
         "- CRITICAL: after deciding, propagate every consumed intake decision back into Sensorium truth by running the settlement CLI once with a JSON list of settlement records:\n"
         "  `python /home/entity/.hermes/plugins/agent-sensorium/scripts/sensorium_kanban_settle.py --instance sera --file /tmp/sensorium_settlements_<review>.json --json`\n"
         "  Record shape: {decision: DROP|SAVE|PROMOTE_CONSCIOUS, event_id, fingerprint, correlation_keys, intake_task_id, review_task_id, conscious_task_ref?, reason}. Use event_id/fingerprint/correlation_keys from each intake's Compact event payload.\n"
@@ -737,6 +743,11 @@ def main() -> int:
             SensoriumStore(instance=INSTANCE),
             tasks,
         )
+        improvement_collect = run_improvement_collector(
+            SensoriumStore(instance=INSTANCE),
+            bridge_state=state,
+            kanban_tasks=tasks,
+        )
         open_intakes = _open_sensor_intakes(tasks)
         # Reconciliation pass: the event-driven path above only mirrors freshly
         # emitted events. A candidate that crossed the dispatch threshold earlier
@@ -795,6 +806,7 @@ def main() -> int:
                 "reconciled_candidates": reconciled_candidates,
                 "last_reconcile": reconcile_summary,
                 "last_post_review_settlement": post_review_settlement,
+                "last_improvement_collect": improvement_collect,
                 "last_reconciled_intake_count": len(reconcile.get("minted", [])),
                 "last_reconciled_settle_count": len(reconcile.get("settled", [])),
                 "last_review_created": review,
@@ -819,6 +831,7 @@ def main() -> int:
                 "suppressed_events": suppressed_events,
                 "reconcile": reconcile_summary,
                 "post_review_settlement": post_review_settlement,
+                "improvement_collect": improvement_collect,
                 "open_intake_count": len(open_intakes),
                 "active_review_count": len(active_reviews),
                 "active_conscious_count": len(active_conscious),

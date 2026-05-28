@@ -26,6 +26,11 @@ from .schemas import (
 )
 from .store import SensoriumStore
 from .subconscious import run_subconscious_advisory
+from .improvement import (
+    record_attention_policy_decision,
+    run_improvement_collector,
+    summarize_improvement_state,
+)
 from .actions import (
     attach_action_ref,
     compact_actions_for_thread,
@@ -509,6 +514,74 @@ def handle_sensorium_subconscious_advisory(
     except ValueError as e:
         return _err(instance, str(e))
     return _ok(instance, result)
+
+
+def handle_sensorium_improvement_collect(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+    dry_run: bool = False,
+    bridge_state: dict | None = None,
+    kanban_tasks: list[dict] | None = None,
+    config: dict | None = None,
+) -> str:
+    """Run deterministic Sensorium self-improvement evidence collection."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    try:
+        result = run_improvement_collector(
+            store,
+            bridge_state=bridge_state,
+            kanban_tasks=kanban_tasks,
+            dry_run=dry_run,
+            config=config,
+        )
+    except ValueError as e:
+        return _err(instance, str(e))
+    return _ok(instance, result)
+
+
+def handle_sensorium_attention_policy_decide(
+    *,
+    candidate_id: str,
+    decision: str,
+    reason: str,
+    future_tendency_delta: str,
+    verification_condition: str,
+    rollback_condition: str,
+    decided_by: str = "conscious",
+    decision_ref: str = "",
+    implementation_ref: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Record a conscious attention-policy-review decision receipt."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    try:
+        result = record_attention_policy_decision(
+            store,
+            candidate_id=candidate_id,
+            decision=decision,
+            reason=reason,
+            future_tendency_delta=future_tendency_delta,
+            verification_condition=verification_condition,
+            rollback_condition=rollback_condition,
+            decided_by=decided_by,
+            decision_ref=decision_ref,
+            implementation_ref=implementation_ref,
+        )
+    except ValueError as e:
+        return _err(instance, str(e))
+    return _ok(instance, result)
+
+
+def handle_sensorium_improvement_status(
+    *,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    return _ok(instance, summarize_improvement_state(store))
 
 
 def handle_sensorium_candidate_update(
