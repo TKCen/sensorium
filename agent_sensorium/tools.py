@@ -48,6 +48,7 @@ from .workers import (
     prepare_worker_request,
     record_worker_result,
 )
+from .config import load_instance_config, manage_attention_policy_config
 
 ARCHIVED_STATUSES = {"archived", "closed"}
 
@@ -527,13 +528,17 @@ def handle_sensorium_improvement_collect(
 ) -> str:
     """Run deterministic Sensorium self-improvement evidence collection."""
     store = SensoriumStore(instance=instance, state_dir=state_dir)
+    effective_config = config
+    if effective_config is None:
+        instance_config, _ = load_instance_config(state_dir=str(store.root))
+        effective_config = {"attention_policy": instance_config.get("attention_policy", {})}
     try:
         result = run_improvement_collector(
             store,
             bridge_state=bridge_state,
             kanban_tasks=kanban_tasks,
             dry_run=dry_run,
-            config=config,
+            config=effective_config,
         )
     except ValueError as e:
         return _err(instance, str(e))
@@ -571,6 +576,48 @@ def handle_sensorium_attention_policy_decide(
         )
     except ValueError as e:
         return _err(instance, str(e))
+    return _ok(instance, result)
+
+
+def handle_sensorium_attention_policy_manage(
+    *,
+    action: str,
+    instance: str = "default",
+    state_dir: str | None = None,
+    config_path: str | None = None,
+    rule: str = "",
+    patch: dict | None = None,
+    key: str = "",
+    value: object | None = None,
+    reason: str = "",
+    future_tendency_delta: str = "",
+    verification_condition: str = "",
+    rollback_condition: str = "",
+    actor: str = "conscious",
+    decision_ref: str = "",
+) -> str:
+    """Apply a narrow declarative attention-policy config mutation."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    try:
+        result = manage_attention_policy_config(
+            action=action,
+            config_path=config_path,
+            state_dir=str(store.root),
+            rule=rule,
+            patch=patch,
+            key=key,
+            value=value,
+            reason=reason,
+            future_tendency_delta=future_tendency_delta,
+            verification_condition=verification_condition,
+            rollback_condition=rollback_condition,
+            actor=actor,
+            decision_ref=decision_ref,
+        )
+    except ValueError as e:
+        return _err(instance, str(e))
+    store.append_jsonl("decisions", result["receipt"])
     return _ok(instance, result)
 
 

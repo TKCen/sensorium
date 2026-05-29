@@ -49,6 +49,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_subconscious_advisory",
         "sensorium_improvement_collect",
         "sensorium_attention_policy_decide",
+        "sensorium_attention_policy_manage",
         "sensorium_improvement_status",
         "sensorium_outbox_prepare",
         "sensorium_outbox_dispatch",

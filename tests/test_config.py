@@ -10,9 +10,11 @@ from agent_sensorium.config import (
     apply_sensitivity_policy,
     apply_surface_policy,
     load_instance_config,
+    manage_attention_policy_config,
     resolve_config_path,
 )
-from agent_sensorium.tools import handle_sensorium_status
+from agent_sensorium.store import SensoriumStore
+from agent_sensorium.tools import handle_sensorium_attention_policy_manage, handle_sensorium_improvement_collect, handle_sensorium_status
 
 
 @pytest.fixture
@@ -67,6 +69,13 @@ class TestConfigLoading:
         config, _ = load_instance_config()
         assert config["thresholds"]["starvation_hours"] == 72
         assert config["thresholds"]["expiring_window_hours"] == 24
+
+    def test_safe_defaults_attention_policy_present(self):
+        config, _ = load_instance_config()
+        repeated = config["attention_policy"]["evidence_rules"]["repeated_suppression_or_drop"]
+        assert repeated["min_count"] == 3
+        assert repeated["require_actionable_key"] is True
+        assert "sensorium-self-improvement-proof" in repeated["ignore_correlation_keys"]
 
     def test_config_file_loaded(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
@@ -160,6 +169,31 @@ class TestConfigLoading:
         assert config["thresholds"]["starvation_hours"] == 48
         assert config["thresholds"]["expiring_window_hours"] == 24
 
+    def test_custom_attention_policy_loaded_and_sanitized(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {
+                        "min_count": 5,
+                        "require_actionable_key": False,
+                        "ignore_correlation_keys": ["", "synthetic", "synthetic"],
+                        "unknown_field": "ignored",
+                    },
+                    "unknown_rule": {"min_count": 99},
+                },
+                "priority_weights": {"manual_intervention": 1.5, "bad": -2},
+            }
+        }))
+        config, _ = load_instance_config(config_path=str(cfg))
+        repeated = config["attention_policy"]["evidence_rules"]["repeated_suppression_or_drop"]
+        assert repeated["min_count"] == 5
+        assert repeated["require_actionable_key"] is False
+        assert repeated["ignore_correlation_keys"] == ["synthetic"]
+        assert "unknown_field" not in repeated
+        assert "unknown_rule" not in config["attention_policy"]["evidence_rules"]
+        assert config["attention_policy"]["priority_weights"] == {"manual_intervention": 1.5}
+
     def test_diagnostics_never_expose_raw_config(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({
@@ -170,6 +204,101 @@ class TestConfigLoading:
         _, diag = load_instance_config(config_path=str(cfg))
         assert "budgets" not in diag
         assert "thresholds" not in diag
+
+
+class TestAttentionPolicyMutationSurface:
+    def _required(self) -> dict[str, str]:
+        return {
+            "reason": "Tune repeated noise after conscious review.",
+            "future_tendency_delta": "Repeated kanban_pressure drops require more evidence before review.",
+            "verification_condition": "Three drops no longer create review; five drops still do.",
+            "rollback_condition": "Restore min_count=3 if true misses increase.",
+        }
+
+    def test_manage_attention_policy_patches_evidence_rule_atomically(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        result = manage_attention_policy_config(
+            action="patch_evidence_rule",
+            config_path=str(cfg),
+            rule="repeated_suppression_or_drop",
+            patch={"min_count": 5, "unknown": "ignored"},
+            actor="test-conscious",
+            **self._required(),
+        )
+
+        assert result["changed"] is True
+        loaded, _ = load_instance_config(config_path=str(cfg))
+        repeated = loaded["attention_policy"]["evidence_rules"]["repeated_suppression_or_drop"]
+        assert repeated["min_count"] == 5
+        assert "unknown" not in repeated
+        assert result["receipt"]["type"] == "attention_policy.config_mutation"
+        assert result["receipt"]["before"] != result["receipt"]["after"]
+
+    def test_manage_attention_policy_requires_future_tendency_fields(self, tmp_path):
+        with pytest.raises(ValueError, match="future_tendency_delta"):
+            manage_attention_policy_config(
+                action="patch_evidence_rule",
+                config_path=str(tmp_path / "instance.config.json"),
+                rule="repeated_suppression_or_drop",
+                patch={"min_count": 5},
+                reason="missing fields",
+            )
+
+    def test_manage_attention_policy_rejects_unknown_rule_and_surface_broadening(self, tmp_path):
+        with pytest.raises(ValueError, match="rule must be"):
+            manage_attention_policy_config(
+                action="patch_evidence_rule",
+                config_path=str(tmp_path / "instance.config.json"),
+                rule="allowed_surfaces",
+                patch={"allowed_surfaces": ["discord"]},
+                **self._required(),
+            )
+
+    def test_tool_handler_writes_receipt_and_policy_file(self, tmp_path):
+        raw = handle_sensorium_attention_policy_manage(
+            instance="test",
+            state_dir=str(tmp_path),
+            action="add_ignored_key",
+            rule="repeated_suppression_or_drop",
+            key="validation-residue",
+            actor="test-conscious",
+            **self._required(),
+        )
+        result = json.loads(raw)
+        assert result["success"] is True
+        loaded, _ = load_instance_config(state_dir=str(tmp_path))
+        ignored = loaded["attention_policy"]["evidence_rules"]["repeated_suppression_or_drop"]["ignore_correlation_keys"]
+        assert "validation-residue" in ignored
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        receipts = [d for d in store.read_jsonl("decisions") if d.get("type") == "attention_policy.config_mutation"]
+        assert len(receipts) == 1
+
+    def test_improvement_collect_uses_instance_attention_policy(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({
+            "attention_policy": {
+                "evidence_rules": {
+                    "repeated_suppression_or_drop": {"min_count": 4}
+                }
+            }
+        }))
+        store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+        store.ensure_dirs()
+        for idx in range(3):
+            store.append_jsonl("decisions", {
+                "ts": "2026-05-29T00:00:00Z",
+                "type": "kanban.settlement.applied",
+                "decision": "DROP",
+                "candidate_id": f"cand_{idx}",
+                "candidate_kind": "kanban_pressure",
+                "correlation_keys": ["kanban_pressure", "repeat-noise"],
+                "reason": "noise",
+            })
+
+        raw = handle_sensorium_improvement_collect(instance="test", state_dir=str(tmp_path), dry_run=True)
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["data"]["action"] == "no_evidence"
 
 
 class TestSurfacePolicy:

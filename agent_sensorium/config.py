@@ -11,9 +11,38 @@ or allowed_surfaces beyond what the item already has.
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
-from .schemas import SENSITIVITY_RANK, VALID_SENSITIVITIES
+from .schemas import SENSITIVITY_RANK, VALID_SENSITIVITIES, utc_now_iso
+
+DEFAULT_ATTENTION_POLICY: dict = {
+    "evidence_rules": {
+        "repeated_suppression_or_drop": {
+            "min_count": 3,
+            "require_actionable_key": True,
+            "ignore_correlation_keys": [
+                "attention-policy-harness-canary",
+                "sensorium-self-improvement-proof",
+            ],
+        },
+        "settlement_gap": {"min_count": 1},
+        "manual_intervention": {"min_count": 1},
+        "completed_task_outcomes": {"min_count": 2},
+    },
+    "review_budget": {},
+    "priority_weights": {},
+}
+
+_KNOWN_ATTENTION_RULES = set(DEFAULT_ATTENTION_POLICY["evidence_rules"])
+_ALLOWED_RULE_FIELDS = {
+    "min_count",
+    "require_actionable_key",
+    "ignore_correlation_keys",
+    "cooldown_hours",
+    "coalescing_window_hours",
+    "source_weight",
+}
 
 SAFE_DEFAULTS: dict = {
     "instance_name": "default",
@@ -34,7 +63,87 @@ SAFE_DEFAULTS: dict = {
     },
     "pointer": {},
     "outbox": {},
+    "attention_policy": DEFAULT_ATTENTION_POLICY,
 }
+
+
+def _deepcopy_jsonable(value):
+    return json.loads(json.dumps(value))
+
+
+def _sanitize_string_list(value) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        return None
+    return sorted({v.strip() for v in value if v.strip()})
+
+
+def _sanitize_attention_rule(raw: dict, default: dict | None = None) -> dict:
+    if not isinstance(raw, dict):
+        raw = {}
+    rule = dict(default or {})
+    for key, value in raw.items():
+        if key not in _ALLOWED_RULE_FIELDS:
+            continue
+        if key == "min_count":
+            if isinstance(value, int) and value > 0:
+                rule[key] = value
+        elif key == "require_actionable_key":
+            if isinstance(value, bool):
+                rule[key] = value
+        elif key == "ignore_correlation_keys":
+            keys = _sanitize_string_list(value)
+            if keys is not None:
+                rule[key] = keys
+        elif key in {"cooldown_hours", "coalescing_window_hours", "source_weight"}:
+            if isinstance(value, (int, float)) and value > 0:
+                rule[key] = value
+    return rule
+
+
+def sanitize_attention_policy(raw: dict | None = None) -> dict:
+    """Return the schema-bounded Sensorium attention policy.
+
+    This is the declarative reflex-tuning surface. It can tune thresholds,
+    coalescing/cooldown hints, ignored keys, source weights, review budgets,
+    and priority weights. It cannot broaden privacy surfaces or mutate code.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    policy = _deepcopy_jsonable(DEFAULT_ATTENTION_POLICY)
+    raw_rules_obj = raw.get("evidence_rules")
+    raw_rules = raw_rules_obj if isinstance(raw_rules_obj, dict) else {}
+    for name in _KNOWN_ATTENTION_RULES:
+        policy["evidence_rules"][name] = _sanitize_attention_rule(
+            raw_rules.get(name) or {},
+            default=policy["evidence_rules"].get(name) or {},
+        )
+
+    for key in ("review_budget", "priority_weights"):
+        raw_section = raw.get(key)
+        if isinstance(raw_section, dict):
+            section = {}
+            for name, value in raw_section.items():
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                if isinstance(value, (int, float)) and value > 0:
+                    section[name.strip()] = value
+            policy[key] = section
+    return policy
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def default_instance_name(default: str = "default") -> str:
@@ -95,6 +204,7 @@ def _validate_config(raw: dict) -> dict:
         "operational_pointer": dict(SAFE_DEFAULTS["operational_pointer"]),
         "pointer": dict(SAFE_DEFAULTS["pointer"]),
         "outbox": dict(SAFE_DEFAULTS["outbox"]),
+        "attention_policy": sanitize_attention_policy(SAFE_DEFAULTS["attention_policy"]),
     }
     if "instance_name" in raw:
         val = raw["instance_name"]
@@ -145,6 +255,8 @@ def _validate_config(raw: dict) -> dict:
     for key in ("pointer", "outbox"):
         if key in raw and isinstance(raw[key], dict):
             config[key] = raw[key]
+    if "attention_policy" in raw:
+        config["attention_policy"] = sanitize_attention_policy(raw.get("attention_policy"))
     return config
 
 
@@ -178,6 +290,141 @@ def load_instance_config(
 
     config = _validate_config(raw)
     return config, _config_diagnostics(config, source="file", path=str(path))
+
+
+def _load_raw_config_for_policy(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def resolve_policy_write_path(
+    *, config_path: str | None = None, state_dir: str | None = None
+) -> Path:
+    if config_path:
+        return Path(config_path)
+    if state_dir:
+        return Path(state_dir) / "instance.config.json"
+    raise ValueError("state_dir or config_path is required for attention policy mutation")
+
+
+def manage_attention_policy_config(
+    *,
+    action: str,
+    config_path: str | None = None,
+    state_dir: str | None = None,
+    rule: str = "",
+    patch: dict | None = None,
+    key: str = "",
+    value: object | None = None,
+    reason: str = "",
+    future_tendency_delta: str = "",
+    verification_condition: str = "",
+    rollback_condition: str = "",
+    actor: str = "conscious",
+    decision_ref: str = "",
+) -> dict:
+    """Apply a narrow declarative Sensorium attention-policy mutation.
+
+    This is intentionally not a generic config/file writer. It only changes the
+    `attention_policy` subtree and only through typed actions with rollback and
+    verification metadata.
+    """
+    action = str(action or "").strip()
+    valid_actions = {
+        "patch_evidence_rule",
+        "add_ignored_key",
+        "patch_review_budget",
+        "patch_priority_weight",
+    }
+    if action not in valid_actions:
+        raise ValueError(f"action must be one of {sorted(valid_actions)}")
+    required = {
+        "reason": reason,
+        "future_tendency_delta": future_tendency_delta,
+        "verification_condition": verification_condition,
+        "rollback_condition": rollback_condition,
+    }
+    missing = [name for name, text in required.items() if not isinstance(text, str) or not text.strip()]
+    if missing:
+        raise ValueError(f"attention policy mutation missing required fields: {missing}")
+
+    path = resolve_policy_write_path(config_path=config_path, state_dir=state_dir)
+    raw = _load_raw_config_for_policy(path)
+    before = sanitize_attention_policy(raw.get("attention_policy"))
+    after = _deepcopy_jsonable(before)
+
+    if action in {"patch_evidence_rule", "add_ignored_key"}:
+        if rule not in _KNOWN_ATTENTION_RULES:
+            raise ValueError(f"rule must be one of {sorted(_KNOWN_ATTENTION_RULES)}")
+        current_rule = after["evidence_rules"].get(rule) or {}
+        if action == "patch_evidence_rule":
+            sanitized = _sanitize_attention_rule(patch or {}, default=current_rule)
+            if sanitized == current_rule:
+                raise ValueError("patch_evidence_rule did not contain any valid policy fields")
+            after["evidence_rules"][rule] = sanitized
+        else:
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("add_ignored_key requires non-empty key")
+            ignored = sorted(set(current_rule.get("ignore_correlation_keys") or []) | {key.strip()})
+            current_rule["ignore_correlation_keys"] = ignored
+            after["evidence_rules"][rule] = _sanitize_attention_rule(current_rule)
+    elif action == "patch_review_budget":
+        if not isinstance(patch, dict) or not patch:
+            raise ValueError("patch_review_budget requires non-empty patch")
+        budget = dict(after.get("review_budget") or {})
+        for name, number in patch.items():
+            if isinstance(name, str) and name.strip() and isinstance(number, (int, float)) and number > 0:
+                budget[name.strip()] = number
+        if budget == (after.get("review_budget") or {}):
+            raise ValueError("patch_review_budget did not contain any valid positive numeric fields")
+        after["review_budget"] = budget
+    elif action == "patch_priority_weight":
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("patch_priority_weight requires non-empty key")
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("patch_priority_weight requires positive numeric value")
+        weights = dict(after.get("priority_weights") or {})
+        weights[key.strip()] = value
+        after["priority_weights"] = weights
+
+    after = sanitize_attention_policy(after)
+    if after == before:
+        raise ValueError("attention policy mutation produced no change")
+
+    raw["attention_policy"] = after
+    _atomic_write_json(path, raw)
+    verified, _ = load_instance_config(config_path=str(path))
+    if verified.get("attention_policy") != after:
+        raise ValueError("attention policy mutation failed verification after write")
+
+    return {
+        "action": action,
+        "path": str(path),
+        "changed": True,
+        "before": before,
+        "after": after,
+        "receipt": {
+            "ts": utc_now_iso(),
+            "type": "attention_policy.config_mutation",
+            "action": action,
+            "rule": rule,
+            "key": key,
+            "actor": actor,
+            "decision_ref": decision_ref,
+            "reason": reason.strip(),
+            "future_tendency_delta": future_tendency_delta.strip(),
+            "verification_condition": verification_condition.strip(),
+            "rollback_condition": rollback_condition.strip(),
+            "config_path": str(path),
+            "before": before,
+            "after": after,
+        },
+    }
 
 
 def visible_on_surface(item: dict, surface: str, config: dict) -> bool:

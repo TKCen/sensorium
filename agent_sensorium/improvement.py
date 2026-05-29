@@ -15,29 +15,12 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 from typing import Any
 
+from .config import DEFAULT_ATTENTION_POLICY
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 ATTENTION_POLICY_KIND = "attention_policy_review"
 ATTENTION_POLICY_KEY = "attention-policy-review"
-
-DEFAULT_ATTENTION_POLICY: dict[str, Any] = {
-    "evidence_rules": {
-        "repeated_suppression_or_drop": {
-            "min_count": 3,
-            "require_actionable_key": True,
-            # Validation/proof canaries are intentionally synthetic. They prove
-            # the harness path once; they should not become future wake pressure.
-            "ignore_correlation_keys": [
-                "attention-policy-harness-canary",
-                "sensorium-self-improvement-proof",
-            ],
-        },
-        "settlement_gap": {"min_count": 1},
-        "manual_intervention": {"min_count": 1},
-        "completed_task_outcomes": {"min_count": 2},
-    }
-}
 
 DEFAULT_IMPROVEMENT_CONFIG: dict[str, Any] = {
     "decision_limit": 500,
