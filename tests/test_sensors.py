@@ -9,6 +9,7 @@ from agent_sensorium.sensors import (
     MAX_REF_CHARS,
     MAX_SUMMARY_CHARS,
     artifact_signal,
+    classify_media_capacity,
     classify_hindsight_pressure,
     classify_kanban_pressure,
     classify_machine_body_pressure,
@@ -21,8 +22,10 @@ from agent_sensorium.sensors import (
     machine_body_pressure_sample,
     machine_network_pressure_sample,
     machine_process_pressure_sample,
+    media_capacity_sample,
     operator_signal,
     replay_machine_body_pressure,
+    replay_media_capacity,
     session_event_signal,
     tts_sidecar_pressure_sample,
     wsl_disk_paths,
@@ -525,6 +528,127 @@ class TestTtsSidecarPressure:
 
         default_timeout = inspect.signature(tts_sidecar_pressure_sample).parameters["timeout_seconds"].default
         assert default_timeout >= 2.0
+
+
+class TestMediaCapacity:
+    def _idle_sample(self):
+        return {
+            "comfy_available": True,
+            "comfy_queue_running": 0,
+            "comfy_queue_pending": 0,
+            "gpu_sample_available": True,
+            "gpu_count": 1,
+            "gpu_util_pct": 3,
+            "vram_used_pct": 10.0,
+            "mem_available_pct": 70.0,
+            "swap_used_pct": 0.0,
+            "tts_health_available": True,
+            "tts_health_error": "",
+        }
+
+    def test_almost_idle_emits_bounded_capacity_signal_once(self):
+        sample = self._idle_sample()
+
+        sig, state = classify_media_capacity(sample, state={})
+        duplicate, state = classify_media_capacity(sample, state=state)
+
+        assert sig is not None
+        assert duplicate is None
+        assert sig["sensor"] == "sensorium.media_capacity"
+        assert sig["kind"] == "media_capacity"
+        assert sig["capacity_status"] == "almost_idle"
+        assert sig["policy"] == "capacity_record_only_no_generation"
+        assert sig["sensitivity"] == "local_only"
+        assert sig["allowed_surfaces"] == ["local"]
+        assert sig["strength_hint"] < 0.7
+        assert state["capacity_record"]["status"] == "almost_idle"
+        rendered = json.dumps(sig)
+        for forbidden in ("cmdline", "processes", "prompt", "generated", "stdout", "stderr"):
+            assert forbidden not in rendered
+
+    def test_busy_queue_records_busy_without_positive_signal(self):
+        sample = self._idle_sample()
+        sample["comfy_queue_running"] = 1
+
+        sig, state = classify_media_capacity(sample, state={})
+
+        assert sig is None
+        assert state["status"] == "busy"
+        assert "comfy_queue_active" in state["capacity_record"]["reasons"]
+        assert state["capacity_record"]["policy"] == "capacity_record_only_no_generation"
+
+    def test_unknown_dependencies_record_unknown_without_restart_instruction(self):
+        sample = self._idle_sample()
+        sample.update(
+            {
+                "comfy_available": False,
+                "comfy_error": "URLError",
+                "tts_health_available": False,
+                "tts_health_error": "TimeoutError",
+            }
+        )
+
+        sig, state = classify_media_capacity(sample, state={})
+
+        assert sig is None
+        assert state["status"] == "unknown"
+        assert "comfy_unavailable" in state["capacity_record"]["unknown"]
+        assert "tts_health_unavailable" in state["capacity_record"]["unknown"]
+        assert "restart" not in json.dumps(state["capacity_record"]).lower()
+
+    def test_replay_fixtures_use_online_classifier(self):
+        busy = self._idle_sample()
+        busy["gpu_util_pct"] = 90
+        idle = self._idle_sample()
+
+        signals = replay_media_capacity([busy, idle, idle])
+
+        assert len(signals) == 1
+        assert signals[0]["capacity_status"] == "almost_idle"
+
+    def test_sample_reads_proc_and_sysfs_fixtures_without_process_lists(self, tmp_path):
+        proc = tmp_path / "proc"
+        proc.mkdir()
+        (proc / "meminfo").write_text(
+            "MemTotal:       1000000 kB\n"
+            "MemAvailable:    600000 kB\n"
+            "SwapTotal:        500000 kB\n"
+            "SwapFree:         500000 kB\n"
+        )
+        gpu = tmp_path / "sys" / "class" / "drm" / "card0" / "device"
+        gpu.mkdir(parents=True)
+        (gpu / "gpu_busy_percent").write_text("4\n")
+        (gpu / "mem_info_vram_used").write_text("100\n")
+        (gpu / "mem_info_vram_total").write_text("1000\n")
+
+        sample = media_capacity_sample(
+            comfy_base_url="http://127.0.0.1:1",
+            tts_health_url=None,
+            proc_root=str(proc),
+            gpu_drm_root=str(tmp_path / "sys" / "class" / "drm"),
+            timeout_seconds=0.01,
+        )
+
+        assert sample["mem_available_pct"] == 60.0
+        assert sample["swap_used_pct"] == 0.0
+        assert sample["gpu_sample_available"] is True
+        assert sample["gpu_util_pct"] == 4
+        assert sample["vram_used_pct"] == 10.0
+        assert sample["comfy_available"] is False
+        assert "cmdline" not in sample
+        assert "processes" not in sample
+
+    def test_media_capacity_signal_validates_and_ingests(self):
+        from agent_sensorium.schemas import validate_signal
+        from agent_sensorium.tools import handle_sensorium_ingest_signal
+
+        sig, _ = classify_media_capacity(self._idle_sample(), state={})
+        assert sig is not None
+        validate_signal(sig)
+        with tempfile.TemporaryDirectory() as td:
+            raw = handle_sensorium_ingest_signal(signal=sig, instance="test", state_dir=td)
+            result = json.loads(raw)
+            assert result["success"] is True
 
 
 class TestFileContentHash:

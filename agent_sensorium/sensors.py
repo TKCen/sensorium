@@ -898,6 +898,252 @@ def classify_tts_sidecar_pressure(sample: dict, *, state: dict | None = None, co
     return signal, st
 
 
+MEDIA_CAPACITY_DEFAULT_CONFIG = {
+    "mem_available_min_pct": 25.0,
+    "swap_used_max_pct": 20.0,
+    "gpu_util_max_pct": 20.0,
+    "vram_used_max_pct": 35.0,
+}
+
+
+def _safe_int(value) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_int_file(path: Path) -> int | None:
+    return _safe_int(_read_text(path))
+
+
+def _cheap_gpu_idle_sample(*, drm_root: str = "/sys/class/drm") -> dict:
+    """Read cheap AMD/DRM GPU counters when exposed; never load a model."""
+    root = Path(drm_root)
+    cards: list[dict] = []
+    try:
+        candidates = sorted(root.glob("card*/device"))
+    except OSError:
+        candidates = []
+
+    for device in candidates:
+        util = _read_int_file(device / "gpu_busy_percent")
+        vram_used = _read_int_file(device / "mem_info_vram_used")
+        vram_total = _read_int_file(device / "mem_info_vram_total")
+        vram_pct = None
+        if vram_used is not None and vram_total and vram_total > 0:
+            vram_pct = round(vram_used / vram_total * 100.0, 3)
+        if util is None and vram_pct is None:
+            continue
+        cards.append({"gpu_util_pct": util, "vram_used_pct": vram_pct})
+
+    if not cards:
+        return {"gpu_sample_available": False}
+    util_values = [c["gpu_util_pct"] for c in cards if c.get("gpu_util_pct") is not None]
+    vram_values = [c["vram_used_pct"] for c in cards if c.get("vram_used_pct") is not None]
+    return {
+        "gpu_sample_available": True,
+        "gpu_count": len(cards),
+        "gpu_util_pct": max(util_values) if util_values else None,
+        "vram_used_pct": max(vram_values) if vram_values else None,
+    }
+
+
+def _comfy_queue_sample(*, base_url: str, timeout_seconds: float) -> dict:
+    base = base_url.rstrip("/")
+    try:
+        data = _http_json(f"{base}/queue", timeout_seconds=timeout_seconds)
+    except Exception as exc:
+        return {
+            "comfy_available": False,
+            "comfy_error": truncate_text(type(exc).__name__, 80),
+            "comfy_queue_running": None,
+            "comfy_queue_pending": None,
+        }
+    if not isinstance(data, dict):
+        return {
+            "comfy_available": False,
+            "comfy_error": "unexpected_response",
+            "comfy_queue_running": None,
+            "comfy_queue_pending": None,
+        }
+    running = len(data.get("queue_running") or [])
+    pending = len(data.get("queue_pending") or [])
+    return {
+        "comfy_available": True,
+        "comfy_error": "",
+        "comfy_queue_running": running,
+        "comfy_queue_pending": pending,
+    }
+
+
+def _local_health_sample(*, url: str | None, timeout_seconds: float) -> dict:
+    if not url:
+        return {"available": False, "error": "disabled"}
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - fixed loopback health URL by default
+            return {"available": 200 <= int(resp.status) < 500, "error": ""}
+    except Exception as exc:
+        return {"available": False, "error": truncate_text(type(exc).__name__, 80)}
+
+
+def media_capacity_sample(
+    *,
+    comfy_base_url: str = "http://127.0.0.1:8188",
+    tts_health_url: str | None = "http://127.0.0.1:8892/health",
+    proc_root: str = "/proc",
+    gpu_drm_root: str = "/sys/class/drm",
+    timeout_seconds: float = 0.75,
+) -> dict:
+    """Collect an almost-idle media-capacity sample using cheap local probes only.
+
+    The sample intentionally uses GET-style health/queue checks and procfs/sysfs
+    counters. It does not inspect process command lines, load models, restart
+    sidecars, submit Comfy prompts, or generate media.
+    """
+    sample: dict = {}
+    sample.update(_parse_meminfo(_read_text(Path(proc_root) / "meminfo")))
+    sample.update(_comfy_queue_sample(base_url=comfy_base_url, timeout_seconds=timeout_seconds))
+    sample.update(_cheap_gpu_idle_sample(drm_root=gpu_drm_root))
+    health = _local_health_sample(url=tts_health_url, timeout_seconds=timeout_seconds)
+    sample["tts_health_available"] = bool(health["available"])
+    sample["tts_health_error"] = health["error"]
+    return sample
+
+
+def _media_capacity_config(config: dict | None = None) -> dict:
+    merged = dict(MEDIA_CAPACITY_DEFAULT_CONFIG)
+    if config:
+        for key, value in config.items():
+            if key in merged and isinstance(value, (int, float)) and value >= 0:
+                merged[key] = value
+    return merged
+
+
+def _media_capacity_values(sample: dict) -> dict:
+    keys = (
+        "comfy_available",
+        "comfy_queue_running",
+        "comfy_queue_pending",
+        "gpu_sample_available",
+        "gpu_count",
+        "gpu_util_pct",
+        "vram_used_pct",
+        "mem_available_pct",
+        "swap_used_pct",
+        "tts_health_available",
+    )
+    values = {key: sample.get(key) for key in keys if key in sample}
+    if sample.get("comfy_error"):
+        values["comfy_error"] = truncate_text(str(sample.get("comfy_error")), 80)
+    if sample.get("tts_health_error"):
+        values["tts_health_error"] = truncate_text(str(sample.get("tts_health_error")), 80)
+    return values
+
+
+def classify_media_capacity(
+    sample: dict,
+    *,
+    state: dict | None = None,
+    config: dict | None = None,
+) -> tuple[dict | None, dict]:
+    """Classify media gift capacity as almost_idle, busy, or unknown.
+
+    `almost_idle` is an enabling condition, not an actuator: the emitted signal
+    is low-strength/local-only and carries a no-auto-generation policy. The
+    current capacity record is always returned in state for policy readers.
+    """
+    cfg = _media_capacity_config(config)
+    st = dict(state or {})
+    values = _media_capacity_values(sample)
+    reasons: list[str] = []
+    unknown: list[str] = []
+
+    comfy_available = bool(sample.get("comfy_available"))
+    running = sample.get("comfy_queue_running")
+    pending = sample.get("comfy_queue_pending")
+    if not comfy_available:
+        unknown.append("comfy_unavailable")
+    elif int(running or 0) > 0 or int(pending or 0) > 0:
+        reasons.append("comfy_queue_active")
+
+    if sample.get("mem_available_pct") is None:
+        unknown.append("mem_unknown")
+    elif float(sample.get("mem_available_pct") or 0.0) < cfg["mem_available_min_pct"]:
+        reasons.append("mem_available_low")
+    if sample.get("swap_used_pct") is not None:
+        if float(sample.get("swap_used_pct") or 0.0) > cfg["swap_used_max_pct"]:
+            reasons.append("swap_used_high")
+
+    if bool(sample.get("gpu_sample_available")):
+        util = sample.get("gpu_util_pct")
+        vram = sample.get("vram_used_pct")
+        if util is not None and float(util) > cfg["gpu_util_max_pct"]:
+            reasons.append("gpu_busy")
+        if vram is not None and float(vram) > cfg["vram_used_max_pct"]:
+            reasons.append("vram_used_high")
+    else:
+        values["gpu_note"] = "no cheap DRM GPU sample available"
+
+    if not bool(sample.get("tts_health_available")):
+        unknown.append("tts_health_unavailable")
+
+    if reasons:
+        status = "busy"
+    elif unknown:
+        status = "unknown"
+    else:
+        status = "almost_idle"
+
+    record = {
+        "kind": "media_capacity",
+        "status": status,
+        "reasons": reasons,
+        "unknown": unknown,
+        "values": values,
+        "policy": "capacity_record_only_no_generation",
+        "sensitivity": "local_only",
+        "allowed_surfaces": ["local"],
+    }
+    previous = str(st.get("status") or st.get("level") or "unknown")
+    st["level"] = status
+    st["status"] = status
+    st["capacity_record"] = record
+    st["last_sample"] = values
+
+    signal = None
+    if status == "almost_idle" and previous != "almost_idle":
+        signal = {
+            "sensor": "sensorium.media_capacity",
+            "source": "machine",
+            "kind": "media_capacity",
+            "summary": "Local media stack appears almost idle for mediated-presence gift work",
+            "actor": "tool",
+            "strength_hint": 0.58,
+            "sensitivity": "local_only",
+            "allowed_surfaces": ["local"],
+            "correlation_keys": ["media-capacity", "mediated-presence", "sera-media-gifts"],
+            "scope": "local_media_stack",
+            "capacity_status": status,
+            "previous_status": previous,
+            "values": values,
+            "policy": "capacity_record_only_no_generation",
+        }
+    return signal, st
+
+
+def replay_media_capacity(samples: list[dict], *, config: dict | None = None) -> list[dict]:
+    """Replay capacity fixtures through the online classifier for tests/audits."""
+    state: dict = {}
+    signals: list[dict] = []
+    for sample in samples:
+        sig, state = classify_media_capacity(sample, state=state, config=config)
+        if sig is not None:
+            signals.append(sig)
+    return signals
+
+
 def _http_json(url: str, *, timeout_seconds: float) -> dict | list:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - localhost/admin API by caller config
