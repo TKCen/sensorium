@@ -627,3 +627,125 @@ def summarize_improvement_state(store: SensoriumStore) -> dict:
         ],
         "recent_decisions": decisions[-5:],
     }
+
+
+_SALIENCE_REVIEW_PROMPT = """You are the Sensorium salience reviewer.
+
+Your job: review bounded Sensorium evidence and decide whether the attention /
+salience policy should change. You do not act on the world. You produce exactly
+one auditable decision receipt for conscious review.
+
+You must choose exactly one of these decisions:
+- NO_CHANGE: the evidence does not justify any attention-policy change.
+- THRESHOLD_COALESCING_TWEAK_PROPOSAL: propose tuning a salience threshold or a
+  coalescing/dedup window (a proposal for conscious approval, never an auto-apply).
+- SENSOR_ADDITION_TASK: propose adding a new sensor/probe to capture a signal the
+  current attention surface is missing.
+- PRIORITY_MAP_CHANGE: propose changing how a signal kind maps to priority or
+  surface.
+- MEMORY_SKILL_PATCH: propose a memory or skill patch so a recurring pattern is
+  handled correctly next time.
+- HOLD: the evidence is ambiguous or incomplete; defer pending more signal.
+
+Signals to look for:
+- Repeated suppressions / DROP receipts clustered around one kind or key.
+- Settlement gaps or unresolved feedback indicating integrity issues.
+- Manual interventions implying the policy missed a repair opportunity.
+- Completed task outcomes whose results imply a policy change.
+- User corrections indicating missed or mis-prioritized attention.
+
+Every decision (including NO_CHANGE and HOLD) MUST include all four fields:
+- reason: why this decision, grounded in the evidence.
+- future_tendency_delta: how future attention behavior should lean after this.
+- verification_condition: what observable signal confirms the decision was right.
+- rollback_condition: what observable signal means the decision should be reverted.
+
+You are forbidden from: editing code, patching SOUL, sending messages, spawning
+another salience review, and auto-broadening privacy or allowed surfaces. Any
+broadening must be a receipt for explicit conscious approval, never an automatic
+mutation.
+
+When nothing stands out, choose NO_CHANGE with a brief reason. Be honest about \
+uncertainty — use HOLD when evidence is ambiguous."""
+
+
+def build_salience_review_context(
+    store: SensoriumStore, evidence: dict, *, max_decisions: int = 20
+) -> dict:
+    """Build bounded review context for one evidence item. No raw logs, transcripts, or secrets."""
+    decisions = store.read_jsonl("decisions")
+    pruned_decisions: list[dict] = []
+    for decision in decisions:
+        if not str(decision.get("type") or "").startswith("attention_policy_review"):
+            continue
+        pruned_decisions.append({
+            "ts": decision.get("ts"),
+            "type": decision.get("type"),
+            "decision": decision.get("decision"),
+            "reason": truncate_text(str(decision.get("reason") or ""), 200),
+            "future_tendency_delta": truncate_text(str(decision.get("future_tendency_delta") or ""), 200),
+        })
+    pruned_decisions = pruned_decisions[-max_decisions:]
+
+    summary = summarize_improvement_state(store)
+
+    try:
+        policy_config_snapshot = store.read_state().get("attention_policy", {}) or {}
+    except Exception:
+        policy_config_snapshot = {}
+
+    return {
+        "evidence": evidence,
+        "recent_attention_decisions": pruned_decisions,
+        "candidate_counts": summary.get("candidate_status_counts", {}),
+        "open_candidates": (summary.get("recent_candidates") or [])[:5],
+        "policy_config_snapshot": policy_config_snapshot,
+        "constraints": {
+            "allowed_mutations": ["record_attention_policy_decision", "manage_attention_policy_config"],
+            "forbidden": ["edit_python_source", "patch_soul", "send_message", "spawn_review", "broaden_privacy"],
+            "authority": "conscious_decision_required_before_wake_behavior_mutation",
+            "valid_decisions": sorted(VALID_ATTENTION_DECISIONS),
+        },
+    }
+
+
+def parse_salience_review_decision(payload: dict) -> dict:
+    """Strictly parse and normalize a salience review decision payload."""
+    decision_upper = str(payload.get("decision") or "").strip().upper()
+    if decision_upper not in VALID_ATTENTION_DECISIONS:
+        raise ValueError(
+            f"decision must be one of {sorted(VALID_ATTENTION_DECISIONS)}; got {payload.get('decision')!r}"
+        )
+
+    required_names = ["reason", "future_tendency_delta", "verification_condition", "rollback_condition"]
+    missing: list[str] = []
+    for name in required_names:
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(name)
+    if missing:
+        raise ValueError(f"salience review decision missing required fields: {missing}")
+
+    return {
+        "decision": decision_upper,
+        "reason": payload["reason"].strip(),
+        "future_tendency_delta": payload["future_tendency_delta"].strip(),
+        "verification_condition": payload["verification_condition"].strip(),
+        "rollback_condition": payload["rollback_condition"].strip(),
+        "decided_by": str(payload.get("decided_by") or "salience-review").strip() or "salience-review",
+        "decision_ref": str(payload.get("decision_ref") or "").strip(),
+        "implementation_ref": str(payload.get("implementation_ref") or "").strip(),
+    }
+
+
+def apply_salience_review_decision(
+    store: SensoriumStore,
+    candidate_id: str,
+    decision_payload: dict,
+    *,
+    decided_by: str = "salience-review",
+) -> dict:
+    """Parse and apply a salience review decision. Writes exactly one attention_policy_review.decision receipt."""
+    parsed = parse_salience_review_decision(decision_payload)
+    parsed["decided_by"] = decided_by
+    return record_attention_policy_decision(store, candidate_id=candidate_id, **parsed)
