@@ -131,11 +131,7 @@ def _resolve_candidates(
 
 
 def _rewrite_candidates(store: SensoriumStore, candidates: list[dict]) -> None:
-    path = store._resolve("candidates")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        for c in candidates:
-            f.write(json.dumps(c, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl("candidates", candidates)
 
 
 def _normalize_conscious_task_ref(ref: Any) -> dict:

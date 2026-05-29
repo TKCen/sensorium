@@ -6,7 +6,6 @@ from datetime import datetime, timezone, timedelta
 from .attention import build_attention_inbox
 from .dispatcher import dispatch_once as _dispatch_once
 from .gate import (
-    DEFAULT_CONFIG,
     candidate_fingerprint,
     event_fingerprint,
     event_to_candidate,
@@ -1162,10 +1161,7 @@ def handle_sensorium_service_threads(
 
 
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
-    path = store._resolve(name)
-    with open(path, "w") as f:
-        for item in items:
-            f.write(json.dumps(item, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl(name, items)
 
 
 def handle_sensorium_attention_inbox(

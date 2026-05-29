@@ -9,7 +9,6 @@ to the originating candidate/thread.
 from __future__ import annotations
 
 import hashlib
-import json
 from copy import deepcopy
 
 from .schemas import new_id, truncate_text, utc_now_iso
@@ -66,10 +65,7 @@ def _find_existing_worker_request(
 
 
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
-    path = store._resolve(name)
-    with open(path, "w") as f:
-        for item in items:
-            f.write(json.dumps(item, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl(name, items)
 
 
 def _denied(reason: str, detail: str, *, thread_id: str = "") -> dict:

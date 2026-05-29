@@ -8,7 +8,6 @@ disabled by default; live conscious review should be represented as Kanban
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
@@ -51,10 +50,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
-    path = store._resolve(name)
-    with open(path, "w") as f:
-        for item in items:
-            f.write(json.dumps(item, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl(name, items)
 
 
 def _find_thread_by_id(threads: list[dict], thread_id: str) -> dict | None:

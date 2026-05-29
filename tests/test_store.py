@@ -1,8 +1,5 @@
 """Tests for agent_sensorium.store."""
 
-import json
-import tempfile
-
 import pytest
 
 from agent_sensorium.store import SensoriumStore
@@ -68,6 +65,15 @@ class TestAppendReadJsonl:
     def test_unknown_name_raises(self, tmp_store):
         with pytest.raises(ValueError, match="Unknown state name"):
             tmp_store.append_jsonl("bogus", {})
+
+    def test_rewrite_jsonl_keeps_old_file_on_serialization_failure(self, tmp_store):
+        tmp_store.append_jsonl("candidates", {"id": "cand_old"})
+        with pytest.raises(TypeError):
+            tmp_store.rewrite_jsonl("candidates", [{"id": object()}])
+        result = tmp_store.read_jsonl("candidates")
+        assert result == [{"id": "cand_old"}]
+        leftovers = list(tmp_store._resolve("candidates").parent.glob(".candidates.jsonl.*.tmp"))
+        assert leftovers == []
 
 
 class TestState:

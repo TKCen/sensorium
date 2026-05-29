@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 _STATE_NAMES = {
@@ -16,6 +17,60 @@ _STATE_NAMES = {
 }
 
 _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
+
+
+def _fsync_parent(path: Path) -> None:
+    """Best-effort fsync of a directory entry after replace/create."""
+    try:
+        fd = os.open(str(path.parent), os.O_DIRECTORY)
+    except (AttributeError, OSError):
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """Atomically write JSON and fsync before replacing the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _fsync_parent(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def atomic_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
+    """Atomically replace a JSONL file and fsync before making it visible."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _fsync_parent(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 class SensoriumStore:
@@ -51,6 +106,12 @@ class SensoriumStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
             f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_parent(path)
+
+    def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
+        atomic_rewrite_jsonl(self._resolve(name), rows)
 
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
         path = self._resolve(name)
@@ -72,9 +133,7 @@ class SensoriumStore:
 
     def write_state(self, obj: dict) -> None:
         self.ensure_dirs()
-        path = self._root / "state.latest.json"
-        with open(path, "w") as f:
-            json.dump(obj, f, indent=2)
+        atomic_write_json(self._root / "state.latest.json", obj)
 
     def read_state(self) -> dict:
         path = self._root / "state.latest.json"

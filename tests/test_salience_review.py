@@ -10,7 +10,6 @@ Covers:
 """
 
 import json
-import re
 
 import pytest
 
@@ -24,8 +23,12 @@ from agent_sensorium.improvement import (
     run_improvement_collector,
 )
 from agent_sensorium.salience_review import (
+    ALLOWED_POLICY_TOOLS,
+    FORBIDDEN_TOOL_NAMES,
+    HERMES_POLICY_TOOLS,
     SALIENCE_REVIEW_ENABLED,
     _MISSING_SEAMS,
+    SalienceReviewToolDispatcher,
     run_bounded_salience_review_session,
 )
 from agent_sensorium.store import SensoriumStore
@@ -354,8 +357,152 @@ def test_run_bounded_salience_review_returns_disabled_when_disabled(store):
     assert result["status"] == "disabled"
 
 
-def test_run_bounded_salience_review_missing_seams_is_nonempty():
-    assert len(_MISSING_SEAMS) > 0
+def test_run_bounded_salience_review_missing_seams_resolved():
+    assert _MISSING_SEAMS == []
+
+
+def test_run_bounded_salience_review_dry_run_prepares_bounded_surface(store):
+    candidate_id = _setup_store_with_candidate(store)
+    evidence = collect_improvement_evidence(store)[0]
+
+    result = run_bounded_salience_review_session(
+        store,
+        candidate_id,
+        evidence,
+        dry_run=True,
+        enabled=True,
+    )
+
+    assert result["status"] == "dry_run"
+    assert set(result["allowed_tools"]) == set(ALLOWED_POLICY_TOOLS)
+    assert set(result["hermes_allowed_tools"]) == set(HERMES_POLICY_TOOLS)
+    assert "send_message" in FORBIDDEN_TOOL_NAMES
+    assert "terminal" in FORBIDDEN_TOOL_NAMES
+    receipts = [
+        d for d in store.read_jsonl("decisions")
+        if d.get("type") == "attention_policy_review.decision"
+    ]
+    assert receipts == []
+    counters = result["counters"]
+    assert counters["attempts"] == 1
+    assert counters["dry_runs"] == 1
+
+
+def test_salience_review_tool_dispatcher_denies_unsafe_tools(store):
+    candidate_id = _setup_store_with_candidate(store)
+    dispatcher = SalienceReviewToolDispatcher(store, candidate_id=candidate_id)
+
+    for tool_name in ("terminal", "browser_navigate", "send_message", "sensorium_outbox_prepare"):
+        result = dispatcher.dispatch(tool_name, {"anything": "ignored"})
+        assert result["status"] == "denied"
+        assert result["tool"] == tool_name
+
+    assert store.read_jsonl("outbox") == []
+    receipts = [
+        d for d in store.read_jsonl("decisions")
+        if d.get("type") == "attention_policy_review.decision"
+    ]
+    assert receipts == []
+
+
+def test_run_bounded_salience_review_with_injected_runner_records_decision(store):
+    candidate_id = _setup_store_with_candidate(store)
+    evidence = collect_improvement_evidence(store)[0]
+
+    def runner(**kwargs):
+        dispatcher = kwargs["dispatcher"]
+        return dispatcher.dispatch(
+            "record_attention_policy_decision",
+            _valid_decision_payload(candidate_id=candidate_id),
+        )
+
+    result = run_bounded_salience_review_session(
+        store,
+        candidate_id,
+        evidence,
+        dry_run=False,
+        enabled=True,
+        agent_runner=runner,
+    )
+
+    assert result["status"] == "completed"
+    receipts = [
+        d for d in store.read_jsonl("decisions")
+        if d.get("type") == "attention_policy_review.decision"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["candidate_id"] == candidate_id
+    assert receipts[0]["decided_by"] == "salience-review"
+
+
+def test_run_bounded_salience_review_parses_json_decision_without_tool_call(store):
+    candidate_id = _setup_store_with_candidate(store)
+    evidence = collect_improvement_evidence(store)[0]
+
+    def runner(**kwargs):
+        return {"final_response": json.dumps(_valid_decision_payload())}
+
+    result = run_bounded_salience_review_session(
+        store,
+        candidate_id,
+        evidence,
+        dry_run=False,
+        enabled=True,
+        agent_runner=runner,
+    )
+
+    assert result["status"] == "completed"
+    target = next(c for c in store.read_jsonl("candidates") if c["id"] == candidate_id)
+    assert target["status"] == "reviewed"
+
+
+def test_run_bounded_salience_review_serializes_counters_across_store_instances(tmp_path):
+    store_a = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store_a.ensure_dirs()
+    candidate_id = _setup_store_with_candidate(store_a)
+    evidence = collect_improvement_evidence(store_a)[0]
+
+    run_bounded_salience_review_session(store_a, candidate_id, evidence, dry_run=True, enabled=True)
+
+    store_b = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    run_bounded_salience_review_session(store_b, candidate_id, evidence, dry_run=True, enabled=True)
+
+    with open(tmp_path / "salience_review.counters.json") as f:
+        counters = json.load(f)
+    assert counters["attempts"] == 2
+    assert counters["dry_runs"] == 2
+
+
+def test_run_bounded_salience_review_does_not_mutate_inputs_or_parent(store):
+    candidate_id = _setup_store_with_candidate(store)
+    evidence = collect_improvement_evidence(store)[0]
+    evidence_before = json.loads(json.dumps(evidence))
+
+    class Parent:
+        model = "test-model"
+        provider = "test-provider"
+        api_mode = "test-mode"
+        session_id = "parent-session"
+
+    parent = Parent()
+    parent_before = dict(parent.__dict__)
+
+    def runner(**kwargs):
+        kwargs["context"]["evidence"]["summary"] = "mutated locally"
+        return {"final_response": json.dumps(_valid_decision_payload())}
+
+    run_bounded_salience_review_session(
+        store,
+        candidate_id,
+        evidence,
+        dry_run=False,
+        enabled=True,
+        agent_runner=runner,
+        parent_agent=parent,
+    )
+
+    assert evidence == evidence_before
+    assert parent.__dict__ == parent_before
 
 
 def test_salience_review_authority_bound_no_unsafe_imports():

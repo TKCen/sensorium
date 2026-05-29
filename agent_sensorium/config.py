@@ -130,6 +130,17 @@ def sanitize_attention_policy(raw: dict | None = None) -> dict:
     return policy
 
 
+def _fsync_parent(path: Path) -> None:
+    try:
+        fd = os.open(str(path.parent), os.O_DIRECTORY)
+    except (AttributeError, OSError):
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -137,7 +148,10 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_name, path)
+        _fsync_parent(path)
     except Exception:
         try:
             os.unlink(tmp_name)

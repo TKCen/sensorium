@@ -79,10 +79,7 @@ def _find_existing_action(
 
 
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
-    path = store._resolve(name)
-    with open(path, "w") as f:
-        for item in items:
-            f.write(json.dumps(item, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl(name, items)
 
 
 def _denied(reason: str, detail: str, *, thread_id: str = "") -> dict:

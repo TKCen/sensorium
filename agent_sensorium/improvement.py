@@ -571,11 +571,7 @@ def record_attention_policy_decision(
     if implementation_ref:
         meta["implementation_ref"] = truncate_text(implementation_ref, 200)
 
-    path = store._resolve("candidates")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        for candidate in candidates:
-            f.write(json.dumps(candidate, separators=(",", ":")) + "\n")
+    store.rewrite_jsonl("candidates", candidates)
 
     evidence = (target.get("improvement_meta") or {}).get("evidence") or {}
     receipt = {
