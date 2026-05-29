@@ -25,11 +25,13 @@ from agent_sensorium.sensors import (
     classify_machine_body_pressure,
     classify_machine_network_pressure,
     classify_machine_process_pressure,
+    classify_tts_sidecar_pressure,
     hindsight_pressure_sample,
     kanban_pressure_sample,
     machine_body_pressure_sample,
     machine_network_pressure_sample,
     machine_process_pressure_sample,
+    tts_sidecar_pressure_sample,
 )
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.tools import (
@@ -125,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--process-pressure", action="store_true", help="Sample process/zombie pressure transition signals")
     parser.add_argument("--hindsight-pressure", action="store_true", help="Sample Hindsight queue/API pressure transition signals")
     parser.add_argument("--kanban-pressure", action="store_true", help="Sample Kanban board pressure transition signals")
+    parser.add_argument("--tts-sidecar-pressure", action="store_true", help="Sample Chatterbox TTS timeout/liveness cue signals")
     parser.add_argument("--all-sensors", action="store_true", help="Run all currently wired deterministic sensors")
     parser.add_argument(
         "--subconscious-advisory", action="store_true",
@@ -183,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             ("process_pressure", args.process_pressure, machine_process_pressure_sample, classify_machine_process_pressure),
             ("hindsight_pressure", args.hindsight_pressure, hindsight_pressure_sample, classify_hindsight_pressure),
             ("kanban_pressure", args.kanban_pressure, kanban_pressure_sample, classify_kanban_pressure),
+            ("tts_sidecar_pressure", args.tts_sidecar_pressure, tts_sidecar_pressure_sample, classify_tts_sidecar_pressure),
         ]
         if any(enabled or args.all_sensors for _, enabled, _, _ in transition_specs):
             store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)

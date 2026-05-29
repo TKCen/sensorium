@@ -719,6 +719,185 @@ def classify_machine_process_pressure(sample: dict, *, state: dict | None = None
     return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.machine_process_pressure", source="machine", kind="process_pressure", correlation_key="machine-process-pressure")
 
 
+DEFAULT_CHATTERBOX_BASE = Path.home() / "projects" / "chatterbox-tts-spike"
+DEFAULT_CHATTERBOX_CONTROL = str(DEFAULT_CHATTERBOX_BASE / "chatterbox-turbo-sidecar")
+DEFAULT_CHATTERBOX_PID_FILE = str(
+    DEFAULT_CHATTERBOX_BASE / "artifacts" / "sidecar" / "chatterbox-turbo-sidecar.pid"
+)
+
+TTS_SIDECAR_RECOVERY_CHECKLIST = [
+    f"{DEFAULT_CHATTERBOX_CONTROL} health",
+    f"{DEFAULT_CHATTERBOX_CONTROL} stop || true",
+    f"{DEFAULT_CHATTERBOX_CONTROL} start",
+    f"{DEFAULT_CHATTERBOX_CONTROL} health",
+    f"{DEFAULT_CHATTERBOX_CONTROL} test /tmp/chatterbox-tts-probe.mp3",
+    "retry the intended voice memo only if the probe succeeds",
+]
+
+TTS_SIDECAR_VERIFICATION_CRITERIA = [
+    "health returns JSON from http://127.0.0.1:8892/health",
+    "short TTS probe writes playable non-empty audio",
+    "no automatic repeated restart loop was started",
+]
+
+_TTS_TIMEOUT_PATTERNS = (
+    ("auto_voice_tts_failed", re.compile(r"auto voice reply tts failed", re.IGNORECASE)),
+    (
+        "tts_timeout",
+        re.compile(
+            r"\b(?:text_to_speech|\bTTS\b|/audio/speech|chatterbox|127\.0\.0\.1:8892)\b"
+            r".*\b(?:timeout|timed out|ConnectTimeout|APITimeout|ReadTimeout|TimeoutError)",
+            re.IGNORECASE,
+        ),
+    ),
+    ("chatterbox_connect", re.compile(r"(?:chatterbox|127\.0\.0\.1:8892|port 8892).*(?:failed to connect|couldn.?t connect|connection refused|ConnectTimeout|APITimeout|ReadTimeout|timeout)", re.IGNORECASE)),
+)
+
+def _tail_text(path: Path, *, max_bytes: int = 131_072) -> str:
+    try:
+        with path.open("rb") as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes), os.SEEK_SET)
+            except OSError:
+                pass
+            return f.read(max_bytes).decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _line_pattern_tags(line: str) -> list[str]:
+    return [name for name, pattern in _TTS_TIMEOUT_PATTERNS if pattern.search(line)]
+
+
+def _pid_running(pid_file: Path) -> bool:
+    try:
+        pid = int(pid_file.read_text(errors="ignore").strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def tts_sidecar_pressure_sample(
+    *,
+    log_paths: list[str] | None = None,
+    health_url: str | None = "http://127.0.0.1:8892/health",
+    pid_file: str = DEFAULT_CHATTERBOX_PID_FILE,
+    timeout_seconds: float = 2.0,
+    max_log_bytes: int = 131_072,
+) -> dict:
+    """Collect a compact TTS/Chatterbox maintenance sample.
+
+    This deliberately does not restart anything and does not copy log lines into
+    Sensorium. It records only counts, pattern labels, hashes, and local health.
+    A stopped manual sidecar is healthy unless a recent TTS timeout/error is also
+    visible; discretionary voice must not become forced auto-TTS.
+    """
+    default_logs = [
+        str(Path.home() / ".hermes" / "logs" / "errors.log"),
+        str(Path.home() / ".hermes" / "logs" / "gateway.log"),
+        str(Path.home() / ".hermes" / "logs" / "agent.log"),
+    ]
+    paths = [Path(p) for p in (log_paths or default_logs)]
+    matches: list[dict] = []
+    pattern_counts: dict[str, int] = {}
+    for path in paths:
+        text = _tail_text(path, max_bytes=max_log_bytes)
+        if not text:
+            continue
+        for line in text.splitlines():
+            tags = _line_pattern_tags(line)
+            if not tags:
+                continue
+            line_hash = hashlib.sha256(" ".join(line.split()).encode("utf-8", errors="ignore")).hexdigest()[:16]
+            matches.append({"path": str(path), "line_hash": line_hash, "tags": tags})
+            for tag in tags:
+                pattern_counts[tag] = pattern_counts.get(tag, 0) + 1
+
+    timeout_fingerprint = ""
+    if matches:
+        timeout_fingerprint = hashlib.sha256(json.dumps(matches, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+    sidecar_running = _pid_running(Path(pid_file))
+    health_available = False
+    health_error = ""
+    if health_url:
+        try:
+            req = urllib.request.Request(health_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - fixed loopback health URL by default
+                health_available = 200 <= int(resp.status) < 500
+        except Exception as exc:
+            health_error = type(exc).__name__
+    return {
+        "timeout_match_count": len(matches),
+        "timeout_fingerprint": timeout_fingerprint,
+        "pattern_counts": pattern_counts,
+        "log_paths_checked": [str(p) for p in paths if p.exists()],
+        "sidecar_running": sidecar_running,
+        "health_available": health_available,
+        "health_error": truncate_text(health_error, 80),
+    }
+
+
+def classify_tts_sidecar_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
+    cfg = {"emit_on_unhealthy_running_sidecar": True}
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg})
+    st = dict(state or {})
+    timeout_count = int(sample.get("timeout_match_count", 0) or 0)
+    timeout_fingerprint = str(sample.get("timeout_fingerprint") or "")
+    running = bool(sample.get("sidecar_running"))
+    health_available = bool(sample.get("health_available"))
+    unhealthy_running = bool(cfg["emit_on_unhealthy_running_sidecar"] and running and not health_available)
+    previous_level = str(st.get("level") or "healthy")
+    new_unhealthy_running = unhealthy_running and previous_level != "degraded"
+    new_timeout = bool(timeout_count and timeout_fingerprint and timeout_fingerprint != st.get("last_timeout_fingerprint"))
+    level = "degraded" if new_timeout or unhealthy_running else "healthy"
+    st["level"] = level
+    st["last_sample"] = {
+        "timeout_match_count": timeout_count,
+        "timeout_fingerprint": timeout_fingerprint,
+        "pattern_counts": dict(sample.get("pattern_counts", {}) or {}),
+        "sidecar_running": running,
+        "health_available": health_available,
+        "health_error": sample.get("health_error", ""),
+    }
+    signal = None
+    if new_timeout or new_unhealthy_running:
+        if timeout_fingerprint:
+            st["last_timeout_fingerprint"] = timeout_fingerprint
+        reason_bits = []
+        if new_timeout:
+            reason_bits.append(f"new timeout/error signature count={timeout_count}")
+        if new_unhealthy_running:
+            reason_bits.append(f"sidecar pid present but health failed ({sample.get('health_error') or 'unknown'})")
+        summary = "TTS/Chatterbox maintenance cue: " + "; ".join(reason_bits)
+        signal = {
+            "sensor": "sensorium.tts_sidecar_pressure",
+            "source": "machine",
+            "kind": "tts_sidecar_pressure",
+            "summary": truncate_text(summary, MAX_SUMMARY_CHARS),
+            "actor": "tool",
+            "strength_hint": 0.86,
+            "sensitivity": "local_only",
+            "allowed_surfaces": ["local"],
+            "correlation_keys": ["tts-sidecar-pressure", "chatterbox-turbo", "mediated-presence"],
+            "scope": "local_tts",
+            "pressure_level": "degraded",
+            "metric_family": "tts_sidecar",
+            "values": st["last_sample"],
+            "recovery_checklist": TTS_SIDECAR_RECOVERY_CHECKLIST,
+            "verification_criteria": TTS_SIDECAR_VERIFICATION_CRITERIA,
+            "policy": "cue_only_no_auto_restart",
+        }
+    return signal, st
+
+
 def _http_json(url: str, *, timeout_seconds: float) -> dict | list:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - localhost/admin API by caller config

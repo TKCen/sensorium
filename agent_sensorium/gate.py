@@ -27,6 +27,7 @@ DEFAULT_CONFIG: dict = {
         "process_pressure",
         "hindsight_pressure",
         "kanban_pressure",
+        "tts_sidecar_pressure",
     ],
 }
 

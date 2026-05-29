@@ -50,6 +50,13 @@ class TestShouldPromoteSignal:
         assert promoted is True
         assert "kind" in reason
 
+    def test_tts_sidecar_pressure_is_important_kind(self):
+        sig = _make_signal(kind="tts_sidecar_pressure", source="machine", strength_hint=0.65)
+        promoted, reason = should_promote_signal(sig)
+        assert promoted is True
+        assert "kind" in reason
+        assert "tts_sidecar_pressure" in DEFAULT_CONFIG["promote_kinds"]
+
     def test_important_kind_below_kind_threshold(self):
         sig = _make_signal(kind="design_decision", strength_hint=0.4)
         promoted, reason = should_promote_signal(sig)

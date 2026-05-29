@@ -14,6 +14,7 @@ from agent_sensorium.sensors import (
     classify_machine_body_pressure,
     classify_machine_network_pressure,
     classify_machine_process_pressure,
+    classify_tts_sidecar_pressure,
     file_content_hash,
     hindsight_pressure_sample,
     kanban_pressure_sample,
@@ -23,6 +24,7 @@ from agent_sensorium.sensors import (
     operator_signal,
     replay_machine_body_pressure,
     session_event_signal,
+    tts_sidecar_pressure_sample,
     wsl_disk_paths,
 )
 
@@ -442,6 +444,89 @@ class TestKanbanPressure:
         assert "body" not in sig
 
 
+class TestTtsSidecarPressure:
+    def test_log_sample_hashes_timeout_lines_without_raw_content(self, tmp_path):
+        log = tmp_path / "gateway.log"
+        log.write_text(
+            "ordinary line\n"
+            "Auto voice reply TTS failed: openai.APITimeoutError talking to http://127.0.0.1:8892/v1\n"
+        )
+        pid = tmp_path / "missing.pid"
+
+        sample = tts_sidecar_pressure_sample(
+            log_paths=[str(log)],
+            health_url=None,
+            pid_file=str(pid),
+        )
+
+        assert sample["timeout_match_count"] == 1
+        assert sample["timeout_fingerprint"]
+        assert sample["pattern_counts"]["auto_voice_tts_failed"] == 1
+        assert sample["sidecar_running"] is False
+        rendered = json.dumps(sample)
+        assert "Auto voice reply" not in rendered
+        assert "APITimeoutError talking" not in rendered
+
+    def test_new_timeout_emits_bounded_cue_signal_once(self, tmp_path):
+        log = tmp_path / "errors.log"
+        log.write_text("text_to_speech failed with ConnectTimeout on chatterbox port 8892\n")
+        sample = tts_sidecar_pressure_sample(log_paths=[str(log)], health_url=None, pid_file=str(tmp_path / "none.pid"))
+
+        sig, state = classify_tts_sidecar_pressure(sample, state={})
+        duplicate, state = classify_tts_sidecar_pressure(sample, state=state)
+
+        assert sig is not None
+        assert duplicate is None
+        assert sig["sensor"] == "sensorium.tts_sidecar_pressure"
+        assert sig["source"] == "machine"
+        assert sig["kind"] == "tts_sidecar_pressure"
+        assert sig["policy"] == "cue_only_no_auto_restart"
+        assert "stop || true" in "\n".join(sig["recovery_checklist"])
+        assert "health returns JSON" in "\n".join(sig["verification_criteria"])
+        assert "text_to_speech failed" not in json.dumps(sig)
+
+    def test_running_but_unhealthy_sidecar_emits_even_without_log_timeout(self):
+        sample = {
+            "timeout_match_count": 0,
+            "timeout_fingerprint": "",
+            "pattern_counts": {},
+            "sidecar_running": True,
+            "health_available": False,
+            "health_error": "URLError",
+        }
+
+        sig, state = classify_tts_sidecar_pressure(sample, state={})
+        repeat, state = classify_tts_sidecar_pressure(sample, state=state)
+
+        assert sig is not None
+        assert repeat is None
+        assert sig["pressure_level"] == "degraded"
+        assert "sidecar_running" in sig["values"]
+        assert state["level"] == "degraded"
+
+    def test_stopped_sidecar_without_timeout_is_healthy_and_silent(self):
+        sig, state = classify_tts_sidecar_pressure(
+            {
+                "timeout_match_count": 0,
+                "timeout_fingerprint": "",
+                "pattern_counts": {},
+                "sidecar_running": False,
+                "health_available": False,
+                "health_error": "URLError",
+            },
+            state={},
+        )
+
+        assert sig is None
+        assert state["level"] == "healthy"
+
+    def test_health_probe_default_timeout_is_not_hair_trigger(self):
+        import inspect
+
+        default_timeout = inspect.signature(tts_sidecar_pressure_sample).parameters["timeout_seconds"].default
+        assert default_timeout >= 2.0
+
+
 class TestFileContentHash:
     def test_hashes_real_file(self, tmp_path):
         f = tmp_path / "test.txt"
@@ -474,6 +559,23 @@ class TestSensorSignalsAreIngestable:
         from agent_sensorium.schemas import validate_signal
 
         sig = operator_signal(summary="Test")
+        validate_signal(sig)
+
+    def test_tts_sidecar_pressure_validates(self):
+        from agent_sensorium.schemas import validate_signal
+
+        sig, _ = classify_tts_sidecar_pressure(
+            {
+                "timeout_match_count": 1,
+                "timeout_fingerprint": "abc123",
+                "pattern_counts": {"openai_timeout": 1},
+                "sidecar_running": False,
+                "health_available": False,
+                "health_error": "URLError",
+            },
+            state={},
+        )
+        assert sig is not None
         validate_signal(sig)
 
     def test_session_event_ingestable(self):

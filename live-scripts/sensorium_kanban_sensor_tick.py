@@ -655,6 +655,19 @@ def main() -> int:
             "exit_code": sensor_record.get("exit_code"),
             "result": sensor_record.get("result"),
         }
+        ingested_candidates_by_event_id: dict[str, dict[str, Any]] = {}
+        sensor_result = sensor_record.get("result")
+        if isinstance(sensor_result, dict):
+            for step in sensor_result.values():
+                if not isinstance(step, dict):
+                    continue
+                ingest = step.get("ingest")
+                if not isinstance(ingest, dict):
+                    continue
+                event_id = str(ingest.get("event_id") or "")
+                candidate_id = str(ingest.get("candidate_id") or "")
+                if event_id and candidate_id:
+                    ingested_candidates_by_event_id[event_id] = dict(ingest)
         events = _load_events()
         # First run should establish a watermark, not flood the new board with
         # every historical Sensorium event. Canary forcing is explicit and still
@@ -680,6 +693,9 @@ def main() -> int:
         incident_context = state.get("incident_context") or {}
         if not isinstance(incident_context, dict):
             incident_context = {}
+        reconciled_candidates = state.get("reconciled_candidates") or {}
+        if not isinstance(reconciled_candidates, dict):
+            reconciled_candidates = {}
         for event in new_events:
             eid = str(event.get("id"))
             incident_key = _event_incident_key(event)
@@ -737,6 +753,23 @@ def main() -> int:
                 "repeat_count": 0,
                 "last_summary": str(event.get("summary") or "")[:240],
             }
+            ingest_meta = ingested_candidates_by_event_id.get(eid) or {}
+            candidate_id = str(ingest_meta.get("candidate_id") or "")
+            intake_task_id = str((created.get("create_result") or {}).get("id") or "")
+            if candidate_id and intake_task_id:
+                # Fresh event-driven intakes are already a Kanban representation
+                # of their newly-created candidate. Mark them represented before
+                # the stale-candidate reconciliation pass so the same candidate
+                # does not get a second candidate-intake in the same tick.
+                reconciled_candidates[candidate_id] = {
+                    "intake_task_id": intake_task_id,
+                    "idempotency_key": created.get("idempotency_key"),
+                    "decision": "intake",
+                    "kind": event.get("kind"),
+                    "event_id": eid,
+                    "reconciled_at": _now_iso(),
+                    "source": "event_intake",
+                }
             seen.add(eid)
         tasks = _list_tasks()
         post_review_settlement = _post_review_settle_completed_intakes(
@@ -755,9 +788,6 @@ def main() -> int:
         # and above-threshold while the board shows nothing -- a quiet pending
         # activation. Mirror or settle every such candidate so Kanban stays the
         # authoritative activation substrate.
-        reconciled_candidates = state.get("reconciled_candidates") or {}
-        if not isinstance(reconciled_candidates, dict):
-            reconciled_candidates = {}
         reconcile = _reconcile_active_candidates(
             SensoriumStore(instance=INSTANCE),
             open_intakes=open_intakes,
