@@ -1,6 +1,8 @@
 """Tests for manual talking-head artifact worker wrapper."""
 
 import json
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -192,9 +194,107 @@ class TestTalkingHeadRealRun:
         assert manifest["outbound_delivery"] is False
         assert len(manifest["artifact_ids"]) == 7
 
+        serialized_manifest = json.dumps(manifest)
+        assert "Sebastian, this is a private selected line" not in serialized_manifest
+        assert "private selected line" not in serialized_manifest
+        assert "stub {audio} {crop} {video}" not in serialized_manifest
+
         artifacts = store.read_jsonl("artifacts")
         assert len(artifacts) == 7
         assert all(a["delivery_state"] == "prepared" for a in artifacts)
         assert all(a["provenance"].get("capacity_status") == "almost_idle" for a in artifacts)
         assert all(a["provenance"].get("exists") is True for a in artifacts)
         assert all("sha256" in a["provenance"] for a in artifacts)
+
+    def test_lipsync_template_quotes_generated_paths_with_shell_metacharacters(self, tmp_path):
+        state_dir = str(tmp_path / "state")
+        _store_with_thread(state_dir)
+        script, source = _inputs(tmp_path)
+        root = tmp_path / "artifacts; touch SIDE_EFFECT;"
+
+        def crop_stub(_req, paths):
+            paths.face_crop.write_bytes(b"crop")
+
+        def tts_stub(_req, _script_text, output_path):
+            output_path.write_bytes(b"audio")
+
+        def qc_stub(paths):
+            paths.ffprobe.write_text('{"format":{"duration":"1.0"}}\n')
+            paths.contact_sheet.write_bytes(b"jpg")
+
+        lipsync_code = """
+import json
+import pathlib
+import sys
+
+audio, crop, video, workdir = sys.argv[1:]
+pathlib.Path(video).write_bytes(b"video")
+pathlib.Path(workdir, "argv.json").write_text(json.dumps(sys.argv[1:]))
+"""
+        req = TalkingHeadRequest(
+            script_file=script,
+            source_still=source,
+            slug="meta-safe",
+            thread_id="sth_talk",
+            instance="test",
+            state_dir=state_dir,
+            artifact_root=root,
+            real_run=True,
+            lipsync_command=f"{shlex.quote(sys.executable)} -c {shlex.quote(lipsync_code)} {{audio}} {{crop}} {{video}} {{workdir}}",
+        )
+
+        result = run_talking_head_worker(
+            req,
+            capacity_probe=lambda: {"status": "almost_idle", "reasons": [], "unknown": []},
+            crop_generator=crop_stub,
+            tts_generator=tts_stub,
+            qc_generator=qc_stub,
+        )
+
+        run_dir = root / "meta-safe"
+        argv = json.loads((run_dir / "argv.json").read_text())
+        assert result["success"] is True
+        assert argv == [
+            str(run_dir / "chatterbox-audio.wav"),
+            str(run_dir / "source-face-crop.png"),
+            str(run_dir / "talking-head.mp4"),
+            str(run_dir),
+        ]
+        assert not (run_dir / "SIDE_EFFECT").exists()
+
+    def test_real_run_requires_lipsync_command_before_artifact_side_effects(self, tmp_path):
+        state_dir = str(tmp_path / "state")
+        store = _store_with_thread(state_dir)
+        script, source = _inputs(tmp_path)
+        root = tmp_path / "artifacts"
+        called = []
+
+        def crop_stub(_req, _paths):
+            called.append("crop")
+
+        def tts_stub(_req, _script_text, _output_path):
+            called.append("tts")
+
+        req = TalkingHeadRequest(
+            script_file=script,
+            source_still=source,
+            slug="missing-lipsync",
+            thread_id="sth_talk",
+            instance="test",
+            state_dir=state_dir,
+            artifact_root=root,
+            real_run=True,
+            lipsync_command="   ",
+        )
+
+        with pytest.raises(ValueError, match="--lipsync-command is required for --real-run"):
+            run_talking_head_worker(
+                req,
+                capacity_probe=lambda: {"status": "almost_idle", "reasons": [], "unknown": []},
+                crop_generator=crop_stub,
+                tts_generator=tts_stub,
+            )
+
+        assert called == []
+        assert not (root / "missing-lipsync").exists()
+        assert store.read_jsonl("artifacts") == []

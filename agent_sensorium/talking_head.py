@@ -390,6 +390,8 @@ def run_talking_head_worker(
     script_text = req.script_file.read_text(errors="ignore")
     if not script_text.strip():
         raise ValueError("script_file is empty")
+    if req.real_run and not req.lipsync_command.strip():
+        raise ValueError("--lipsync-command is required for --real-run")
 
     capacity_record: dict | None = None
     if req.real_run:
