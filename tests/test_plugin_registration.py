@@ -57,6 +57,8 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_worker_dispatch",
         "sensorium_worker_result",
         "sensorium_worker_status",
+        "sensorium_artifact_store",
+        "sensorium_artifact_status",
         "sensorium_action_prepare",
         "sensorium_action_attach",
         "sensorium_action_result",

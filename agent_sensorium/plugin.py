@@ -43,6 +43,8 @@ def register(ctx) -> None:
         handle_sensorium_action_prepare,
         handle_sensorium_action_result,
         handle_sensorium_action_status,
+        handle_sensorium_artifact_status,
+        handle_sensorium_artifact_store,
         handle_sensorium_attention_inbox,
         handle_sensorium_attention_pointer,
         handle_sensorium_candidate_update,
@@ -808,6 +810,133 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="List worker requests with optional filters.",
+    )
+    ctx.register_tool(
+        name="sensorium_artifact_store",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_artifact_store",
+            "Store a mediated-presence artifact ref (text/audio/image/video) for conscious thread/action review. Private-by-default; does not generate media or deliver outbound messages.",
+            {
+                **common,
+                "kind": {
+                    "type": "string",
+                    "enum": ["text", "audio", "image", "video"],
+                    "description": "Artifact kind.",
+                },
+                "ref_path": {
+                    "type": "string",
+                    "description": "File path or external ref; raw content is not accepted.",
+                },
+                "provenance": {
+                    "type": "object",
+                    "description": "Compact provenance metadata (hashes/models/refs only; no raw prompts).",
+                },
+                "why_created": {
+                    "type": "string",
+                    "description": "Bounded reason this artifact was created.",
+                },
+                "intended_handoff_mode": {
+                    "type": "string",
+                    "enum": ["pillow_dm", "present_thread", "both_later"],
+                    "description": "Later handoff intention; not delivery authorization.",
+                },
+                "delivery_state": {
+                    "type": "string",
+                    "enum": ["not_delivered", "prepared", "held_for_review", "delivery_blocked", "delivery_cancelled"],
+                    "description": "Record state only; sent/delivered/queued are rejected.",
+                },
+                "capacity_requirements": {
+                    "type": "object",
+                    "description": "Compact resource requirements such as chatterbox/comfy/gpu/idle hints.",
+                },
+                "source_thread_id": {
+                    "type": "string",
+                    "description": "Optional source conscious thread id.",
+                },
+                "source_candidate_id": {
+                    "type": "string",
+                    "description": "Optional source candidate id.",
+                },
+                "source_action_id": {
+                    "type": "string",
+                    "description": "Optional source action id; attaches via artifact_ref when present.",
+                },
+                "feedback_hooks": {
+                    "type": "object",
+                    "description": "Compact feedback hook descriptors; no raw messages/prompts.",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["local_only", "private", "public_safe"],
+                    "description": "Optional sensitivity; defaults private and intersects source refs.",
+                },
+                "allowed_surfaces": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional allowed surfaces; defaults ['local'] and intersects source refs.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Optional artifact config overrides.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_artifact_store(
+            kind=args.get("kind", ""),
+            ref_path=args.get("ref_path", ""),
+            provenance=args.get("provenance"),
+            why_created=args.get("why_created", ""),
+            intended_handoff_mode=args.get("intended_handoff_mode") or "present_thread",
+            delivery_state=args.get("delivery_state") or "not_delivered",
+            capacity_requirements=args.get("capacity_requirements"),
+            source_thread_id=args.get("source_thread_id", ""),
+            source_candidate_id=args.get("source_candidate_id", ""),
+            source_action_id=args.get("source_action_id", ""),
+            feedback_hooks=args.get("feedback_hooks"),
+            sensitivity=args.get("sensitivity"),
+            allowed_surfaces=args.get("allowed_surfaces"),
+            config=args.get("config"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Store a private-by-default mediated-presence artifact ref for later conscious review.",
+    )
+    ctx.register_tool(
+        name="sensorium_artifact_status",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_artifact_status",
+            "List mediated-presence artifact records with optional thread/action/kind filters.",
+            {
+                **common,
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional source thread filter.",
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "Optional source action filter.",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Optional kind filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max items to return. Defaults to 20.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_artifact_status(
+            thread_id=args.get("thread_id"),
+            action_id=args.get("action_id"),
+            kind=args.get("kind"),
+            limit=int(args.get("limit") or 20),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="List Sensorium mediated-presence artifacts.",
     )
     ctx.register_tool(
         name="sensorium_action_prepare",

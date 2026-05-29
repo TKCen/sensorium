@@ -37,6 +37,11 @@ from .actions import (
     prepare_action,
     record_action_result,
 )
+from .artifacts import (
+    compact_artifacts_for_thread,
+    list_artifacts,
+    store_artifact,
+)
 from .conscious import (
     claim_dormant_thread,
     complete_claim,
@@ -60,7 +65,7 @@ _ALLOWED_THREAD_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
-def _ok(instance: str, data: dict) -> str:
+def _ok(instance: str, data) -> str:
     return json.dumps({"success": True, "instance": instance, "data": data, "error": None})
 
 
@@ -85,6 +90,7 @@ def handle_sensorium_status(
     events = store.read_jsonl("events")
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
+    artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
@@ -127,6 +133,7 @@ def handle_sensorium_status(
             "candidates": len(candidates),
             "active_candidates": len(active_candidates),
             "threads": len(threads),
+            "artifacts": len(artifacts),
             "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
             "held_threads": len([t for t in threads if t.get("status") == "held"]),
             "closed_threads": len([t for t in threads if t.get("status") == "closed"]),
@@ -766,6 +773,13 @@ def handle_sensorium_thread_open(
     if actions:
         capsule["actions"] = actions
         capsule["action_count"] = len(actions)
+    artifacts = compact_artifacts_for_thread(
+        store, target.get("id", ""),
+        surface=surface, instance_config=instance_config,
+    )
+    if artifacts:
+        capsule["artifacts"] = artifacts
+        capsule["artifact_count"] = len(artifacts)
     return _ok(instance, capsule)
 
 
@@ -1358,6 +1372,70 @@ def handle_sensorium_worker_status(
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     items = list_worker_requests(store, thread_id=thread_id, status=status, limit=limit)
     return _ok(instance, {"worker_requests": items, "count": len(items)})
+
+
+# --- Mediated-presence artifact tool handlers ---
+
+
+def handle_sensorium_artifact_store(
+    *,
+    kind: str,
+    ref_path: str,
+    provenance: dict | None = None,
+    why_created: str = "",
+    intended_handoff_mode: str = "present_thread",
+    delivery_state: str = "not_delivered",
+    capacity_requirements: dict | None = None,
+    source_thread_id: str = "",
+    source_candidate_id: str = "",
+    source_action_id: str = "",
+    feedback_hooks: dict | None = None,
+    sensitivity: str | None = None,
+    allowed_surfaces: list[str] | None = None,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = store_artifact(
+        store,
+        kind=kind,
+        ref_path=ref_path,
+        provenance=provenance,
+        why_created=why_created,
+        intended_handoff_mode=intended_handoff_mode,
+        delivery_state=delivery_state,
+        capacity_requirements=capacity_requirements,
+        source_thread_id=source_thread_id,
+        source_candidate_id=source_candidate_id,
+        source_action_id=source_action_id,
+        feedback_hooks=feedback_hooks,
+        sensitivity=sensitivity,
+        allowed_surfaces=allowed_surfaces,
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result.get("data") or {})
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "artifact_store_failed"),
+    )
+
+
+def handle_sensorium_artifact_status(
+    *,
+    thread_id: str | None = None,
+    action_id: str | None = None,
+    kind: str | None = None,
+    limit: int = 20,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    items = list_artifacts(
+        store, thread_id=thread_id, action_id=action_id, kind=kind, limit=limit,
+    )
+    return _ok(instance, items)
 
 
 # --- Thread action tool handlers (Phase 9C) ---

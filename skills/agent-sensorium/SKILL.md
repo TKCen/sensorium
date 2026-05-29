@@ -130,6 +130,39 @@ Thread actions are a generic prepared-action / motor-plan substrate attached to 
 
 **Results emit feedback signals.** Recording an action result writes a decision receipt and emits a feedback signal with `caused_by` containing `action_id`, `origin_thread_id`, and `origin_candidate_id`. The signal uses `feedback_scope: system_action`, so the self-loop filter prevents autonomous re-promotion without operator evaluation.
 
+## Mediated-presence artifact records (v0)
+
+Artifact records are the Sensorium-side spine for private presence/gift work. They store refs to files or external artifacts produced by a conscious choice or prepared action, not the raw private prompt/script/message itself. The intended pipeline is conscious thread/action -> text/audio/image/video artifact refs -> later review/delivery choice. V0 deliberately does **not** generate media, dispatch outbox messages, start cron, or broaden surfaces.
+
+Required record fields:
+
+```json
+{
+  "id": "art_...",
+  "kind": "text|audio|image|video",
+  "ref_path": "/path/or/external/ref",
+  "provenance": {"provider": "xai|chatterbox|comfy", "prompt_hash": "..."},
+  "privacy": "private",
+  "sensitivity": "private",
+  "allowed_surfaces": ["local"],
+  "why_created": "Conscious thread chose to prepare a private presence gift.",
+  "intended_handoff_mode": "pillow_dm|present_thread|both_later",
+  "delivery_state": "not_delivered|prepared|held_for_review|delivery_blocked|delivery_cancelled",
+  "capacity_requirements": {"requires_chatterbox": true, "requires_comfy": true},
+  "source_refs": {"thread_id": "sth_...", "candidate_id": "cand_...", "action_id": "tact_..."},
+  "feedback_hooks": {"on_review": "record operator evaluation"}
+}
+```
+
+Privacy rules:
+
+- Defaults are `sensitivity: private`, `allowed_surfaces: ["local"]`, and `delivery_state: not_delivered`.
+- `sent`, `delivered`, `posted`, `dispatched`, and `queued` are rejected in this lane; delivery remains a separate conscious/outbox decision.
+- `provenance`, `capacity_requirements`, and `feedback_hooks` may contain hashes, refs, provider names, and compact facts, but not raw prompt/script/transcript/message fields.
+- Thread-open capsules include only compact artifact refs (`id`, `kind`, delivery/handoff state, bounded `why_created`), never file paths, prompt hashes, provenance, or raw material.
+
+When an artifact has `source_action_id`, storage attaches it to the existing action via the `artifact_ref` primitive. When it has/infers a `source_thread_id`, storage adds a compact `artifact_ref` to the thread interaction refs and marks the thread summary dirty for later conscious update.
+
 ### Thread action state machine
 
 ```
@@ -176,6 +209,8 @@ proposed -> expired (outcome: expired)
 | `sensorium_worker_dispatch` | Dispatch a prepared worker request; no-op unless `execute=True` AND `config.direct_dispatch_enabled=True` AND adapter provided |
 | `sensorium_worker_result` | Record worker result, write receipt, and emit feedback signal with causal refs |
 | `sensorium_worker_status` | List worker requests with optional thread/status filters |
+| `sensorium_artifact_store` | Store a private-by-default text/audio/image/video artifact ref for later conscious review; no media generation or delivery |
+| `sensorium_artifact_status` | List mediated-presence artifact records with optional thread/action/kind filters |
 | `sensorium_action_prepare` | Prepare a generic thread action (motor-plan) from a dormant/held thread; internal record only, no side effects |
 | `sensorium_action_attach` | Attach a compact ref (worker_request, outbox_request, artifact_ref, external_ref) to an existing action |
 | `sensorium_action_result` | Mark action acted/closed/rejected/expired/cancelled; write receipt; emit feedback signal with causal refs |
