@@ -58,6 +58,7 @@ def register(ctx) -> None:
         handle_sensorium_attention_policy_manage,
         handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
+        handle_sensorium_media_gift_decide,
         handle_sensorium_outbox_dispatch,
         handle_sensorium_outbox_prepare,
         handle_sensorium_service_threads,
@@ -810,6 +811,76 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="List worker requests with optional filters.",
+    )
+    ctx.register_tool(
+        name="sensorium_media_gift_decide",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_media_gift_decide",
+            "Apply Sera mediated-presence gift conscious-choice policy and write receipts. Subconscious may only propose; no automatic outbound delivery or scheduler spam.",
+            {
+                **common,
+                "config_path": {
+                    "type": "string",
+                    "description": "Optional explicit instance config JSON path.",
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": [
+                        "propose",
+                        "prepare_thread_artifact",
+                        "offer_choice",
+                        "choose_silence",
+                        "decline",
+                        "approve_delivery",
+                        "block_delivery",
+                    ],
+                    "description": "Conscious-choice decision to receipt.",
+                },
+                "actor_tier": {
+                    "type": "string",
+                    "enum": ["subconscious", "conscious", "operator", "test"],
+                    "description": "Who is making the choice; subconscious is propose-only.",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["inner_salience", "sebastian_prompt", "manual_review", "worker_result", "scheduler", "test"],
+                    "description": "Origin of the pressure/request.",
+                },
+                "why_now": {
+                    "type": "string",
+                    "description": "Bounded why-now rationale required for proposals, preparation, and delivery approval.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason for silence, decline, denial, or block.",
+                },
+                "thread_id": {"type": "string", "description": "Sensorium thread id."},
+                "artifact_id": {"type": "string", "description": "Existing thread artifact id for delivery approval."},
+                "surface": {"type": "string", "description": "Requested delivery/review surface."},
+                "target_ref": {"type": "string", "description": "Compact configured target ref, e.g. discord:#pics or dm alias."},
+                "config": {
+                    "type": "object",
+                    "description": "Optional media_gift_policy override for tests/manual smoke; cannot dispatch delivery.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_media_gift_decide(
+            decision=args.get("decision", ""),
+            actor_tier=args.get("actor_tier") or "conscious",
+            source=args.get("source") or "inner_salience",
+            why_now=args.get("why_now") or "",
+            reason=args.get("reason") or "",
+            thread_id=args.get("thread_id") or "",
+            artifact_id=args.get("artifact_id") or "",
+            surface=args.get("surface") or "",
+            target_ref=args.get("target_ref") or "",
+            config=args.get("config"),
+            config_path=args.get("config_path"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Apply mediated-presence gift conscious-choice policy and write receipts.",
     )
     ctx.register_tool(
         name="sensorium_artifact_store",

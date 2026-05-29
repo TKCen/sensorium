@@ -42,6 +42,7 @@ from .artifacts import (
     list_artifacts,
     store_artifact,
 )
+from .media_gifts import apply_media_gift_choice
 from .conscious import (
     claim_dormant_thread,
     complete_claim,
@@ -1372,6 +1373,54 @@ def handle_sensorium_worker_status(
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     items = list_worker_requests(store, thread_id=thread_id, status=status, limit=limit)
     return _ok(instance, {"worker_requests": items, "count": len(items)})
+
+
+# --- Mediated-presence gift policy handler ---
+
+
+def handle_sensorium_media_gift_decide(
+    *,
+    decision: str,
+    actor_tier: str = "conscious",
+    source: str = "inner_salience",
+    why_now: str = "",
+    reason: str = "",
+    thread_id: str = "",
+    artifact_id: str = "",
+    surface: str = "",
+    target_ref: str = "",
+    config: dict | None = None,
+    config_path: str | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    instance_config, _ = load_instance_config(
+        config_path=config_path, state_dir=str(store.root),
+    )
+    if isinstance(config, dict):
+        merged_policy = dict(instance_config.get("media_gift_policy") or {})
+        merged_policy.update(config)
+        instance_config["media_gift_policy"] = merged_policy
+    result = apply_media_gift_choice(
+        store,
+        decision=decision,
+        actor_tier=actor_tier,
+        source=source,
+        why_now=why_now,
+        reason=reason,
+        thread_id=thread_id,
+        artifact_id=artifact_id,
+        surface=surface,
+        target_ref=target_ref,
+        config=instance_config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(
+        instance,
+        result.get("detail") or result.get("error", "media_gift_decision_failed"),
+    )
 
 
 # --- Mediated-presence artifact tool handlers ---

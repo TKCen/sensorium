@@ -34,6 +34,37 @@ DEFAULT_ATTENTION_POLICY: dict = {
     "priority_weights": {},
 }
 
+DEFAULT_MEDIA_GIFT_POLICY: dict = {
+    "enabled": True,
+    # Subconscious can shape pressure into a proposal; only Conscious chooses.
+    "subconscious_may": ["propose"],
+    "conscious_may": [
+        "propose",
+        "prepare_thread_artifact",
+        "offer_choice",
+        "choose_silence",
+        "decline",
+        "approve_delivery",
+        "block_delivery",
+    ],
+    "direct_prompt_mode": "choice_required",
+    "silence_allowed": True,
+    "artifact_first_required": True,
+    "scheduler_delivery_enabled": False,
+    "require_why_now_for": [
+        "propose",
+        "prepare_thread_artifact",
+        "approve_delivery",
+        "block_delivery",
+    ],
+    "delivery": {
+        "enabled": False,
+        "allowed_surfaces": [],
+        "allowed_targets": [],
+        "cooldown_hours": 24,
+    },
+}
+
 _KNOWN_ATTENTION_RULES = set(DEFAULT_ATTENTION_POLICY["evidence_rules"])
 _ALLOWED_RULE_FIELDS = {
     "min_count",
@@ -64,6 +95,7 @@ SAFE_DEFAULTS: dict = {
     "pointer": {},
     "outbox": {},
     "attention_policy": DEFAULT_ATTENTION_POLICY,
+    "media_gift_policy": DEFAULT_MEDIA_GIFT_POLICY,
 }
 
 
@@ -98,6 +130,45 @@ def _sanitize_attention_rule(raw: dict, default: dict | None = None) -> dict:
             if isinstance(value, (int, float)) and value > 0:
                 rule[key] = value
     return rule
+
+
+def sanitize_media_gift_policy(raw: dict | None = None) -> dict:
+    """Return bounded conscious-choice policy for mediated-presence gifts.
+
+    The policy controls authorization receipts only. It cannot dispatch outbound
+    messages, create schedulers, or broaden an artifact/thread's surfaces.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    policy = _deepcopy_jsonable(DEFAULT_MEDIA_GIFT_POLICY)
+    for key in (
+        "enabled",
+        "silence_allowed",
+        "artifact_first_required",
+        "scheduler_delivery_enabled",
+    ):
+        if isinstance(raw.get(key), bool):
+            policy[key] = raw[key]
+    for key in ("subconscious_may", "conscious_may", "require_why_now_for"):
+        values = _sanitize_string_list(raw.get(key))
+        if values is not None:
+            policy[key] = values
+    if raw.get("direct_prompt_mode") in {"choice_required", "disabled"}:
+        policy["direct_prompt_mode"] = raw["direct_prompt_mode"]
+
+    delivery = dict(policy["delivery"])
+    maybe_delivery = raw.get("delivery")
+    raw_delivery: dict = maybe_delivery if isinstance(maybe_delivery, dict) else {}
+    if isinstance(raw_delivery.get("enabled"), bool):
+        delivery["enabled"] = raw_delivery["enabled"]
+    for key in ("allowed_surfaces", "allowed_targets"):
+        values = _sanitize_string_list(raw_delivery.get(key))
+        if values is not None:
+            delivery[key] = values
+    cooldown = raw_delivery.get("cooldown_hours")
+    if isinstance(cooldown, (int, float)) and cooldown >= 0:
+        delivery["cooldown_hours"] = cooldown
+    policy["delivery"] = delivery
+    return policy
 
 
 def sanitize_attention_policy(raw: dict | None = None) -> dict:
@@ -219,6 +290,7 @@ def _validate_config(raw: dict) -> dict:
         "pointer": dict(SAFE_DEFAULTS["pointer"]),
         "outbox": dict(SAFE_DEFAULTS["outbox"]),
         "attention_policy": sanitize_attention_policy(SAFE_DEFAULTS["attention_policy"]),
+        "media_gift_policy": sanitize_media_gift_policy(SAFE_DEFAULTS["media_gift_policy"]),
     }
     if "instance_name" in raw:
         val = raw["instance_name"]
@@ -271,6 +343,8 @@ def _validate_config(raw: dict) -> dict:
             config[key] = raw[key]
     if "attention_policy" in raw:
         config["attention_policy"] = sanitize_attention_policy(raw.get("attention_policy"))
+    if "media_gift_policy" in raw:
+        config["media_gift_policy"] = sanitize_media_gift_policy(raw.get("media_gift_policy"))
     return config
 
 
