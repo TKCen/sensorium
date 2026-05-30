@@ -100,6 +100,35 @@ def _mtime(path: Path) -> str | None:
         return None
 
 
+def _freshness_mtime(root: Path) -> str | None:
+    """Return the newest mtime for live Sensorium state, not only state.latest.
+
+    `state.latest.json` is dispatcher-oriented and can stay unchanged while the
+    Kanban activation substrate, sensor JSONL files, and quiet tick receipts are
+    current. The dashboard uses this value as its freshness indicator.
+    """
+    candidates = [root / "state.latest.json"]
+    candidates.extend(root / rel for rel in STATE_NAMES.values())
+    kanban_root = root.parent / "kanban"
+    candidates.extend(
+        [
+            kanban_root / "last_sensorium_kanban_tick.json",
+            kanban_root / "sensor_kanban_state.json",
+            kanban_root / "sera_tick_quiet.latest.json",
+        ]
+    )
+    newest: float | None = None
+    for path in candidates:
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    if newest is None:
+        return None
+    return datetime.fromtimestamp(newest, timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
@@ -281,7 +310,9 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "instance": effective_instance,
         "state_dir": str(root),
         "state_exists": root.exists(),
-        "state_mtime": _mtime(root / "state.latest.json"),
+        "state_mtime": _freshness_mtime(root),
+        "state_latest_mtime": _mtime(root / "state.latest.json"),
+        "kanban_tick_mtime": _mtime(root.parent / "kanban" / "last_sensorium_kanban_tick.json"),
         "config": {
             "instance_name": config.get("instance_name") or effective_instance,
             "allowed_surfaces": config.get("allowed_surfaces") or ["local"],
