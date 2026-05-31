@@ -46,6 +46,7 @@ from agent_sensorium.settlement import (  # noqa: E402
     represented_candidate_ids as _represented_candidate_ids,
     select_active_above_threshold,
 )
+from agent_sensorium.actuator_contracts import mediated_artifact_review_contract  # noqa: E402
 from agent_sensorium.improvement import run_improvement_collector  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
 
@@ -508,6 +509,15 @@ def _compact_event_body(event: dict[str, Any]) -> str:
         "allowed_surfaces": event.get("allowed_surfaces", []),
         "fingerprint": event.get("fingerprint"),
     }
+    contract = mediated_artifact_review_contract(event)
+    if contract:
+        payload["conscious_review_contract"] = contract
+    contract_note = (
+        "\n\nMediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
+        "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
+        "do not promote as generic THINK-only review."
+        if contract else ""
+    )
     return (
         "Sensorium Kanban intake v1. This is substrate, not executable user work.\n\n"
         "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the gateway "
@@ -517,6 +527,7 @@ def _compact_event_body(event: dict[str, Any]) -> str:
         + json.dumps(payload, indent=2, sort_keys=True)
         + "\n\nExpected settlement: Subconscious comments DROP/SAVE/PROMOTE evidence, "
         "then archives/completes this intake or links it to a conscious review task."
+        + contract_note
     )
 
 
@@ -569,6 +580,15 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         payload["conscious_task"] = candidate.get("conscious_task")
     if isinstance(candidate.get("improvement_meta"), dict):
         payload["improvement_meta"] = candidate.get("improvement_meta")
+    contract = mediated_artifact_review_contract(candidate)
+    if contract:
+        payload["conscious_review_contract"] = contract
+    contract_note = (
+        "\n\nMediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
+        "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
+        "do not promote as generic THINK-only review."
+        if contract else ""
+    )
     return (
         "Sensorium Kanban reconciliation intake v1. This is substrate, not "
         "executable user work.\n\n"
@@ -585,6 +605,7 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         + "\n\nExpected settlement: Subconscious comments DROP/SAVE/PROMOTE evidence, "
         "then settles the underlying candidate via the settlement CLI "
         "(candidate_id above) and archives/completes this intake."
+        + contract_note
     )
 
 
@@ -750,6 +771,7 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         "- Do not send messages, schedule crons, start gateways, or create external workers.\n"
         "- For DROP/SAVE: comment concise evidence on intake tasks, archive or complete settled intakes.\n"
         "- For PROMOTE_CONSCIOUS: create exactly one `conscious:review:` task assigned to `default`, preferably with this review as parent, include cited intake IDs and stop condition.\n"
+        "- For intakes whose compact payload includes `conscious_review_contract.type == mediated_presence_artifact_decision`: PROMOTE_CONSCIOUS must create a `conscious:review:` task whose body explicitly requires one of prepare_thread_artifact, offer_choice, choose_silence, decline/block delivery, or HOLD with no-artifact reason. Conscious must use `sensorium_media_gift_decide` when a thread/artifact context exists, or record an explicit review receipt; do not settle the intake as generic SAVE if the artifact/action lane has not been consciously addressed.\n"
         "- For `attention_policy_review` intakes: this is Sensorium self-improvement evidence, not ordinary noise. Unless an equivalent conscious review is already active, PROMOTE_CONSCIOUS to `default`; Conscious must decide NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, and must record future_tendency_delta, verification_condition, and rollback_condition. Subconscious must not mutate wake behavior directly.\n"
         "- CRITICAL: after deciding, propagate every consumed intake decision back into Sensorium truth by running the settlement CLI once with a JSON list of settlement records:\n"
         "  `python /home/entity/.hermes/plugins/agent-sensorium/scripts/sensorium_kanban_settle.py --instance sera --file /tmp/sensorium_settlements_<review>.json --json`\n"

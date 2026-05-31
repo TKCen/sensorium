@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .gate import is_feedback_self_loop
+from .actuator_contracts import mediated_artifact_review_contract
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -266,25 +267,41 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
     summary = candidate.get("summary", "")
     kind = candidate.get("kind", "")
 
-    request_type = "THINK"
+    contract = mediated_artifact_review_contract(candidate)
+    request_type = "PRIVATE_EXPRESSION" if contract else "THINK"
+    expected_decision = (
+        "Choose a mediated-presence outcome: prepare_thread_artifact, offer_choice, "
+        "choose_silence, decline/block delivery, or HOLD with explicit no-artifact reason. "
+        "Do not leave the artifact/action lane implicit."
+        if contract else
+        "Suppress, hold for later, save as workflow guidance, or create bounded follow-up."
+    )
+    conscious_task: dict = {
+        "id": new_id("ctask"),
+        "request_type": request_type,
+        "title": f"Review {kind}: {truncate_text(summary, 80)}",
+        "why": f"Candidate pressure {candidate.get('pressure', 0)} crossed dispatch threshold.",
+        "expected_decision": expected_decision,
+    }
+    if contract:
+        conscious_task["actuator_contract"] = contract
+
     thread = {
         "id": new_id("sth"),
         "status": "dormant",
         "origin": "candidate",
-        "conscious_task": {
-            "id": new_id("ctask"),
-            "request_type": request_type,
-            "title": f"Review {kind}: {truncate_text(summary, 80)}",
-            "why": f"Candidate pressure {candidate.get('pressure', 0)} crossed dispatch threshold.",
-            "expected_decision": "Suppress, hold for later, save as workflow guidance, or create bounded follow-up.",
-        },
+        "conscious_task": conscious_task,
         "origin_candidate_id": candidate.get("id", ""),
         "continuity_summary": _derive_continuity(candidate),
         "decision_log": [],
         "interaction_refs": [],
         "summary_dirty": False,
         "open_questions": [],
-        "next_prompt_to_operator": f"Take up this {kind} thread, suppress it, or save as workflow guidance?",
+        "next_prompt_to_operator": (
+            f"Take up this {kind} thread and make the required mediated-artifact choice?"
+            if contract else
+            f"Take up this {kind} thread, suppress it, or save as workflow guidance?"
+        ),
         "sensitivity": candidate.get("sensitivity", "private"),
         "allowed_surfaces": candidate.get("allowed_surfaces", ["local"]),
         "dirty_since": None,
@@ -301,6 +318,8 @@ def candidate_to_thread(candidate: dict, config: dict | None = None) -> dict:
         "updated_at": now,
         "expires_at": expires,
     }
+    if contract:
+        thread["actuator_contract"] = contract
     _apply_operational_pointer_policy(thread, candidate, cfg)
     return thread
 
