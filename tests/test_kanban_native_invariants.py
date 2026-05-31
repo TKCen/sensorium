@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,15 @@ def _load_live_bridge_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _bridge_intake_script_paths() -> list[tuple[str, Path]]:
+    repo_root = Path(__file__).resolve().parents[1]
+    paths = [("rollout_source", repo_root / "live-scripts" / "sensorium_kanban_sensor_tick.py")]
+    runtime = Path.home() / ".hermes" / "scripts" / "sensorium_kanban_sensor_tick.py"
+    if runtime.exists():
+        paths.append(("runtime", runtime))
+    return paths
 
 
 
@@ -536,6 +546,95 @@ class TestStaleCandidateReconciliation:
         assert candidate_id not in [m["candidate_id"] for m in plan_after["mint"]]
         assert candidate_id not in [s["candidate_id"] for s in plan_after["settle"]]
         assert dispatch_once(store, dry_run=True)["action"] == "no_candidate"
+
+
+class TestRuntimeKanbanBridgeIntakeRows:
+    """Runtime bridge intake rows must be blocked and owned by Subconscious.
+
+    Canonical runtime path: ``~/.hermes/scripts/sensorium_kanban_sensor_tick.py``
+    is invoked by the quiet no-agent cron wrapper. Rollout hazard: the repo
+    ``live-scripts/sensorium_kanban_sensor_tick.py`` copy is mapped onto that
+    runtime script by ``scripts/sensorium_plugin_rollout.py``. Exercise both
+    paths when available so a later rollout cannot reintroduce ready/unassigned
+    substrate intakes.
+    """
+
+    @staticmethod
+    def _load_bridge(path: Path):
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        spec = importlib.util.spec_from_file_location(
+            f"sensorium_kanban_sensor_tick_{path.stem}_{abs(hash(path))}", path
+        )
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _flag_value(cmd: list[str], flag: str) -> str:
+        idx = cmd.index(flag)
+        return cmd[idx + 1]
+
+    def _assert_blocked_assigned_intake_cmd(
+        self,
+        cmd: list[str],
+        *,
+        created_by: str,
+    ) -> None:
+        assert cmd[:5] == ["hermes", "kanban", "--board", "sensorium", "create"]
+        assert self._flag_value(cmd, "--initial-status") == "blocked"
+        assert self._flag_value(cmd, "--assignee") == "serasubconscious"
+        assert self._flag_value(cmd, "--created-by") == created_by
+        assert "--triage" not in cmd
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_event_and_reconciliation_intakes_are_blocked_assigned(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=json.dumps({"id": f"t_fake_{len(calls)}"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+
+        event_result = bridge._create_intake(
+            {
+                "id": "evt_blocked_assigned",
+                "kind": "hindsight_pressure",
+                "summary": "must not be executable substrate",
+            }
+        )
+        candidate_result = bridge._create_candidate_intake(
+            {
+                "id": "cand_blocked_assigned",
+                "kind": "hindsight_pressure",
+                "summary": "stale candidate must not be executable substrate",
+            }
+        )
+
+        assert event_result["create_result"]["id"] == "t_fake_1"
+        assert candidate_result["create_result"]["id"] == "t_fake_2"
+        self._assert_blocked_assigned_intake_cmd(
+            calls[0], created_by="sensorium-kanban-sensor"
+        )
+        self._assert_blocked_assigned_intake_cmd(
+            calls[1], created_by="sensorium-kanban-reconcile"
+        )
 
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:

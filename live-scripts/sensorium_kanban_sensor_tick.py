@@ -4,7 +4,7 @@
 Dumb fixture layer:
 - runs deterministic Agent Sensorium sensors without internal dispatch/advisory;
 - mirrors new promoted Events into the `sensorium` Kanban board as blocked
-  `sensor:intake:*` tasks;
+  `sensor:intake:*` tasks assigned to `serasubconscious`;
 - creates at most one ready `subconscious:review:*` task assigned to the cheap
   `serasubconscious` profile when unresolved intake exists and no review is
   already active.
@@ -510,7 +510,7 @@ def _compact_event_body(event: dict[str, Any]) -> str:
     }
     return (
         "Sensorium Kanban intake v1. This is substrate, not executable user work.\n\n"
-        "Status semantics: this task is intentionally blocked/unassigned so the gateway "
+        "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the gateway "
         "dispatcher will not run it directly. The serasubconscious review task reads and "
         "settles these intakes.\n\n"
         "Compact event payload:\n"
@@ -537,6 +537,8 @@ def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
         body,
         "--initial-status",
         "blocked",
+        "--assignee",
+        PROFILE,
         "--idempotency-key",
         key,
         "--created-by",
@@ -575,7 +577,7 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         "the event-driven bridge never mirrored it. The reconciliation pass mirrors "
         "it now so an above-threshold candidate cannot remain a quiet pending "
         "activation invisible to Kanban.\n\n"
-        "Status semantics: this task is intentionally blocked/unassigned so the "
+        "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the "
         "gateway dispatcher will not run it directly. The serasubconscious review "
         "task reads and settles these intakes.\n\n"
         "Compact candidate payload:\n"
@@ -604,6 +606,8 @@ def _create_candidate_intake(candidate: dict[str, Any]) -> dict[str, Any]:
         body,
         "--initial-status",
         "blocked",
+        "--assignee",
+        PROFILE,
         "--idempotency-key",
         key,
         "--created-by",

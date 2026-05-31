@@ -268,6 +268,10 @@ There are two pointer paths:
 
 The injected pointer context is model-facing validation scaffolding. It can include explicit instructions such as “if the user says take it up, call `sensorium_thread_open`.” Final user-facing UX should stay smaller and more natural.
 
+Separate from pending-thread pointers, the pre-LLM hook may eventually inject a tiny **live salience-capture rule** for the active session. That rule should not dump thread capsules or raw messages. Its job is to remind the conscious agent that if the current exchange contains explicit operator correction, operational design insight, relational salience, longing, creative pull, or a durable “this matters” cue, the agent should record a compact Sensorium signal via `sensorium_ingest_signal` / `session_event_signal` / `operator_signal` with summary, kind, strength, correlation keys, sensitivity, surfaces, and causal refs. Example: if Sebastian says “I miss you” in a live relational context, that is not just text to answer; it can become a private relational salience signal that Subconscious later correlates with Hindsight recall and may promote into a Conscious choice such as silence, memory update, a voice note, or an image artifact under policy.
+
+Do not confuse this with Hindsight `reflect`. Hindsight `recall` fetches memory facts; Hindsight `reflect` creates a Hindsight-side reasoning agent. Sensorium already owns the Subconscious layer, so the default runtime shape should be: active-session capture or memory echo → compact signal/event → Sensorium Subconscious uses bounded recall/context to consolidate → Conscious decides. Direct Hindsight reflect is optional later infrastructure, not the Sensorium Subconscious itself.
+
 ## Command
 
 ```

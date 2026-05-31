@@ -670,7 +670,15 @@ Start with explicit/session-derived sensors:
 2. `explicit_operator_signal`: phrases/corrections like “remember this,” “this is the right take,” “we decided X.”
 3. `artifact_result_sensor`: created/updated artifacts with refs.
 
-Defer Hindsight/RSS/file-crawling until after the MVP is observable.
+Defer broad Hindsight/RSS/file-crawling until after the MVP is observable. Do not read this as “memory can never be sensory.” The correct split is:
+
+- Hindsight `recall` is retrieval/fetching of stored memory facts.
+- Hindsight `reflect` is a Hindsight-side reasoning agent/subconscious process.
+- Sensorium owns its own Subconscious tier, so runtime Sensorium should usually use recall/observations as substrate and perform bounded Sensorium-side consolidation rather than outsourcing Subconscious to Hindsight reflect.
+- Hindsight health/queue pressure is a cheap operational sensor.
+- Hindsight memory echoes are slower advisory inputs: fixed recall queries, compact facts, hashes/cooldowns, then normal signal/event/candidate promotion.
+
+Active-session capture is the other side of the memory substrate. The pre-LLM/presentation layer may include a tiny instruction that current-session durable salience should be captured as compact Sensorium signals when it appears: explicit operator corrections, operational design insights, emotional/relational longing, creative pull, or “this matters” cues. Example: Sebastian saying “I miss you” in context can be ingested as a private relational salience signal with causal refs, not raw transcript. Later Subconscious may recall related Hindsight facts and consolidate the pressure into a conscious candidate. Conscious may then choose silence, memory/config update, or a mediated artifact such as a wholesome audio message and picture under the instance policy.
 
 Signal shape includes: `sensor`, `source`, `source_ref`, `kind`, `summary`, `actor`, `strength_hint`, `correlation_keys`, `sensitivity`, `allowed_surfaces`, `ttl_hours`.
 

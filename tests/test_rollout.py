@@ -139,20 +139,26 @@ def test_live_script_tick_sync(tmp_path):
 
     items = rollout.get_managed_items(source_root, target_root, scripts_target)
 
-    # Verify the tick script appears in items with correct destination
+    # Verify the tick script appears in items with both destinations:
+    # plugin live-scripts/ for audit/source parity and ~/.hermes/scripts/ for runtime.
     tick_items = [
         (src, dst) for src, dst in items
         if src.name == "sensorium_kanban_sensor_tick.py"
     ]
-    assert len(tick_items) == 1, f"Expected exactly one tick item, got: {tick_items}"
-    tick_src, tick_dst = tick_items[0]
-    assert tick_src == source_root / "live-scripts" / "sensorium_kanban_sensor_tick.py"
-    assert tick_dst == scripts_target / "sensorium_kanban_sensor_tick.py"
+    assert len(tick_items) == 2, f"Expected two tick items, got: {tick_items}"
+    tick_src = source_root / "live-scripts" / "sensorium_kanban_sensor_tick.py"
+    assert {src for src, _ in tick_items} == {tick_src}
+    tick_dsts = {dst for _, dst in tick_items}
+    assert tick_dsts == {
+        target_root / "live-scripts" / "sensorium_kanban_sensor_tick.py",
+        scripts_target / "sensorium_kanban_sensor_tick.py",
+    }
 
-    # Sync and verify the file was actually copied
+    # Sync and verify both copies were actually written.
     rollout.do_sync(items, dry_run=False)
-    assert tick_dst.exists(), "Tick script was not copied to scripts_target"
-    assert tick_dst.read_text() == "# kanban sensor tick\n"
+    for tick_dst in tick_dsts:
+        assert tick_dst.exists(), f"Tick script was not copied to {tick_dst}"
+        assert tick_dst.read_text() == "# kanban sensor tick\n"
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,9 @@ class FakePluginContext:
         self.skills[name] = {"path": path, **kwargs}
 
     def register_hook(self, name, handler, **kwargs):
-        self.hooks[name] = {"handler": handler, **kwargs}
+        if name not in self.hooks:
+            self.hooks[name] = {"handlers": [], "kwargs": {}}
+        self.hooks[name]["handlers"].append(handler)
 
 
 def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
@@ -156,7 +158,7 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
 
     ctx = FakePluginContext()
     register(ctx)
-    hook = ctx.hooks["pre_llm_call"]["handler"]
+    hook = ctx.hooks["pre_llm_call"]["handlers"][0]
 
     result = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result is not None
@@ -167,6 +169,13 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
     result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result2 is not None
     assert "thread_id=\"sth_hooktest\"" in result2["context"]
+
+    # Verify the salience hook is also registered (second handler)
+    salience_hook = ctx.hooks["pre_llm_call"]["handlers"][1]
+    salience_result = salience_hook(platform="local", session_id="s1", state_dir=str(tmp_path))
+    assert salience_result is not None
+    assert "Sensorium Salience Hook" in salience_result["context"]
+    assert "sensorium_ingest_signal" in salience_result["context"]
 
 
 def test_root_plugin_entrypoint_reexports_register():

@@ -410,6 +410,70 @@ class TestHindsightPressure:
         assert "memory_text" not in sig
         assert "raw" not in sig
 
+    def test_hindsight_refresh_only_bounded_backlog_is_healthy(self):
+        sample = {
+            "api_available": True,
+            "pending_total": 76,
+            "processing_total": 0,
+            "failed_total": 9,
+            "operation_counts": {
+                "pending": {"refresh_mental_model": 76},
+                "processing": {},
+                "failed": {"refresh_mental_model": 9},
+            },
+            "operation_counts_truncated": False,
+        }
+
+        sig, state = classify_hindsight_pressure(sample, state={})
+
+        assert sig is None
+        assert state["level"] == "healthy"
+        assert state["last_sample"]["core_pending_total"] == 0
+        assert state["last_sample"]["refresh_pending_total"] == 76
+
+    def test_hindsight_refresh_only_large_backlog_is_maintenance_not_critical(self):
+        sample = {
+            "api_available": True,
+            "pending_total": 5054,
+            "processing_total": 0,
+            "failed_total": 9,
+            "operation_counts": {
+                "pending": {"refresh_mental_model": 5054},
+                "processing": {},
+                "failed": {"refresh_mental_model": 9},
+            },
+            "operation_counts_truncated": False,
+        }
+
+        sig, state = classify_hindsight_pressure(sample, state={})
+
+        assert sig is not None
+        assert sig["pressure_level"] == "degraded"
+        assert sig["metric_family"] == "refresh_mental_model"
+        assert sig["values"]["core_pending_total"] == 0
+        assert state["level"] == "degraded"
+
+    def test_hindsight_core_operation_backlog_still_critical(self):
+        sample = {
+            "api_available": True,
+            "pending_total": 250,
+            "processing_total": 0,
+            "failed_total": 0,
+            "operation_counts": {
+                "pending": {"retain": 250},
+                "processing": {},
+                "failed": {},
+            },
+            "operation_counts_truncated": False,
+        }
+
+        sig, state = classify_hindsight_pressure(sample, state={})
+
+        assert sig is not None
+        assert sig["pressure_level"] == "critical"
+        assert sig["metric_family"] == "core_pending"
+        assert state["last_sample"]["core_pending_total"] == 250
+
 
 class TestKanbanPressure:
     def test_kanban_sample_reads_counts_only(self, tmp_path):

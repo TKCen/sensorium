@@ -6,7 +6,7 @@ Usage:
   sensorium_plugin_rollout.py --help
 
 Managed paths (relative to repo root → plugin install root):
-  agent_sensorium/   dashboard/   scripts/   skills/
+  agent_sensorium/   dashboard/   scripts/   skills/   live-scripts/
   plugin.yaml   __init__.py   README.md   pyproject.toml
   live-scripts/sensorium_kanban_sensor_tick.py → {scripts_target}/sensorium_kanban_sensor_tick.py
 """
@@ -82,6 +82,7 @@ _MANAGED_DIRS = [
     "dashboard",
     "scripts",
     "skills",
+    "live-scripts",
 ]
 
 # Individual files to copy (src relative → dst relative, same name)

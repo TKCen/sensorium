@@ -38,6 +38,7 @@ def register(ctx) -> None:
     """Register Agent Sensorium plugin tools, command, and bundled skill."""
     from .commands import handle_sensorium_command
     from .pointers import handle_pointer_pre_llm
+    from .pre_llm_salience import handle_salience_pre_llm
     from .tools import (
         handle_sensorium_action_attach,
         handle_sensorium_action_prepare,
@@ -1262,6 +1263,16 @@ def register(ctx) -> None:
     ctx.register_hook(
         "pre_llm_call",
         lambda **kw: handle_pointer_pre_llm(
+            instance=_default_instance(),
+            platform=kw.get("platform") or "local",
+            session_id=kw.get("session_id") or "",
+            state_dir=kw.get("state_dir"),
+        ),
+    )
+
+    ctx.register_hook(
+        "pre_llm_call",
+        lambda **kw: handle_salience_pre_llm(
             instance=_default_instance(),
             platform=kw.get("platform") or "local",
             session_id=kw.get("session_id") or "",

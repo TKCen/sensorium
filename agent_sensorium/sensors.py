@@ -1150,39 +1150,153 @@ def _http_json(url: str, *, timeout_seconds: float) -> dict | list:
         return json.loads(resp.read(200_000).decode("utf-8", errors="ignore") or "{}")
 
 
-def hindsight_pressure_sample(*, base_url: str = "http://localhost:8888", bank_id: str = "hermes", timeout_seconds: float = 1.0) -> dict:
+HINDSIGHT_MAINTENANCE_TASK_TYPES = {"refresh_mental_model"}
+
+
+def _hindsight_operation_status_sample(
+    *,
+    base: str,
+    bank_id: str,
+    status: str,
+    timeout_seconds: float,
+    page_limit: int,
+    max_pages: int,
+) -> tuple[int, dict[str, int], bool]:
+    """Return compact operation counts by task_type for one status.
+
+    Hindsight's operations endpoint currently returns a total per status but does
+    not filter by task_type. Page enough metadata to classify operation-family
+    pressure without retaining operation IDs, documents, prompts, or memory text.
+    """
+    total = 0
+    counts: dict[str, int] = {}
+    fetched = 0
+    safe_limit = max(1, min(int(page_limit or 100), 100))
+    safe_pages = max(1, int(max_pages or 1))
+    for page in range(safe_pages):
+        offset = page * safe_limit
+        url = (
+            f"{base}/v1/default/banks/{urllib.parse.quote(bank_id)}/operations"
+            f"?status={urllib.parse.quote(status)}&limit={safe_limit}&offset={offset}"
+        )
+        data = _http_json(url, timeout_seconds=timeout_seconds)
+        if not isinstance(data, dict):
+            break
+        total = int(data.get("total") or data.get("total_count") or total or 0)
+        ops = data.get("operations") or data.get("items") or []
+        if not isinstance(ops, list) or not ops:
+            break
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            task_type = truncate_text(str(op.get("task_type") or op.get("operation_type") or "unknown"), 80)
+            counts[task_type] = counts.get(task_type, 0) + 1
+            fetched += 1
+        if fetched >= total or len(ops) < safe_limit:
+            break
+    return total, counts, fetched < total
+
+
+def hindsight_pressure_sample(
+    *,
+    base_url: str = "http://localhost:8888",
+    bank_id: str = "hermes",
+    timeout_seconds: float = 1.0,
+    page_limit: int = 100,
+    max_pages: int = 20,
+) -> dict:
     """Sample Hindsight operation pressure via local API counts only."""
     base = base_url.rstrip("/")
     try:
         _http_json(f"{base}/health", timeout_seconds=timeout_seconds)
         totals = {"pending_total": 0, "processing_total": 0, "failed_total": 0}
+        operation_counts: dict[str, dict[str, int]] = {}
+        operation_counts_truncated = False
         for status, key in (("pending", "pending_total"), ("processing", "processing_total"), ("failed", "failed_total")):
-            url = f"{base}/v1/default/banks/{urllib.parse.quote(bank_id)}/operations?status={status}&limit=1"
-            data = _http_json(url, timeout_seconds=timeout_seconds)
-            if isinstance(data, dict):
-                totals[key] = int(data.get("total") or data.get("total_count") or len(data.get("operations", []) or data.get("items", []) or []))
-        return {"api_available": True, **totals}
+            total, counts, truncated = _hindsight_operation_status_sample(
+                base=base,
+                bank_id=bank_id,
+                status=status,
+                timeout_seconds=timeout_seconds,
+                page_limit=page_limit,
+                max_pages=max_pages,
+            )
+            totals[key] = total
+            operation_counts[status] = counts
+            operation_counts_truncated = operation_counts_truncated or truncated
+        return {"api_available": True, **totals, "operation_counts": operation_counts, "operation_counts_truncated": operation_counts_truncated}
     except Exception as exc:
-        return {"api_available": False, "error": truncate_text(type(exc).__name__, 80), "pending_total": 0, "processing_total": 0, "failed_total": 0}
+        return {"api_available": False, "error": truncate_text(type(exc).__name__, 80), "pending_total": 0, "processing_total": 0, "failed_total": 0, "operation_counts": {}, "operation_counts_truncated": False}
+
+
+def _hindsight_task_count(counts_by_status: dict, status: str, *, maintenance: bool) -> int:
+    counts = counts_by_status.get(status) if isinstance(counts_by_status, dict) else None
+    if not isinstance(counts, dict):
+        return 0
+    total = 0
+    for task_type, count in counts.items():
+        is_maintenance = str(task_type) in HINDSIGHT_MAINTENANCE_TASK_TYPES
+        if is_maintenance == maintenance:
+            total += int(count or 0)
+    return total
 
 
 def classify_hindsight_pressure(sample: dict, *, state: dict | None = None, config: dict | None = None) -> tuple[dict | None, dict]:
-    cfg = {"pending_degraded": 50, "pending_critical": 200, "failed_degraded": 5, "processing_critical": 20}
+    cfg = {
+        "pending_degraded": 50,
+        "pending_critical": 200,
+        "failed_degraded": 5,
+        "processing_critical": 20,
+        "refresh_pending_degraded": 500,
+        "refresh_failed_degraded": 25,
+        "refresh_processing_degraded": 5,
+    }
     if config:
         cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
     pending = int(sample.get("pending_total", 0) or 0); processing = int(sample.get("processing_total", 0) or 0); failed = int(sample.get("failed_total", 0) or 0)
+    counts_by_status = sample.get("operation_counts") if isinstance(sample.get("operation_counts"), dict) else {}
+    has_family_counts = bool(counts_by_status)
+    if has_family_counts:
+        refresh_pending = _hindsight_task_count(counts_by_status, "pending", maintenance=True)
+        refresh_processing = _hindsight_task_count(counts_by_status, "processing", maintenance=True)
+        refresh_failed = _hindsight_task_count(counts_by_status, "failed", maintenance=True)
+        core_pending = max(0, pending - refresh_pending)
+        core_processing = max(0, processing - refresh_processing)
+        core_failed = max(0, failed - refresh_failed)
+    else:
+        refresh_pending = refresh_processing = refresh_failed = 0
+        core_pending, core_processing, core_failed = pending, processing, failed
     level = "healthy"; family = "memory_queue"; reason = ""
     if not sample.get("api_available", False):
         level = "degraded"; family = "api"; reason = "Hindsight API unavailable"
-    elif pending >= cfg["pending_critical"]:
-        level = "critical"; family = "pending"; reason = f"pending={pending}"
-    elif processing >= cfg["processing_critical"]:
-        level = "critical"; family = "processing"; reason = f"processing={processing}"
-    elif pending >= cfg["pending_degraded"]:
-        level = "degraded"; family = "pending"; reason = f"pending={pending}"
-    elif failed >= cfg["failed_degraded"]:
-        level = "degraded"; family = "failed"; reason = f"failed={failed}"
-    values = {"api_available": bool(sample.get("api_available", False)), "pending_total": pending, "processing_total": processing, "failed_total": failed}
+    elif core_pending >= cfg["pending_critical"]:
+        level = "critical"; family = "core_pending"; reason = f"core_pending={core_pending}"
+    elif core_processing >= cfg["processing_critical"]:
+        level = "critical"; family = "core_processing"; reason = f"core_processing={core_processing}"
+    elif core_pending >= cfg["pending_degraded"]:
+        level = "degraded"; family = "core_pending"; reason = f"core_pending={core_pending}"
+    elif core_failed >= cfg["failed_degraded"]:
+        level = "degraded"; family = "core_failed"; reason = f"core_failed={core_failed}"
+    elif refresh_pending >= cfg["refresh_pending_degraded"]:
+        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model pending={refresh_pending}"
+    elif refresh_processing >= cfg["refresh_processing_degraded"]:
+        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model processing={refresh_processing}"
+    elif refresh_failed >= cfg["refresh_failed_degraded"]:
+        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model failed={refresh_failed}"
+    values = {
+        "api_available": bool(sample.get("api_available", False)),
+        "pending_total": pending,
+        "processing_total": processing,
+        "failed_total": failed,
+        "core_pending_total": core_pending,
+        "core_processing_total": core_processing,
+        "core_failed_total": core_failed,
+        "refresh_pending_total": refresh_pending,
+        "refresh_processing_total": refresh_processing,
+        "refresh_failed_total": refresh_failed,
+        "operation_counts": counts_by_status,
+        "operation_counts_truncated": bool(sample.get("operation_counts_truncated", False)),
+    }
     return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.hindsight_pressure", source="memory", kind="hindsight_pressure", correlation_key="hindsight-pressure")
 
 
