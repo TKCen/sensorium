@@ -159,6 +159,30 @@ def test_non_dry_run_is_disabled_by_default(state_dir):
     assert store.read_jsonl("candidates") == []
 
 
+def test_disabled_path_never_invokes_model_transport(state_dir):
+    """When enabled=False the model transport must not be called (no outbound requests)."""
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    store.ensure_dirs()
+
+    transport_calls = []
+
+    def sentinel_transport(url, payload, headers, timeout):
+        transport_calls.append(url)
+        return {"choices": [{"message": {"content": '{"action":"DROP","rationale":"x"}'}}]}
+
+    result = run_subconscious_advisory(
+        store,
+        advisory_output=None,
+        enabled=False,
+        dry_run=False,
+        config={"model_enabled": True, "model_api_key": "k"},
+        model_generate=lambda context, config: sentinel_transport("sentinel", {}, {}, 0),
+    )
+    assert result["action"] == "disabled"
+    assert transport_calls == [], "transport must not be called when advisory is disabled"
+    assert store.read_jsonl("candidates") == []
+
+
 def test_enabled_non_dry_run_creates_internal_candidate_only(state_dir):
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
