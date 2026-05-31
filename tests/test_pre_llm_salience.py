@@ -13,7 +13,7 @@ if str(workspace) not in sys.path:
     sys.path.insert(0, str(workspace))
 
 from agent_sensorium.pre_llm_salience import (  # noqa: E402
-    SALIENT_CUE_KINDS,
+    EXAMPLE_SALIENCE_KINDS,
     handle_salience_pre_llm,
     salience_context_for_llm,
 )
@@ -38,10 +38,16 @@ class TestSalienceContextForLl:
         ctx = salience_context_for_llm()
         assert "Sensorium Salience Hook" in ctx
 
-    def test_mentions_all_signal_kinds(self):
+    def test_mentions_example_signal_kinds_without_boundary_language(self):
         ctx = salience_context_for_llm()
-        for kind in SALIENT_CUE_KINDS:
-            assert kind in ctx, f"Missing kind: {kind}"
+        for kind in EXAMPLE_SALIENCE_KINDS:
+            assert kind in ctx, f"Missing example kind: {kind}"
+        lower = ctx.lower()
+        assert "examples" in lower
+        assert "not exhaustive" in lower
+        assert "choose" in lower
+        assert "appropriate kind (" not in ctx
+        assert "supported kinds" not in lower
 
     def test_mentions_sensorium_ingest_signal(self):
         ctx = salience_context_for_llm()

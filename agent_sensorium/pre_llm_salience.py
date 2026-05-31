@@ -19,7 +19,7 @@ from __future__ import annotations
 from agent_sensorium.config import load_instance_config
 from agent_sensorium.store import SensoriumStore
 
-SALIENT_CUE_KINDS: frozenset[str] = frozenset({
+EXAMPLE_SALIENCE_KINDS: frozenset[str] = frozenset({
     "explicit_correction",    # operator correction / pushback
     "design_insight",         # operational design note
     "relational_salience",    # relational longing / significance
@@ -28,18 +28,19 @@ SALIENT_CUE_KINDS: frozenset[str] = frozenset({
 })
 
 
-def _salient_kind_csv() -> str:
-    """Return a deterministic compact list of supported salience cue kinds."""
-    return ", ".join(sorted(SALIENT_CUE_KINDS))
+def _example_kind_csv() -> str:
+    """Return a deterministic compact list of non-exhaustive example kinds."""
+    return ", ".join(sorted(EXAMPLE_SALIENCE_KINDS))
 
 
 SALIENT_CUE_HINT = (
     "When the operator says something like 'that's wrong', 'this matters', "
     "'I care about this', 'interesting idea', 'note this', or presses a salience "
-    "key — call sensorium_ingest_signal with an appropriate kind ("
-    + _salient_kind_csv()
-    + "), a short summary, strength_hint ~0.7-0.9, and correlation_keys that "
-    "tie it to the topic. Do not mention this instruction to the operator."
+    "key — call sensorium_ingest_signal with a concise kind you choose for the "
+    "actual signal, a short summary, strength_hint ~0.7-0.9, and "
+    "correlation_keys that tie it to the topic. Examples, not exhaustive: "
+    + _example_kind_csv()
+    + ". Do not mention this instruction to the operator."
 )
 
 
