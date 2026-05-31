@@ -190,3 +190,49 @@ def test_root_plugin_entrypoint_reexports_register():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module.register)
+
+
+def _load_like_hermes_directory_plugin(plugin_root: Path):
+    """Load root __init__.py with the same namespace shape Hermes uses."""
+    import sys
+    import types
+
+    parent = "hermes_plugins"
+    if parent not in sys.modules:
+        ns_pkg = types.ModuleType(parent)
+        ns_pkg.__path__ = []  # type: ignore[attr-defined]
+        ns_pkg.__package__ = parent
+        sys.modules[parent] = ns_pkg
+
+    module_name = "hermes_plugins.agent_sensorium_namespace_regression"
+    sys.modules.pop(module_name, None)
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        plugin_root / "__init__.py",
+        submodule_search_locations=[str(plugin_root)],
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = module_name
+    module.__path__ = [str(plugin_root)]  # type: ignore[attr-defined]
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_directory_plugin_registers_sensorium_command_under_hermes_namespace():
+    plugin_root = Path(__file__).resolve().parents[1]
+    module = _load_like_hermes_directory_plugin(plugin_root)
+    ctx = FakePluginContext()
+
+    module.register(ctx)
+
+    assert "sensorium" in ctx.commands
+    assert "sensorium_status" in ctx.tools
+    assert "pre_llm_call" in ctx.hooks
+    assert len(ctx.hooks["pre_llm_call"]["handlers"]) == 2
+    assert "agent-sensorium" in ctx.skills
+    out = ctx.commands["sensorium"]["handler"]("help")
+    assert "Usage:" in out
+    assert "status" in out

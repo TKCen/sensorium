@@ -16,8 +16,8 @@ reviewed, shared, or left silent.
 
 from __future__ import annotations
 
-from agent_sensorium.config import load_instance_config
-from agent_sensorium.store import SensoriumStore
+from .config import load_instance_config
+from .store import SensoriumStore
 
 EXAMPLE_SALIENCE_KINDS: frozenset[str] = frozenset({
     "explicit_correction",    # operator correction / pushback
