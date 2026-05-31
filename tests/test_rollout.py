@@ -204,7 +204,7 @@ def test_no_backup_flag(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Test 8: do_backup with dry_run=False creates a sibling backup directory
+# Test 8: do_backup with dry_run=False creates a backup outside plugins/
 # ---------------------------------------------------------------------------
 
 def test_backup_creates_dir(tmp_path):
@@ -218,8 +218,8 @@ def test_backup_creates_dir(tmp_path):
     assert backup_path is not None, "do_backup should return the backup path"
     backup_dir = Path(backup_path)
     assert backup_dir.exists(), f"Backup directory {backup_dir} was not created"
-    # Backup should be a sibling of target_root (or a descendant of the parent)
-    assert backup_dir.parent == target_root.parent or backup_dir.is_relative_to(target_root.parent)
+    assert backup_dir.is_relative_to(tmp_path / "hermes" / "backups" / "agent-sensorium-rollout")
+    assert not backup_dir.is_relative_to(tmp_path / "hermes" / "plugins")
     # Backup should contain at least one of the files
     all_backed_up = list(backup_dir.rglob("*"))
     assert len(all_backed_up) > 0, "Backup directory is empty"

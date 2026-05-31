@@ -194,19 +194,24 @@ def file_hash(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def do_backup(target_root: Path, dry_run: bool) -> Path | None:
-    """Create a timestamped backup of the existing target dir.
+    """Create a timestamped backup outside the live plugin search tree.
 
-    Returns the backup path, or None if nothing to back up.
+    Dashboard discovery scans every directory under ``~/.hermes/plugins`` for
+    ``dashboard/manifest.json``. Storing backup copies there makes old backups
+    shadow the real plugin because hidden ``.sensorium-backup-*`` directories
+    sort before ``agent-sensorium``. Keep backups under ``~/.hermes/backups``.
     """
     if not target_root.exists():
         return None
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = target_root.parent / f".sensorium-backup-{timestamp}"
+    backup_root = target_root.parent.parent / "backups" / "agent-sensorium-rollout"
+    backup_path = backup_root / f"sensorium-backup-{timestamp}"
 
     print(f"[BACKUP] {target_root} → {backup_path}")
 
     if not dry_run:
+        backup_root.mkdir(parents=True, exist_ok=True)
         shutil.copytree(target_root, backup_path)
 
     return backup_path
