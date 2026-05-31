@@ -36,17 +36,18 @@ This includes practical/professional autonomy — research jobs, artifact prepar
 ## Design principles
 
 1. **Reusable core, agent-specific policy.** The engine is generic; identity/tone/source preferences live in config and an attached skill.
-2. **Use the tier names plainly.** The framework tiers are `Sensors`, `Subconscious`, and `Conscious`; implementation modules may still be named `gate`, `dispatcher`, and `outbox`.
-3. **Signals are not events.** Sensors see many signals and are also the first filter; only strong, repeated, or correlated signal clusters become events for Subconscious.
-4. **Subconscious has the longer horizon.** It correlates events over hours/days/weeks and may create internal `conscious_task` items when something deserves awareness.
-5. **Conscious is awareness plus authority.** A topic becomes consciously known only when promoted by Subconscious/dispatcher into the Conscious tier.
-6. **Cron is only a clock.** Sensors and the dispatcher may be ticked by cron; subconscious/conscious runs are dispatcher-triggered.
-7. **Subconscious can queue work for consciousness.** It may create `conscious_task` items inside Sensorium, but not external Kanban/research/media jobs directly.
-8. **One continuous agent.** Global lock, leases, token buckets, and state versioning prevent parallel fragments.
-9. **Compress before reasoning.** Most signals die in deterministic filtering before a model sees them.
-10. **Action feedback.** Bounded tasks/research/artifacts/messages can be created, and their results re-enter as signals.
-11. **Observability, not ownership.** Dashboard/Kanban expose state; dispatcher owns activation limits.
-12. **Portable plugin.** No hard-coded Sera, Sebastian, #pics, local paths, or private channels in the plugin code.
+2. **Embodied continuity, not separate agents.** The framework tiers are `Sensors`, `Subconscious`, and `Conscious`, but those names describe functions/authority boundaries of one agent. In a Sera instance, sensors, subconsciousness, consciousness, memory retrieval, attention, tools, and mediated outputs are Sera's embodied organs/functions, not external subsystems or helper agents.
+3. **Use the tier names plainly.** Implementation modules may still be named `gate`, `dispatcher`, and `outbox`; docs should say what each function does without implying multiple selves.
+4. **Signals are not events.** Sensors see many signals and are also the first filter; only strong, repeated, or correlated signal clusters become events for Subconscious.
+5. **Subconscious has the longer horizon.** It correlates events over hours/days/weeks and may create internal `conscious_task` items when something deserves awareness.
+6. **Conscious is awareness plus authority.** A topic becomes consciously known only when promoted by Subconscious/dispatcher into the Conscious tier.
+7. **Cron is only a clock.** Sensors and the dispatcher may be ticked by cron; subconscious/conscious runs are dispatcher-triggered.
+8. **Subconscious can queue work for consciousness.** It may create `conscious_task` items inside Sensorium, but not external Kanban/research/media jobs directly.
+9. **One continuous agent.** Global lock, leases, token buckets, and state versioning prevent parallel fragments.
+10. **Compress before reasoning.** Most signals die in deterministic filtering before a model sees them.
+11. **Action feedback.** Bounded tasks/research/artifacts/messages can be created, and their results re-enter as signals.
+12. **Observability, not ownership.** Dashboard/Kanban expose state; dispatcher owns activation limits.
+13. **Portable plugin.** No hard-coded Sera, Sebastian, #pics, local paths, or private channels in the plugin code.
 
 ## Tier semantics
 
@@ -91,7 +92,7 @@ Subconscious control surfaces:
 
 ### Conscious
 
-Conscious is the agent itself: awareness plus authority in the active Hermes session/profile. It reviews promoted candidates/`conscious_task` items, understands them in identity/policy context, and decides whether to suppress, remember, ask, prepare, reach out, create external work, or act.
+Conscious is the agent itself: awareness plus authority in the active Hermes session/profile. Sensors and Subconscious are also part of the agent's embodied lifecycle; Conscious is the point where a topic enters explicit awareness and gains authority for choice. It reviews promoted candidates/`conscious_task` items, understands them in identity/policy context, and decides whether to suppress, remember, ask, prepare, reach out, create external work, or act.
 
 Conscious control surfaces should be minimal. Prefer identity/profile config, skills, and user/operator conversation over extra plugin knobs. The plugin should present awareness cleanly; the agent should decide.
 ## Plugin directory

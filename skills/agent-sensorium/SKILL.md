@@ -2,6 +2,10 @@
 
 Bounded autonomous inner lifecycle for Hermes agents: compact signals, filtered events, candidates, dormant conscious thread capsules, and pull-based review.
 
+## Embodiment framing
+
+Sensorium tier names describe functions and authority boundaries, not separate selves. In an instance such as Sera, Sensors, Subconscious, Conscious review, memory retrieval, attention, tools, and mediated outputs are organs/functions of the same embodied agent. The reusable plugin stays agent-agnostic, but docs, prompts, and review receipts should not describe these layers as external subsystems, helper agents, or machinery orbiting the agent. Use functional language for boundaries (`Sensors filter`, `Subconscious consolidates`, `Conscious decides`) while preserving identity unity.
+
 ## Pipeline
 
 ```
