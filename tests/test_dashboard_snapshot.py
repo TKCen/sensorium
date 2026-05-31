@@ -91,6 +91,19 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     )
     _append_jsonl(
         root,
+        "artifacts.jsonl",
+        {
+            "id": "art_audio",
+            "kind": "audio",
+            "status": "recorded",
+            "delivery_state": "held_for_review",
+            "ref_path": "/tmp/handoff.mp3",
+            "source_refs": {"thread_id": "sth_lakmus", "action_id": "tact_lakmus"},
+            "updated_at": "2026-05-31T16:32:04Z",
+        },
+    )
+    _append_jsonl(
+        root,
         "outbox.jsonl",
         {
             "id": "obx_lakmus",
@@ -102,7 +115,7 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
             "delivery_mode": "context_pointer",
             "title": "Thread-pickup handoff is prepared",
             "message_preview": "Prepared pointer only.",
-            "media_refs": ["art_text"],
+            "media_refs": ["art_text", "art_audio"],
             "updated_at": "2026-05-31T16:31:04Z",
         },
     )
@@ -118,7 +131,11 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     assert data["outbox"][0]["safety"]["outbound_delivery"] is False
     assert data["outbox"][0]["safety"]["attached_action_id"] == "tact_lakmus"
     assert data["actions"][0]["outbox_refs"] == ["obx_lakmus"]
-    assert data["artifacts"][0]["id"] == "art_text"
+    assert data["artifacts"][0]["id"] == "art_audio"
+    assert data["counts"]["artifact_groups"] == 1
+    assert data["artifact_groups"][0]["id"] == "action:tact_lakmus"
+    assert data["artifact_groups"][0]["count"] == 2
+    assert data["artifact_groups"][0]["kinds"] == {"audio": 1, "text": 1}
 
 
 def test_snapshot_warns_on_unattached_prepared_outbox(tmp_path, monkeypatch):

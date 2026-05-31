@@ -244,6 +244,102 @@ def _artifact_item(artifact: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _artifact_group_key(artifact: dict[str, Any]) -> tuple[str, str]:
+    raw_source_refs = artifact.get("source_refs")
+    source_refs: dict[str, Any] = raw_source_refs if isinstance(raw_source_refs, dict) else {}
+    raw_provenance = artifact.get("provenance")
+    provenance: dict[str, Any] = raw_provenance if isinstance(raw_provenance, dict) else {}
+
+    for group_type, value in (
+        ("action", source_refs.get("action_id")),
+        ("thread", source_refs.get("thread_id")),
+        ("candidate", source_refs.get("candidate_id")),
+        ("task", provenance.get("task_id")),
+        ("task", provenance.get("kanban_task")),
+        ("fingerprint", provenance.get("fingerprint")),
+    ):
+        if value:
+            return group_type, str(value)
+
+    ref_path = str(artifact.get("ref_path") or "")
+    if ref_path:
+        return "ref", ref_path
+    return "artifact", str(artifact.get("id") or "unknown")
+
+
+def _artifact_group_title(
+    group_type: str,
+    group_id: str,
+    items: list[dict[str, Any]],
+    *,
+    thread_by_id: dict[str, dict[str, Any]],
+    action_by_id: dict[str, dict[str, Any]],
+    candidate_by_id: dict[str, dict[str, Any]],
+) -> str:
+    if group_type == "action":
+        action = action_by_id.get(group_id, {})
+        return _truncate(action.get("title") or action.get("intent") or f"Action {group_id}", 120)
+    if group_type == "thread":
+        thread = thread_by_id.get(group_id, {})
+        return _truncate(_thread_title(thread) if thread else f"Thread {group_id}", 120)
+    if group_type == "candidate":
+        candidate = candidate_by_id.get(group_id, {})
+        return _truncate(candidate.get("summary") or f"Candidate {group_id}", 120)
+    if group_type == "task":
+        return f"Kanban task {group_id}"
+    if group_type == "fingerprint":
+        return f"Signal lineage {group_id}"
+    if group_type == "ref":
+        return Path(group_id).name
+    first = items[0] if items else {}
+    return _truncate(first.get("why_created") or first.get("id") or "Artifact group", 120)
+
+
+def _artifact_groups(
+    artifacts: list[dict[str, Any]],
+    *,
+    thread_by_id: dict[str, dict[str, Any]],
+    action_by_id: dict[str, dict[str, Any]],
+    candidate_by_id: dict[str, dict[str, Any]],
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for artifact in artifacts:
+        grouped.setdefault(_artifact_group_key(artifact), []).append(artifact)
+
+    groups: list[dict[str, Any]] = []
+    for (group_type, group_id), rows in grouped.items():
+        rows.sort(key=_sort_key, reverse=True)
+        item_cards = [_artifact_item(row) for row in rows]
+        delivery_states = Counter(str(row.get("delivery_state") or "unknown") for row in rows)
+        kinds = Counter(str(row.get("kind") or "unknown") for row in rows)
+        latest = rows[0] if rows else {}
+        groups.append(
+            {
+                "id": f"{group_type}:{group_id}",
+                "group_type": group_type,
+                "group_id": group_id,
+                "title": _artifact_group_title(
+                    group_type,
+                    group_id,
+                    rows,
+                    thread_by_id=thread_by_id,
+                    action_by_id=action_by_id,
+                    candidate_by_id=candidate_by_id,
+                ),
+                "count": len(rows),
+                "kinds": dict(kinds),
+                "delivery_states": dict(delivery_states),
+                "held_count": delivery_states.get("held_for_review", 0),
+                "prepared_count": delivery_states.get("prepared", 0),
+                "latest_updated_at": latest.get("updated_at") or latest.get("ts"),
+                "items": item_cards[:5],
+            }
+        )
+    groups.sort(key=lambda g: str(g.get("latest_updated_at") or ""), reverse=True)
+    return groups[:limit]
+
+
 def _find_action_for_outbox(actions: list[dict[str, Any]]) -> dict[str, str]:
     action_for_outbox: dict[str, str] = {}
     for action in actions:
@@ -555,6 +651,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     artifacts = rows["artifacts"]
 
     thread_by_id = _index_by_id(threads)
+    candidate_by_id = _index_by_id(candidates)
     action_by_id = _index_by_id(actions)
     artifact_by_id = _index_by_id(artifacts)
     action_for_outbox = _find_action_for_outbox(actions)
@@ -568,6 +665,13 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     recent_outbox = sorted(outbox, key=_sort_key, reverse=True)
     recent_actions = sorted(actions, key=_sort_key, reverse=True)
     recent_artifacts = sorted(artifacts, key=_sort_key, reverse=True)
+    artifact_groups = _artifact_groups(
+        artifacts,
+        thread_by_id=thread_by_id,
+        action_by_id=action_by_id,
+        candidate_by_id=candidate_by_id,
+        limit=10,
+    )
     open_outbox = [r for r in outbox if r.get("status") in OPEN_OUTBOX_STATUSES]
     open_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
 
@@ -603,6 +707,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "actions": len(actions),
         "open_actions": len(open_actions),
         "artifacts": len(artifacts),
+        "artifact_groups": len(artifact_groups),
         "held_artifacts": sum(1 for a in artifacts if a.get("delivery_state") == "held_for_review"),
         "outbox": len(outbox),
         "prepared_outbox": sum(1 for o in outbox if o.get("status") == "prepared"),
@@ -649,6 +754,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "threads": [_thread_item(t) for t in visible_threads[:8]],
         "actions": [_action_item(a) for a in recent_actions[:10]],
         "artifacts": [_artifact_item(a) for a in recent_artifacts[:10]],
+        "artifact_groups": artifact_groups,
         "outbox": outbox_items,
         "lifecycle_warnings": warnings,
         "decisions": [_decision_item(d) for d in decisions[-14:]][::-1],
