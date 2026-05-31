@@ -8,6 +8,11 @@ from agent_sensorium.improvement import (
     record_attention_policy_decision,
     run_improvement_collector,
 )
+from agent_sensorium.actuator_contracts import (
+    MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE,
+    memory_grounded_review_contract,
+    requires_memory_grounding,
+)
 from agent_sensorium.store import SensoriumStore
 
 
@@ -53,6 +58,43 @@ def _canary_drop_receipt(candidate_id: str) -> dict:
             "sensorium-self-improvement-proof",
         ]
     }
+
+
+def _memory_fact(idx: int, *, affected: bool = False) -> dict:
+    return {
+        "fact_ref": f"mem_{idx}",
+        "fact": f"Memory fact {idx}: Sebastian wants feedback tendency grounded in lived context, not scalar tuning.",
+        "source_tool": "hindsight_recall",
+        "source_refs": [f"hindsight://memory/{idx}"],
+        "query": "feedback tendency memory grounding",
+        "affected_choice": affected,
+    }
+
+
+def _manual_attention_candidate(store, *, memory_required: bool = True) -> str:
+    candidate = {
+        "id": "cand_memory_contract" if memory_required else "cand_operational",
+        "status": "candidate",
+        "kind": ATTENTION_POLICY_KIND,
+        "pressure": 0.75,
+        "summary": (
+            "Explicit correction: feedback tendency must be memory grounded, not scalar."
+            if memory_required else
+            "Operational kanban pressure repeated drops should stay ordinary policy review."
+        ),
+        "correlation_keys": (
+            ["explicit-correction", "memory-grounding", "feedback-tendency"]
+            if memory_required else
+            ["kanban_pressure", "repeat-noise"]
+        ),
+        "sensitivity": "private",
+        "allowed_surfaces": ["local", "discord"],
+        "improvement_meta": {"evidence_key": "manual-memory" if memory_required else "kanban_pressure:repeat-noise"},
+    }
+    if memory_required:
+        candidate["conscious_review_contract"] = memory_grounded_review_contract(candidate)
+    store.append_jsonl("candidates", candidate)
+    return candidate["id"]
 
 
 def test_collect_repeated_drop_evidence_crosses_threshold(store):
@@ -190,6 +232,98 @@ def test_collector_creates_single_attention_policy_candidate(store):
     second = run_improvement_collector(store)
     assert second["action"] == "already_exists"
     assert len(store.read_jsonl("candidates")) == 1
+
+
+def test_memory_grounded_contract_triggers_for_relational_identity_and_correction_rows():
+    assert requires_memory_grounding({"kind": "relational_salience", "summary": "I miss you"})
+    assert requires_memory_grounding({"kind": "identity", "summary": "Sera embodiment insight"})
+    assert requires_memory_grounding({"kind": "explicit_correction", "summary": "that's wrong"})
+    assert not requires_memory_grounding({"kind": "kanban_pressure", "correlation_keys": ["repeat-noise"]})
+
+    contract = memory_grounded_review_contract({
+        "kind": "explicit_correction",
+        "summary": "feedback tendency must be memory/context grounded",
+        "correlation_keys": ["feedback-tendency"],
+    })
+    assert contract["type"] == MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE
+    assert contract["retrieval_contract"]["default_tool"] == "hindsight_recall"
+    assert contract["retrieval_contract"]["min_facts"] == 3
+    assert contract["retrieval_contract"]["max_facts"] == 8
+
+
+def test_memory_grounded_decision_requires_retrieval_or_skip_reason(store):
+    candidate_id = _manual_attention_candidate(store, memory_required=True)
+
+    with pytest.raises(ValueError, match="memory-grounded Conscious review"):
+        record_attention_policy_decision(
+            store,
+            candidate_id=candidate_id,
+            decision="NO_CHANGE",
+            reason="Cannot decide without memory grounding.",
+            future_tendency_delta="No change until retrieval exists.",
+            verification_condition="A later review includes memory grounding.",
+            rollback_condition="Retry if the same candidate stays open.",
+        )
+
+    facts = [_memory_fact(1, affected=True), _memory_fact(2), _memory_fact(3)]
+    result = record_attention_policy_decision(
+        store,
+        candidate_id=candidate_id,
+        decision="NO_CHANGE",
+        reason="mem_1 grounds the correction: this is not a threshold-only issue.",
+        future_tendency_delta="Future explicit corrections should request bounded recall before policy decisions.",
+        verification_condition="Next memory-grounded candidate receipt includes fact refs or skip reason.",
+        rollback_condition="Revisit if receipts again omit memory context.",
+        memory_context=facts,
+        cited_memory_fact_refs=["mem_1"],
+    )
+
+    grounding = result["receipt"]["memory_grounding"]
+    assert grounding["retrieval_required"] is True
+    assert grounding["retrieval_skipped"] is False
+    assert grounding["source_tools"] == ["hindsight_recall"]
+    assert grounding["fact_count"] == 3
+    assert grounding["cited_memory_fact_refs"] == ["mem_1"]
+    assert "raw" not in str(grounding).lower()
+
+
+def test_memory_grounded_decision_can_record_retrieval_skipped_reason(store):
+    candidate_id = _manual_attention_candidate(store, memory_required=True)
+
+    result = record_attention_policy_decision(
+        store,
+        candidate_id=candidate_id,
+        decision="HOLD",
+        reason="Retrieval unavailable; hold instead of making scalar tuning claims.",
+        future_tendency_delta="Hold similar corrections when recall cannot be reached rather than converting them into threshold tweaks.",
+        verification_condition="Retry when Hindsight recall is available.",
+        rollback_condition="Close as NO_CHANGE if no recurrence appears after recall returns.",
+        retrieval_skipped_reason="hindsight_recall unavailable in this bounded smoke run",
+    )
+
+    grounding = result["receipt"]["memory_grounding"]
+    assert grounding["retrieval_skipped"] is True
+    assert grounding["retrieval_skipped_reason"].startswith("hindsight_recall unavailable")
+    assert grounding["facts"] == []
+
+
+def test_operational_candidate_not_forced_through_memory_retrieval(store):
+    candidate_id = _manual_attention_candidate(store, memory_required=False)
+
+    result = record_attention_policy_decision(
+        store,
+        candidate_id=candidate_id,
+        decision="NO_CHANGE",
+        reason="Ordinary operational pressure can be reviewed from bounded evidence only.",
+        future_tendency_delta="No memory retrieval requirement for generic kanban_pressure noise.",
+        verification_condition="Future operational reviews still complete without memory_context.",
+        rollback_condition="Revisit if a correction/identity/mediated-presence key appears.",
+    )
+
+    assert "memory_grounding" not in result["receipt"]
+    candidate = store.read_jsonl("candidates")[0]
+    assert candidate["sensitivity"] == "private"
+    assert candidate["allowed_surfaces"] == ["local", "discord"]
 
 
 def test_settlement_gap_has_priority_over_repeated_noise(store):

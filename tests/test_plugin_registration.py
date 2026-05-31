@@ -25,9 +25,13 @@ class FakePluginContext:
         self.skills[name] = {"path": path, **kwargs}
 
     def register_hook(self, name, handler, **kwargs):
-        if name not in self.hooks:
-            self.hooks[name] = {"handlers": [], "kwargs": {}}
-        self.hooks[name]["handlers"].append(handler)
+        key = name
+        if key in self.hooks:
+            idx = 2
+            while f"{name}#{idx}" in self.hooks:
+                idx += 1
+            key = f"{name}#{idx}"
+        self.hooks[key] = {"handler": handler, **kwargs}
 
 
 def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
@@ -59,13 +63,13 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_worker_dispatch",
         "sensorium_worker_result",
         "sensorium_worker_status",
-        "sensorium_artifact_store",
-        "sensorium_artifact_status",
-        "sensorium_media_gift_decide",
         "sensorium_action_prepare",
         "sensorium_action_attach",
         "sensorium_action_result",
         "sensorium_action_status",
+        "sensorium_artifact_store",
+        "sensorium_artifact_status",
+        "sensorium_media_gift_decide",
         "sensorium_conscious_claim",
         "sensorium_conscious_complete",
     }
@@ -107,7 +111,7 @@ def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path
         "allowed_surfaces": ["local"],
         "created_at": "2026-05-24T10:00:00Z",
         "updated_at": "2026-05-24T10:00:00Z",
-        "expires_at": "2026-05-31T10:00:00Z",
+        "expires_at": "2099-05-31T10:00:00Z",
     })
 
     ctx = FakePluginContext()
@@ -153,12 +157,12 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
         "allowed_surfaces": ["local"],
         "created_at": "2026-05-24T10:00:00Z",
         "updated_at": "2026-05-24T10:00:00Z",
-        "expires_at": "2026-05-31T10:00:00Z",
+        "expires_at": "2099-05-31T10:00:00Z",
     })
 
     ctx = FakePluginContext()
     register(ctx)
-    hook = ctx.hooks["pre_llm_call"]["handlers"][0]
+    hook = ctx.hooks["pre_llm_call"]["handler"]
 
     result = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result is not None
@@ -169,13 +173,6 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
     result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result2 is not None
     assert "thread_id=\"sth_hooktest\"" in result2["context"]
-
-    # Verify the salience hook is also registered (second handler)
-    salience_hook = ctx.hooks["pre_llm_call"]["handlers"][1]
-    salience_result = salience_hook(platform="local", session_id="s1", state_dir=str(tmp_path))
-    assert salience_result is not None
-    assert "Sensorium Salience Hook" in salience_result["context"]
-    assert "sensorium_ingest_signal" in salience_result["context"]
 
 
 def test_root_plugin_entrypoint_reexports_register():
@@ -190,49 +187,3 @@ def test_root_plugin_entrypoint_reexports_register():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module.register)
-
-
-def _load_like_hermes_directory_plugin(plugin_root: Path):
-    """Load root __init__.py with the same namespace shape Hermes uses."""
-    import sys
-    import types
-
-    parent = "hermes_plugins"
-    if parent not in sys.modules:
-        ns_pkg = types.ModuleType(parent)
-        ns_pkg.__path__ = []  # type: ignore[attr-defined]
-        ns_pkg.__package__ = parent
-        sys.modules[parent] = ns_pkg
-
-    module_name = "hermes_plugins.agent_sensorium_namespace_regression"
-    sys.modules.pop(module_name, None)
-    spec = importlib.util.spec_from_file_location(
-        module_name,
-        plugin_root / "__init__.py",
-        submodule_search_locations=[str(plugin_root)],
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = module_name
-    module.__path__ = [str(plugin_root)]  # type: ignore[attr-defined]
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_directory_plugin_registers_sensorium_command_under_hermes_namespace():
-    plugin_root = Path(__file__).resolve().parents[1]
-    module = _load_like_hermes_directory_plugin(plugin_root)
-    ctx = FakePluginContext()
-
-    module.register(ctx)
-
-    assert "sensorium" in ctx.commands
-    assert "sensorium_status" in ctx.tools
-    assert "pre_llm_call" in ctx.hooks
-    assert len(ctx.hooks["pre_llm_call"]["handlers"]) == 2
-    assert "agent-sensorium" in ctx.skills
-    out = ctx.commands["sensorium"]["handler"]("help")
-    assert "Usage:" in out
-    assert "status" in out

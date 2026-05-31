@@ -446,6 +446,17 @@ def register(ctx) -> None:
                 "decided_by": {"type": "string", "description": "Actor label; defaults to conscious."},
                 "decision_ref": {"type": "string", "description": "Optional Kanban/thread/session ref."},
                 "implementation_ref": {"type": "string", "description": "Optional implementation/task ref."},
+                "memory_context": {
+                    "type": "array",
+                    "description": "Optional 3-8 compact Hindsight-recall/context facts for memory-grounded review; each item needs fact, source_tool, and source_refs.",
+                    "items": {"type": "object"},
+                },
+                "retrieval_skipped_reason": {"type": "string", "description": "Explicit reason bounded memory/context retrieval was skipped or unavailable."},
+                "cited_memory_fact_refs": {
+                    "type": "array",
+                    "description": "Fact refs from memory_context that affected the choice.",
+                    "items": {"type": "string"},
+                },
             },
         ),
         handler=lambda args, **kw: handle_sensorium_attention_policy_decide(
@@ -458,6 +469,9 @@ def register(ctx) -> None:
             decided_by=args.get("decided_by") or "conscious",
             decision_ref=args.get("decision_ref") or "",
             implementation_ref=args.get("implementation_ref") or "",
+            memory_context=args.get("memory_context"),
+            retrieval_skipped_reason=args.get("retrieval_skipped_reason") or "",
+            cited_memory_fact_refs=args.get("cited_memory_fact_refs"),
             instance=_arg_instance(args),
             state_dir=args.get("state_dir"),
         ),

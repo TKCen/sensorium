@@ -16,6 +16,10 @@ from copy import deepcopy
 from typing import Any
 
 from .config import DEFAULT_ATTENTION_POLICY
+from .actuator_contracts import (
+    MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE,
+    memory_grounded_review_contract,
+)
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -160,6 +164,126 @@ def _active_attention_policy_review_exists(candidates: list[dict], evidence_key:
         if meta.get("evidence_key") == evidence_key or candidate.get("fingerprint") == fingerprint:
             return candidate
     return None
+
+
+def _memory_grounding_contract(candidate: dict) -> dict | None:
+    """Return an attached/generated memory-grounding contract for a review candidate."""
+    for contract in candidate.get("conscious_review_contracts") or []:
+        if isinstance(contract, dict) and contract.get("type") == MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE:
+            return contract
+    contract = candidate.get("conscious_review_contract")
+    if isinstance(contract, dict) and contract.get("type") == MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE:
+        return contract
+    return memory_grounded_review_contract(candidate)
+
+
+def _coerce_string_list(value: Any, *, field_name: str, max_items: int = 12) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            out.append(truncate_text(text, 160))
+    return out[:max_items]
+
+
+def _compact_memory_context(memory_context: Any) -> list[dict[str, Any]]:
+    """Validate and compact retrieved memory/context facts for decision receipts."""
+    if memory_context in (None, ""):
+        return []
+    if not isinstance(memory_context, list):
+        raise ValueError("memory_context must be a list of compact fact objects")
+    facts: list[dict[str, Any]] = []
+    for idx, item in enumerate(memory_context):
+        if not isinstance(item, dict):
+            raise ValueError("memory_context items must be objects")
+        source_tool = str(item.get("source_tool") or "").strip()
+        if not source_tool:
+            raise ValueError("memory_context item missing source_tool")
+        if source_tool == "hindsight_reflect":
+            raise ValueError("hindsight_reflect is not allowed as the default memory-grounding primitive; use hindsight_recall or record retrieval_skipped_reason")
+        refs = _coerce_string_list(item.get("source_refs") or item.get("refs"), field_name="memory_context.source_refs", max_items=6)
+        single_ref = str(item.get("source_ref") or item.get("ref") or "").strip()
+        if single_ref:
+            refs.insert(0, truncate_text(single_ref, 160))
+        refs = list(dict.fromkeys(refs))[:6]
+        if not refs:
+            raise ValueError("memory_context item missing source_refs")
+        fact_text = str(item.get("fact") or item.get("summary") or "").strip()
+        if not fact_text:
+            raise ValueError("memory_context item missing fact")
+        fact_ref = str(item.get("id") or item.get("fact_ref") or refs[0] or f"fact_{idx + 1}").strip()
+        facts.append({
+            "fact_ref": truncate_text(fact_ref, 120),
+            "fact": truncate_text(fact_text, 280),
+            "source_tool": truncate_text(source_tool, 80),
+            "source_refs": refs,
+            "query": truncate_text(str(item.get("query") or ""), 160),
+            "affected_choice": bool(item.get("affected_choice", False)),
+        })
+    return facts
+
+
+def _build_memory_grounding_receipt(
+    *,
+    candidate: dict,
+    memory_context: Any = None,
+    retrieval_skipped_reason: str = "",
+    cited_memory_fact_refs: Any = None,
+) -> dict | None:
+    """Enforce the memory-grounded Conscious review contract when present."""
+    contract = _memory_grounding_contract(candidate)
+    if not contract:
+        return None
+    retrieval_contract = contract.get("retrieval_contract") or {}
+    min_facts = int(retrieval_contract.get("min_facts") or 3)
+    max_facts = int(retrieval_contract.get("max_facts") or 8)
+    facts = _compact_memory_context(memory_context)
+    skipped = truncate_text(str(retrieval_skipped_reason or "").strip(), 240)
+
+    if facts:
+        if not (min_facts <= len(facts) <= max_facts):
+            raise ValueError(f"memory-grounded review requires {min_facts}-{max_facts} compact facts")
+        cited = _coerce_string_list(cited_memory_fact_refs, field_name="cited_memory_fact_refs", max_items=8)
+        if not cited:
+            cited = [fact["fact_ref"] for fact in facts if fact.get("affected_choice")]
+        if not cited:
+            raise ValueError("memory-grounded review with retrieved facts requires cited_memory_fact_refs")
+        fact_refs = {fact["fact_ref"] for fact in facts}
+        unknown = [ref for ref in cited if ref not in fact_refs]
+        if unknown:
+            raise ValueError(f"cited_memory_fact_refs not present in memory_context: {unknown}")
+        return {
+            "retrieval_required": True,
+            "retrieval_skipped": False,
+            "default_tool": retrieval_contract.get("default_tool") or "hindsight_recall",
+            "recall_mode": retrieval_contract.get("recall_mode") or "bounded_recall",
+            "facts": facts,
+            "fact_count": len(facts),
+            "source_tools": sorted({fact["source_tool"] for fact in facts}),
+            "cited_memory_fact_refs": cited,
+            "contract_type": MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE,
+        }
+    if skipped:
+        return {
+            "retrieval_required": True,
+            "retrieval_skipped": True,
+            "retrieval_skipped_reason": skipped,
+            "default_tool": retrieval_contract.get("default_tool") or "hindsight_recall",
+            "recall_mode": retrieval_contract.get("recall_mode") or "bounded_recall",
+            "facts": [],
+            "fact_count": 0,
+            "source_tools": [],
+            "cited_memory_fact_refs": [],
+            "contract_type": MEMORY_GROUNDED_REVIEW_CONTRACT_TYPE,
+        }
+    raise ValueError(
+        "memory-grounded Conscious review requires either 3-8 compact memory_context facts "
+        "with cited_memory_fact_refs or retrieval_skipped_reason"
+    )
 
 
 def _recent_decision_for_evidence(decisions: list[dict], evidence_key: str) -> dict | None:
@@ -394,7 +518,7 @@ def attention_policy_review_candidate(evidence: dict, *, config: dict | None = N
         str(evidence.get("type") or "evidence"),
         *[str(k) for k in (evidence.get("correlation_keys") or []) if str(k or "").strip()],
     ]))
-    return {
+    candidate: dict[str, Any] = {
         "id": new_id("cand"),
         "status": "candidate",
         "kind": ATTENTION_POLICY_KIND,
@@ -435,6 +559,19 @@ def attention_policy_review_candidate(evidence: dict, *, config: dict | None = N
             "authority_boundary": "conscious_decision_required_before_wake_behavior_mutation",
         },
     }
+    # Attach memory-grounded contract for high-stakes candidate types.
+    # The contract does NOT grant broad memory/file access; it is a safe
+    # pre-context requirement for the Conscious review to cite retrieved facts.
+    memory_contract = memory_grounded_review_contract(candidate)
+    if memory_contract:
+        candidate["conscious_review_contract"] = memory_contract
+        candidate["conscious_task"]["expected_decision"] = (
+            "Choose NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, "
+            "priority-map change, memory/skill patch, or HOLD. "
+            "Every decision must cite which memory facts changed or grounded the choice. "
+            "Include future_tendency_delta, verification_condition, and rollback_condition."
+        )
+    return candidate
 
 
 def run_improvement_collector(
@@ -519,6 +656,9 @@ def record_attention_policy_decision(
     decided_by: str = "conscious",
     decision_ref: str = "",
     implementation_ref: str = "",
+    memory_context: list[dict[str, Any]] | None = None,
+    retrieval_skipped_reason: str = "",
+    cited_memory_fact_refs: list[str] | None = None,
 ) -> dict:
     """Record a Conscious attention-policy decision receipt.
 
@@ -551,6 +691,13 @@ def record_attention_policy_decision(
     if target.get("kind") != ATTENTION_POLICY_KIND:
         raise ValueError(f"candidate '{candidate_id}' is not {ATTENTION_POLICY_KIND}")
 
+    memory_grounding = _build_memory_grounding_receipt(
+        candidate=target,
+        memory_context=memory_context,
+        retrieval_skipped_reason=retrieval_skipped_reason,
+        cited_memory_fact_refs=cited_memory_fact_refs,
+    )
+
     old_status = target.get("status", "candidate")
     new_status = "held" if decision_upper == "HOLD" else "reviewed"
     now = utc_now_iso()
@@ -570,6 +717,8 @@ def record_attention_policy_decision(
         meta["decision_ref"] = truncate_text(decision_ref, 200)
     if implementation_ref:
         meta["implementation_ref"] = truncate_text(implementation_ref, 200)
+    if memory_grounding:
+        meta["memory_grounding"] = memory_grounding
 
     store.rewrite_jsonl("candidates", candidates)
 
@@ -594,6 +743,8 @@ def record_attention_policy_decision(
             "count": evidence.get("count"),
         },
     }
+    if memory_grounding:
+        receipt["memory_grounding"] = memory_grounding
     store.append_jsonl("decisions", receipt)
     return {
         "action": "recorded",
@@ -651,10 +802,19 @@ Signals to look for:
 - User corrections indicating missed or mis-prioritized attention.
 
 Every decision (including NO_CHANGE and HOLD) MUST include all four fields:
-- reason: why this decision, grounded in the evidence.
+- reason: why this decision, grounded in the evidence and, for memory-grounded
+  contracts, citing which retrieved fact refs affected the choice.
 - future_tendency_delta: how future attention behavior should lean after this.
 - verification_condition: what observable signal confirms the decision was right.
 - rollback_condition: what observable signal means the decision should be reverted.
+
+For relational, identity, mediated-presence, explicit-correction, or Sensorium
+strategy/embodiment candidates carrying a memory_grounded_conscious_review
+contract, use bounded Hindsight recall as the default retrieval primitive before
+deciding. Attach 3-8 compact memory_context facts with source_tool/source_refs
+and cited_memory_fact_refs, or attach retrieval_skipped_reason explaining why
+retrieval was unavailable/skipped. Do not use Hindsight reflect as the default
+runtime Subconscious; this is bounded recall/context grounding only.
 
 You are forbidden from: editing code, patching SOUL, sending messages, spawning
 another salience review, and auto-broadening privacy or allowed surfaces. Any
@@ -731,6 +891,9 @@ def parse_salience_review_decision(payload: dict) -> dict:
         "decided_by": str(payload.get("decided_by") or "salience-review").strip() or "salience-review",
         "decision_ref": str(payload.get("decision_ref") or "").strip(),
         "implementation_ref": str(payload.get("implementation_ref") or "").strip(),
+        "memory_context": payload.get("memory_context"),
+        "retrieval_skipped_reason": str(payload.get("retrieval_skipped_reason") or "").strip(),
+        "cited_memory_fact_refs": payload.get("cited_memory_fact_refs"),
     }
 
 

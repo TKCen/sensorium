@@ -800,3 +800,250 @@ class TestLiveKanbanBridgeReviewedOpenCleanup:
         assert "candidate_id is mandatory" in body
         assert "no_candidate_match > 0 as unresolved" in body
         assert "complete/archive every intake task" in body
+
+
+class TestActiveSessionEventCandidateDeduplication:
+    """Regression: active-session event + pre-existing active candidate.
+
+    An active-session/manual ingest promotes an event into a candidate *before*
+    the bridge tick runs, so the tick's deterministic sensor result carries no
+    event->candidate mapping. The event mirror still creates one intake; the
+    bug was that the bridge could not mark that candidate represented, so the
+    reconciliation pass minted a *second* candidate-mirror intake for the same
+    activation. The fix resolves the mapping from the canonical candidates store
+    (`candidate.event_ids`). Exactly one intake must be created.
+    """
+
+    def _event(self) -> dict:
+        return {
+            "id": "evt_active_session",
+            "ts": "2026-05-28T10:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "hindsight_pressure",
+            "summary": "active-session pressure already promoted to candidate",
+            "strength": 0.9,
+            "source_signal_ids": ["sig_active_session"],
+            "correlation_keys": ["active-session"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "fingerprint": "fp_active_session",
+        }
+
+    def test_event_id_to_candidate_id_recovers_active_session_mapping(self):
+        bridge = _load_live_bridge_module()
+        candidates = [
+            # Settled candidate sharing the event id must not shadow the active
+            # one: the active above-threshold candidate wins on collision.
+            {"id": "cand_settled", "status": "suppressed", "pressure": 0.9, "event_ids": ["evt_x"]},
+            {"id": "cand_active", "status": "candidate", "pressure": 0.9, "event_ids": ["evt_x", "evt_y"]},
+            {"id": "cand_low", "status": "candidate", "pressure": 0.1, "event_ids": ["evt_z"]},
+        ]
+        index = bridge._event_id_to_candidate_id(candidates)
+        assert index["evt_x"] == "cand_active"
+        assert index["evt_y"] == "cand_active"
+        assert index["evt_z"] == "cand_low"
+
+    def test_active_session_event_does_not_double_mint_with_reconciliation(
+        self, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        event = self._event()
+        eid = event["id"]
+        cand_id = "cand_active_session"
+
+        # Canonical Sensorium store already holds the active above-threshold
+        # candidate an earlier active-session ingest promoted from this event.
+        # It is NOT in this tick's deterministic sensor result.
+        state_dir = str(tmp_path / "sensorium")
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        store.ensure_dirs()
+        store.append_jsonl(
+            "candidates",
+            {
+                "id": cand_id,
+                "status": "candidate",
+                "kind": "hindsight_pressure",
+                "pressure": 0.9,
+                "summary": event["summary"],
+                "event_ids": [eid],
+                "correlation_keys": ["active-session"],
+                "fingerprint": "fp_active_session",
+            },
+        )
+
+        # Bind every SensoriumStore() the bridge constructs to the tmp store and
+        # redirect bridge state files into tmp.
+        monkeypatch.setattr(
+            bridge,
+            "SensoriumStore",
+            lambda instance=None: SensoriumStore(instance="test", state_dir=state_dir),
+        )
+        state_path = tmp_path / "sensor_kanban_state.json"
+        state_path.write_text(json.dumps({"initialized": True}), encoding="utf-8")
+        monkeypatch.setattr(bridge, "STATE_PATH", state_path)
+        monkeypatch.setattr(bridge, "LATEST_PATH", tmp_path / "latest.json")
+        monkeypatch.setattr(bridge, "SUBCONSCIOUS_STATE_PATH", tmp_path / "subconscious.json")
+
+        # No fresh deterministic ingest this tick (active-session already did it).
+        monkeypatch.setattr(bridge, "_ensure_board", lambda: None)
+        monkeypatch.setattr(bridge, "_run_det_sensors", lambda: {"exit_code": 0, "result": {}})
+        monkeypatch.setattr(bridge, "_load_events", lambda: [event])
+        monkeypatch.setattr(bridge, "run_improvement_collector", lambda *a, **k: {})
+
+        event_intake_task_id = "t_event_intake"
+        listed_tasks = [
+            {
+                "id": event_intake_task_id,
+                "title": f"sensor:intake:{event['kind']}: {event['summary'][:90]}",
+                "status": "blocked",
+                "assignee": bridge.PROFILE,
+            }
+        ]
+        monkeypatch.setattr(
+            bridge, "_list_tasks", lambda *, include_archived=False: [dict(t) for t in listed_tasks]
+        )
+        monkeypatch.setattr(
+            bridge,
+            "_show_task",
+            lambda task_id: {
+                "id": task_id,
+                "title": listed_tasks[0]["title"],
+                "status": "blocked",
+                "body": bridge._compact_event_body(event),
+                "comments": [],
+                "runs": [],
+                "events": [],
+            },
+        )
+
+        create_calls: list[list[str]] = []
+
+        def fake_run_checked(cmd, *, timeout=90):
+            if "create" in cmd:
+                create_calls.append(cmd)
+                created_by = (
+                    cmd[cmd.index("--created-by") + 1] if "--created-by" in cmd else ""
+                )
+                task_id = (
+                    event_intake_task_id
+                    if created_by == "sensorium-kanban-sensor"
+                    else "t_other"
+                )
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": task_id}), "")
+            return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        monkeypatch.setattr(
+            bridge,
+            "_run",
+            lambda cmd, *, timeout=90: subprocess.CompletedProcess(cmd, 0, "", ""),
+        )
+        monkeypatch.setattr(sys, "argv", ["sensorium_kanban_sensor_tick.py"])
+
+        assert bridge.main() == 0
+
+        result = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+        assert result["success"] is True
+
+        # Exactly one intake for this activation: the event mirror. No
+        # reconciliation candidate-mirror intake for the same candidate.
+        assert len(result["created_intakes"]) == 1
+        only = result["created_intakes"][0]
+        assert only.get("event_id") == eid
+        assert "candidate_id" not in only  # not a reconciliation intake
+        assert result["reconcile"]["minted"] == []
+
+        # The reconciliation candidate-intake creator was never invoked.
+        reconcile_creates = [
+            c
+            for c in create_calls
+            if "--created-by" in c
+            and c[c.index("--created-by") + 1] == "sensorium-kanban-reconcile"
+        ]
+        assert reconcile_creates == []
+
+    def test_genuinely_unmirrored_candidate_still_reconciled(
+        self, tmp_path, monkeypatch
+    ):
+        """Stale-candidate reconciliation must survive: an active above-threshold
+        candidate with NO event this tick and NO open intake is still minted."""
+        bridge = _load_live_bridge_module()
+        state_dir = str(tmp_path / "sensorium")
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        store.ensure_dirs()
+        store.append_jsonl(
+            "candidates",
+            {
+                "id": "cand_stale",
+                "status": "candidate",
+                "kind": "hindsight_pressure",
+                "pressure": 0.9,
+                "summary": "stale above-threshold candidate, no fresh event",
+                "event_ids": ["evt_stale_unmirrored"],
+                "correlation_keys": ["stale"],
+                "fingerprint": "fp_stale",
+            },
+        )
+        monkeypatch.setattr(
+            bridge,
+            "SensoriumStore",
+            lambda instance=None: SensoriumStore(instance="test", state_dir=state_dir),
+        )
+        state_path = tmp_path / "sensor_kanban_state.json"
+        state_path.write_text(json.dumps({"initialized": True}), encoding="utf-8")
+        monkeypatch.setattr(bridge, "STATE_PATH", state_path)
+        monkeypatch.setattr(bridge, "LATEST_PATH", tmp_path / "latest.json")
+        monkeypatch.setattr(bridge, "SUBCONSCIOUS_STATE_PATH", tmp_path / "subconscious.json")
+        monkeypatch.setattr(bridge, "_ensure_board", lambda: None)
+        monkeypatch.setattr(bridge, "_run_det_sensors", lambda: {"exit_code": 0, "result": {}})
+        monkeypatch.setattr(bridge, "_load_events", lambda: [])  # no events this tick
+        monkeypatch.setattr(bridge, "run_improvement_collector", lambda *a, **k: {})
+        # Board starts empty; after reconcile mints, refresh returns the new row.
+        reconcile_task_id = "t_reconcile_intake"
+        board_state = {"tasks": []}
+
+        def fake_list_tasks(*, include_archived=False):
+            return [dict(t) for t in board_state["tasks"]]
+
+        monkeypatch.setattr(bridge, "_list_tasks", fake_list_tasks)
+        monkeypatch.setattr(
+            bridge,
+            "_show_task",
+            lambda task_id: {
+                "id": task_id, "title": "sensor:intake:hindsight_pressure: stale",
+                "status": "blocked", "body": "", "comments": [], "runs": [], "events": [],
+            },
+        )
+
+        def fake_run_checked(cmd, *, timeout=90):
+            if "create" in cmd:
+                created_by = (
+                    cmd[cmd.index("--created-by") + 1] if "--created-by" in cmd else ""
+                )
+                if created_by == "sensorium-kanban-reconcile":
+                    board_state["tasks"].append(
+                        {
+                            "id": reconcile_task_id,
+                            "title": "sensor:intake:hindsight_pressure: stale",
+                            "status": "blocked",
+                            "assignee": bridge.PROFILE,
+                        }
+                    )
+                    return subprocess.CompletedProcess(
+                        cmd, 0, json.dumps({"id": reconcile_task_id}), ""
+                    )
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": "t_other"}), "")
+            return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        monkeypatch.setattr(
+            bridge, "_run", lambda cmd, *, timeout=90: subprocess.CompletedProcess(cmd, 0, "", "")
+        )
+        monkeypatch.setattr(sys, "argv", ["sensorium_kanban_sensor_tick.py"])
+
+        assert bridge.main() == 0
+        result = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+        assert result["success"] is True
+        # Stale candidate with no event mirror is still reconciled into one intake.
+        assert [m["candidate_id"] for m in result["reconcile"]["minted"]] == ["cand_stale"]
+        assert len(result["created_intakes"]) == 1

@@ -44,8 +44,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--decided-by", default="conscious")
     parser.add_argument("--decision-ref", default="")
     parser.add_argument("--implementation-ref", default="")
+    parser.add_argument(
+        "--memory-context-json",
+        default="",
+        help="JSON list of 3-8 compact retrieved facts (fact, source_tool, source_refs) for memory-grounded reviews.",
+    )
+    parser.add_argument("--retrieval-skipped-reason", default="")
+    parser.add_argument(
+        "--cited-memory-fact-refs-json",
+        default="",
+        help="JSON list of memory_context fact_refs that affected the choice.",
+    )
     parser.add_argument("--json", action="store_true", dest="print_json")
     args = parser.parse_args(argv)
+
+    try:
+        memory_context = json.loads(args.memory_context_json) if args.memory_context_json else None
+        cited_memory_fact_refs = json.loads(args.cited_memory_fact_refs_json) if args.cited_memory_fact_refs_json else None
+    except json.JSONDecodeError as exc:
+        if args.print_json:
+            print(json.dumps({"success": False, "error": f"invalid JSON argument: {exc}"}, indent=2))
+        else:
+            print(f"sensorium_attention_policy_decide: invalid JSON argument: {exc}", file=sys.stderr)
+        return 1
 
     store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
     try:
@@ -60,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
             decided_by=args.decided_by,
             decision_ref=args.decision_ref,
             implementation_ref=args.implementation_ref,
+            memory_context=memory_context,
+            retrieval_skipped_reason=args.retrieval_skipped_reason,
+            cited_memory_fact_refs=cited_memory_fact_refs,
         )
     except Exception as exc:
         if args.print_json:

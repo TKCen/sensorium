@@ -46,7 +46,10 @@ from agent_sensorium.settlement import (  # noqa: E402
     represented_candidate_ids as _represented_candidate_ids,
     select_active_above_threshold,
 )
-from agent_sensorium.actuator_contracts import mediated_artifact_review_contract  # noqa: E402
+from agent_sensorium.actuator_contracts import (  # noqa: E402
+    mediated_artifact_review_contract,
+    memory_grounded_review_contract,
+)
 from agent_sensorium.improvement import run_improvement_collector  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
 
@@ -158,6 +161,40 @@ def _load_events() -> list[dict[str, Any]]:
         if isinstance(obj, dict) and obj.get("id"):
             out.append(obj)
     return out
+
+
+def _event_id_to_candidate_id(candidates: list[dict[str, Any]]) -> dict[str, str]:
+    """Map ``event_id -> candidate_id`` from the canonical candidates store.
+
+    Active-session/manual ingests promote events into candidates *before* this
+    bridge tick runs, so the fresh deterministic sensor result
+    (``ingested_candidates_by_event_id``) will not carry their event->candidate
+    mapping. Recovering it from ``candidate.event_ids`` lets an event intake
+    mark its candidate represented before the reconciliation pass, preventing a
+    second candidate-mirror intake for the same activation. On collision an
+    active above-threshold candidate wins, since that is the row reconciliation
+    would otherwise re-mint.
+    """
+    index: dict[str, str] = {}
+    index_is_active: dict[str, bool] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cand_id = str(candidate.get("id") or "")
+        if not cand_id:
+            continue
+        is_active = (
+            candidate.get("status") == "candidate"
+            and float(candidate.get("pressure", 0) or 0) >= DEFAULT_DISPATCH_PRESSURE_THRESHOLD
+        )
+        for raw_eid in candidate.get("event_ids") or []:
+            eid = str(raw_eid)
+            if not eid:
+                continue
+            if eid not in index or (is_active and not index_is_active.get(eid)):
+                index[eid] = cand_id
+                index_is_active[eid] = is_active
+    return index
 
 
 def _list_tasks(*, include_archived: bool = False) -> list[dict[str, Any]]:
@@ -509,15 +546,28 @@ def _compact_event_body(event: dict[str, Any]) -> str:
         "allowed_surfaces": event.get("allowed_surfaces", []),
         "fingerprint": event.get("fingerprint"),
     }
-    contract = mediated_artifact_review_contract(event)
-    if contract:
-        payload["conscious_review_contract"] = contract
-    contract_note = (
-        "\n\nMediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
-        "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
-        "do not promote as generic THINK-only review."
-        if contract else ""
-    )
+    # Attach memory-grounded contract for high-stakes event types.
+    memory_contract = memory_grounded_review_contract(event)
+    artifact_contract = mediated_artifact_review_contract(event)
+    contracts = [c for c in (memory_contract, artifact_contract) if c]
+    if contracts:
+        payload["conscious_review_contract"] = contracts[-1]
+        payload["conscious_review_contracts"] = contracts
+    contract_note_parts: list[str] = []
+    if memory_contract:
+        contract_note_parts.append(
+            "Memory-grounded contract: before deciding, use bounded Hindsight recall/context "
+            "retrieval and cite which retrieved memory facts changed or grounded the choice; "
+            "if retrieval is unavailable, record retrieval_skipped_reason; do not rely on "
+            "numeric thresholds alone."
+        )
+    if artifact_contract:
+        contract_note_parts.append(
+            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
+            "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
+            "do not promote as generic THINK-only review."
+        )
+    contract_note = ("\n\n" + " ".join(contract_note_parts)) if contract_note_parts else ""
     return (
         "Sensorium Kanban intake v1. This is substrate, not executable user work.\n\n"
         "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the gateway "
@@ -580,15 +630,28 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         payload["conscious_task"] = candidate.get("conscious_task")
     if isinstance(candidate.get("improvement_meta"), dict):
         payload["improvement_meta"] = candidate.get("improvement_meta")
-    contract = mediated_artifact_review_contract(candidate)
-    if contract:
-        payload["conscious_review_contract"] = contract
-    contract_note = (
-        "\n\nMediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
-        "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
-        "do not promote as generic THINK-only review."
-        if contract else ""
-    )
+    # Attach memory-grounded contract for high-stakes candidates.
+    memory_contract = memory_grounded_review_contract(candidate)
+    artifact_contract = mediated_artifact_review_contract(candidate)
+    contracts = [c for c in (memory_contract, artifact_contract) if c]
+    if contracts:
+        payload["conscious_review_contract"] = contracts[-1]
+        payload["conscious_review_contracts"] = contracts
+    contract_note_parts: list[str] = []
+    if memory_contract:
+        contract_note_parts.append(
+            "Memory-grounded contract: before deciding, use bounded Hindsight recall/context "
+            "retrieval and cite which retrieved memory facts changed or grounded the choice; "
+            "if retrieval is unavailable, record retrieval_skipped_reason; do not rely on "
+            "numeric thresholds alone."
+        )
+    if artifact_contract:
+        contract_note_parts.append(
+            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
+            "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
+            "do not promote as generic THINK-only review."
+        )
+    contract_note = ("\n\n" + " ".join(contract_note_parts)) if contract_note_parts else ""
     return (
         "Sensorium Kanban reconciliation intake v1. This is substrate, not "
         "executable user work.\n\n"
@@ -902,6 +965,13 @@ def main() -> int:
             state["initialized_at"] = _now_iso()
             state["initial_event_watermark_count"] = len(events)
         new_events = [e for e in events if str(e.get("id")) not in seen]
+        # Canonical event->candidate lookup for events the deterministic sensor
+        # result did not freshly ingest (active-session/manual ingests already
+        # promoted to candidates before this tick). Used as a fallback so event
+        # intakes can mark their candidate represented before reconciliation.
+        event_candidate_index = _event_id_to_candidate_id(
+            SensoriumStore(instance=INSTANCE).read_jsonl("candidates")
+        )
         if args.force_canary or args.force_conscious_canary:
             new_events.append(
                 _force_canary_event(
@@ -977,12 +1047,17 @@ def main() -> int:
             }
             ingest_meta = ingested_candidates_by_event_id.get(eid) or {}
             candidate_id = str(ingest_meta.get("candidate_id") or "")
+            if not candidate_id:
+                # Active-session/manual ingest: the fresh sensor result lacks the
+                # mapping, so resolve it from the canonical candidates store.
+                candidate_id = event_candidate_index.get(eid, "")
             intake_task_id = str((created.get("create_result") or {}).get("id") or "")
             if candidate_id and intake_task_id:
-                # Fresh event-driven intakes are already a Kanban representation
-                # of their newly-created candidate. Mark them represented before
-                # the stale-candidate reconciliation pass so the same candidate
-                # does not get a second candidate-intake in the same tick.
+                # An event intake is already a Kanban representation of its
+                # candidate (freshly created this tick, or pre-existing from an
+                # active-session/manual ingest). Mark it represented before the
+                # stale-candidate reconciliation pass so the same candidate does
+                # not get a second candidate-intake in the same tick.
                 reconciled_candidates[candidate_id] = {
                     "intake_task_id": intake_task_id,
                     "idempotency_key": created.get("idempotency_key"),
