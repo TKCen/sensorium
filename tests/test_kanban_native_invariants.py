@@ -18,7 +18,10 @@ Scope:
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -75,6 +78,16 @@ def _seed_candidate(state_dir: str, *, kind: str = "design_decision") -> str:
         state_dir=state_dir,
     )
     return json.loads(raw)["data"]["candidate_id"]
+
+
+def _load_live_bridge_module():
+    path = Path(__file__).resolve().parents[1] / "live-scripts" / "sensorium_kanban_sensor_tick.py"
+    spec = importlib.util.spec_from_file_location("sensorium_kanban_sensor_tick_under_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 
 class TestDispatchActivationGate:
@@ -523,3 +536,168 @@ class TestStaleCandidateReconciliation:
         assert candidate_id not in [m["candidate_id"] for m in plan_after["mint"]]
         assert candidate_id not in [s["candidate_id"] for s in plan_after["settle"]]
         assert dispatch_once(store, dry_run=True)["action"] == "no_candidate"
+
+
+class TestLiveKanbanBridgeReviewedOpenCleanup:
+    def _open_candidate_intake(self, *, status="ready", comment="decision: DROP") -> dict:
+        payload = {
+            "candidate_id": "cand_open_reviewed",
+            "event_ids": ["evt_open_reviewed"],
+            "fingerprint": "fp_open_reviewed",
+            "correlation_keys": ["open-reviewed"],
+            "kind": "tts_sidecar_pressure",
+            "pressure": 0.86,
+            "summary": "TTS sidecar timeout pressure already reviewed",
+        }
+        return {
+            "id": "kt_open_reviewed",
+            "title": "sensor:intake:tts_sidecar_pressure: timeout pressure",
+            "status": status,
+            "body": (
+                "Sensorium Kanban reconciliation intake v1.\n\n"
+                "Compact candidate payload:\n"
+                + json.dumps(payload, indent=2, sort_keys=True)
+            ),
+            "comments": [{"body": comment}] if comment else [],
+            "runs": [],
+            "events": [],
+        }
+
+    def test_post_review_settle_open_intakes_applies_and_returns_cleanup_ids(self, store):
+        bridge = _load_live_bridge_module()
+        store.append_jsonl(
+            "candidates",
+            {
+                "id": "cand_open_reviewed",
+                "status": "candidate",
+                "kind": "tts_sidecar_pressure",
+                "pressure": 0.86,
+                "summary": "TTS sidecar timeout pressure already reviewed",
+                "event_ids": ["evt_open_reviewed"],
+                "correlation_keys": ["open-reviewed"],
+                "fingerprint": "fp_open_reviewed",
+            },
+        )
+
+        result = bridge._post_review_settle_open_intakes(
+            store,
+            [self._open_candidate_intake()],
+        )
+
+        assert result["gaps"] == []
+        assert result["cleanup_task_ids"] == ["kt_open_reviewed"]
+        assert result["applied"] == [
+            {
+                "intake_task_id": "kt_open_reviewed",
+                "candidate_id": "cand_open_reviewed",
+                "decision": "DROP",
+                "settlement_action": "settled",
+                "updated_candidate_ids": ["cand_open_reviewed"],
+                "already_settled_candidate_ids": [],
+            }
+        ]
+        assert dispatch_once(store, dry_run=True)["action"] == "no_candidate"
+
+    def test_completed_intake_recovery_applies_once_per_active_candidate(self, store, monkeypatch):
+        bridge = _load_live_bridge_module()
+        store.append_jsonl(
+            "candidates",
+            {
+                "id": "cand_open_reviewed",
+                "status": "candidate",
+                "kind": "tts_sidecar_pressure",
+                "pressure": 0.86,
+                "summary": "TTS sidecar timeout pressure already reviewed",
+                "event_ids": ["evt_open_reviewed"],
+                "correlation_keys": ["open-reviewed"],
+                "fingerprint": "fp_open_reviewed",
+            },
+        )
+        first = self._open_candidate_intake(status="archived", comment="decision: DROP")
+        second = self._open_candidate_intake(status="archived", comment="decision: PROMOTE_CONSCIOUS")
+        second["id"] = "kt_open_reviewed_duplicate"
+        details = {first["id"]: first, second["id"]: second}
+        monkeypatch.setattr(bridge, "_show_task", lambda task_id: details[task_id])
+
+        result = bridge._post_review_settle_completed_intakes(store, [first, second])
+
+        assert [a["intake_task_id"] for a in result["applied"]] == ["kt_open_reviewed"]
+        candidate = store.read_jsonl("candidates")[0]
+        assert candidate["status"] == "suppressed"
+        assert candidate["kanban_settlement"]["decision"] == "DROP"
+
+    def test_cleanup_settled_open_intakes_comments_and_archives_each_task(self, monkeypatch):
+        bridge = _load_live_bridge_module()
+        calls = []
+
+        def fake_run(cmd, *, timeout=90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(bridge, "_run", fake_run)
+
+        result = bridge._cleanup_settled_open_intakes(["kt_a", "kt_b"])
+
+        assert result == {"cleaned": ["kt_a", "kt_b"], "errors": []}
+        assert [cmd[4] for cmd in calls] == ["comment", "archive", "comment", "archive"]
+        assert calls[0][5] == "kt_a"
+        assert calls[2][5] == "kt_b"
+
+    def test_list_tasks_include_archived_adds_cli_flag(self, monkeypatch):
+        bridge = _load_live_bridge_module()
+        calls = []
+
+        def fake_run_checked(cmd, *, timeout=90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+
+        assert bridge._list_tasks(include_archived=True) == []
+        assert "--archived" in calls[0]
+
+    def test_inactive_candidate_intake_cleanup_selects_open_rows_whose_candidate_left_pool(self, store):
+        bridge = _load_live_bridge_module()
+        store.append_jsonl(
+            "candidates",
+            {
+                "id": "cand_open_reviewed",
+                "status": "suppressed",
+                "kind": "tts_sidecar_pressure",
+                "pressure": 0.86,
+                "summary": "settled candidate",
+            },
+        )
+
+        result = bridge._inactive_candidate_open_intake_cleanup(
+            store,
+            [self._open_candidate_intake(status="ready", comment="")],
+        )
+
+        assert result == {
+            "cleanup_task_ids": ["kt_open_reviewed"],
+            "items": [
+                {
+                    "intake_task_id": "kt_open_reviewed",
+                    "candidate_id": "cand_open_reviewed",
+                    "candidate_status": "suppressed",
+                    "reason": "underlying_candidate_not_active",
+                }
+            ],
+        }
+
+    def test_review_body_requires_candidate_id_and_truthful_no_match_status(self):
+        bridge = _load_live_bridge_module()
+
+        body = bridge._review_body([
+            {
+                "id": "kt_open_reviewed",
+                "status": "ready",
+                "title": "sensor:intake:tts_sidecar_pressure: timeout pressure",
+                "assignee": None,
+            }
+        ])
+
+        assert "candidate_id is mandatory" in body
+        assert "no_candidate_match > 0 as unresolved" in body
+        assert "complete/archive every intake task" in body

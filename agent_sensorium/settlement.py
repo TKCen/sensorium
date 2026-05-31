@@ -486,7 +486,97 @@ def plan_completed_intake_settlements(
     }
 
 
+def plan_reviewed_open_intake_settlements(
+    tasks: list[dict],
+    *,
+    decisions: list[dict],
+    active_candidate_ids: set[str] | list[str] | None = None,
+) -> dict:
+    """Plan settlements for open intake tasks that already carry review evidence.
+
+    This closes the live failure class where the cheap reviewer comments a
+    DROP/SAVE/PROMOTE decision but cannot complete/archive the substrate row
+    because worker scope does not include board-level cleanup authority. Fresh
+    untouched open intakes are ignored; reviewed open intakes without an explicit
+    decision are returned as visible gaps.
+    """
+    active_filter = {str(c) for c in active_candidate_ids} if active_candidate_ids is not None else None
+    records: list[dict] = []
+    gaps: list[dict] = []
+    already_settled: list[str] = []
+    cleanup_task_ids: list[str] = []
+
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        intake_task_id = str(task.get("id") or "")
+        title = str(task.get("title") or task.get("name") or "")
+        status = str(task.get("status") or "")
+        if not intake_task_id or not title.startswith("sensor:intake:"):
+            continue
+        if status in CLOSED_INTAKE_STATUSES:
+            continue
+
+        payload = extract_kanban_intake_payload(str(task.get("body") or ""))
+        candidate_id = str(payload.get("candidate_id") or "")
+        if active_filter is not None and candidate_id and candidate_id not in active_filter:
+            continue
+
+        if _settlement_receipt_exists(decisions, intake_task_id):
+            already_settled.append(intake_task_id)
+            cleanup_task_ids.append(intake_task_id)
+            continue
+
+        review_texts = _task_texts_for_decision(task)
+        if not review_texts:
+            continue
+
+        decision = infer_kanban_settlement_decision(task)
+        if not decision:
+            gaps.append(
+                {
+                    "intake_task_id": intake_task_id,
+                    "candidate_id": candidate_id,
+                    "reason": "reviewed_open_intake_missing_decision",
+                }
+            )
+            continue
+
+        event_ids = payload.get("event_ids") or []
+        event_id = str(payload.get("event_id") or "")
+        if not event_id and isinstance(event_ids, list) and event_ids:
+            event_id = str(event_ids[0] or "")
+        correlation_keys = payload.get("correlation_keys") or []
+        if not isinstance(correlation_keys, list):
+            correlation_keys = []
+        records.append(
+            {
+                "decision": decision,
+                "candidate_id": candidate_id,
+                "event_id": event_id,
+                "fingerprint": str(payload.get("fingerprint") or ""),
+                "correlation_keys": correlation_keys,
+                "intake_task_id": intake_task_id,
+                "review_task_id": str(task.get("review_task_id") or ""),
+                "reason": truncate_text(
+                    "Recovered missing Sensorium settlement from reviewed open Kanban intake; "
+                    f"review evidence claimed {decision} but worker could not close the row.",
+                    240,
+                ),
+            }
+        )
+        cleanup_task_ids.append(intake_task_id)
+
+    return {
+        "records": records,
+        "gaps": gaps,
+        "already_settled": already_settled,
+        "cleanup_task_ids": cleanup_task_ids,
+    }
+
+
 # ---------------------------------------------------------------------------
+
 # Stale-candidate reconciliation (pure routing/idempotency layer)
 #
 # The event-driven bridge only ever mirrors *freshly emitted* Sensorium events

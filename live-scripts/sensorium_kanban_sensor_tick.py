@@ -42,6 +42,7 @@ from agent_sensorium.settlement import (  # noqa: E402
     extract_kanban_intake_payload,
     plan_candidate_reconciliation,
     plan_completed_intake_settlements,
+    plan_reviewed_open_intake_settlements,
     represented_candidate_ids as _represented_candidate_ids,
     select_active_above_threshold,
 )
@@ -158,8 +159,11 @@ def _load_events() -> list[dict[str, Any]]:
     return out
 
 
-def _list_tasks() -> list[dict[str, Any]]:
-    proc = _run_checked(["hermes", "kanban", "--board", BOARD, "list", "--json"], timeout=60)
+def _list_tasks(*, include_archived: bool = False) -> list[dict[str, Any]]:
+    cmd = ["hermes", "kanban", "--board", BOARD, "list", "--json"]
+    if include_archived:
+        cmd.append("--archived")
+    proc = _run_checked(cmd, timeout=60)
     data = json.loads(proc.stdout or "[]")
     return data if isinstance(data, list) else []
 
@@ -257,9 +261,52 @@ def _post_review_settle_completed_intakes(
         decisions=store.read_jsonl("decisions"),
         active_candidate_ids=active_ids,
     )
+
+    def _record_active_target_ids(record: dict[str, Any]) -> set[str]:
+        candidate_id = str(record.get("candidate_id") or "")
+        if candidate_id and candidate_id in active_ids:
+            return {candidate_id}
+        event_id = str(record.get("event_id") or "")
+        if event_id:
+            return {
+                str(c.get("id") or "")
+                for c in active
+                if event_id in (c.get("event_ids") or [])
+            }
+        fingerprint = str(record.get("fingerprint") or "")
+        if fingerprint:
+            return {
+                str(c.get("id") or "")
+                for c in active
+                if str(c.get("fingerprint") or "") == fingerprint
+            }
+        correlation_keys = {str(k) for k in (record.get("correlation_keys") or []) if k}
+        if correlation_keys:
+            return {
+                str(c.get("id") or "")
+                for c in active
+                if correlation_keys & {str(k) for k in (c.get("correlation_keys") or []) if k}
+            }
+        return set()
+
     applied: list[dict[str, Any]] = []
+    settled_active_ids: set[str] = set()
     for record in plan.get("records", []):
+        target_ids = _record_active_target_ids(record)
+        if target_ids and target_ids.issubset(settled_active_ids):
+            continue
         settlement = apply_settlement_record(store, record)
+        settled_active_ids.update(target_ids)
+        settled_active_ids.update(
+            str(cid)
+            for cid in settlement.get("updated_candidate_ids", [])
+            if cid
+        )
+        settled_active_ids.update(
+            str(cid)
+            for cid in settlement.get("already_settled_candidate_ids", [])
+            if cid
+        )
         applied.append(
             {
                 "intake_task_id": record.get("intake_task_id"),
@@ -277,6 +324,155 @@ def _post_review_settle_completed_intakes(
         "gaps": plan.get("gaps", []),
         "already_settled": plan.get("already_settled", []),
         "inspected": sorted(seen),
+    }
+
+
+def _post_review_settle_open_intakes(
+    store: "SensoriumStore",
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply settlements claimed by reviewed-but-still-open intake tasks.
+
+    The cheap review worker can leave comments/results but lack authority to
+    complete/archive substrate rows. This trusted bridge layer converts explicit
+    review decisions into canonical Sensorium settlement and returns only the
+    intake ids that are safe for bridge cleanup.
+    """
+    candidates = store.read_jsonl("candidates")
+    active = select_active_above_threshold(
+        candidates,
+        threshold=DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
+    )
+    active_ids = {str(c.get("id") or "") for c in active if c.get("id")}
+    if not active_ids:
+        return {
+            "records": [],
+            "applied": [],
+            "gaps": [],
+            "already_settled": [],
+            "cleanup_task_ids": [],
+        }
+
+    plan = plan_reviewed_open_intake_settlements(
+        tasks,
+        decisions=store.read_jsonl("decisions"),
+        active_candidate_ids=active_ids,
+    )
+    applied: list[dict[str, Any]] = []
+    cleanup_allowed: set[str] = {str(tid) for tid in plan.get("already_settled", []) if tid}
+    for record in plan.get("records", []):
+        settlement = apply_settlement_record(store, record)
+        intake_task_id = str(record.get("intake_task_id") or "")
+        action = settlement.get("action")
+        if action in {"settled", "already_settled"}:
+            cleanup_allowed.add(intake_task_id)
+        applied.append(
+            {
+                "intake_task_id": record.get("intake_task_id"),
+                "candidate_id": record.get("candidate_id"),
+                "decision": record.get("decision"),
+                "settlement_action": action,
+                "updated_candidate_ids": settlement.get("updated_candidate_ids", []),
+                "already_settled_candidate_ids": settlement.get("already_settled_candidate_ids", []),
+            }
+        )
+
+    ordered_cleanup_ids = [
+        str(tid)
+        for tid in plan.get("cleanup_task_ids", [])
+        if tid and str(tid) in cleanup_allowed
+    ]
+    return {
+        "records": plan.get("records", []),
+        "applied": applied,
+        "gaps": plan.get("gaps", []),
+        "already_settled": plan.get("already_settled", []),
+        "cleanup_task_ids": ordered_cleanup_ids,
+    }
+
+
+def _cleanup_settled_open_intakes(task_ids: list[str]) -> dict[str, Any]:
+    cleaned: list[str] = []
+    errors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for task_id in task_ids:
+        task_id = str(task_id or "")
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        comment = _run(
+            [
+                "hermes",
+                "kanban",
+                "--board",
+                BOARD,
+                "comment",
+                task_id,
+                "Bridge cleanup: reviewed intake was settled in Sensorium truth; archiving substrate row.",
+                "--author",
+                "sensorium-kanban-bridge",
+            ],
+            timeout=60,
+        )
+        archive = _run(
+            ["hermes", "kanban", "--board", BOARD, "archive", task_id],
+            timeout=60,
+        )
+        if archive.returncode == 0:
+            cleaned.append(task_id)
+        else:
+            errors.append(
+                {
+                    "task_id": task_id,
+                    "comment_rc": comment.returncode,
+                    "archive_rc": archive.returncode,
+                    "stderr": archive.stderr[-500:],
+                }
+            )
+    return {"cleaned": cleaned, "errors": errors}
+
+
+def _inactive_candidate_open_intake_cleanup(
+    store: "SensoriumStore",
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Select open intake rows whose underlying candidate already left active pool."""
+    candidates = {
+        str(c.get("id") or ""): c
+        for c in store.read_jsonl("candidates")
+        if c.get("id")
+    }
+    items: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        intake_task_id = str(task.get("id") or "")
+        if not intake_task_id or not _task_title(task).startswith("sensor:intake:"):
+            continue
+        if _task_status(task) in CLOSED_INTAKE_STATUSES:
+            continue
+        payload = extract_kanban_intake_payload(str(task.get("body") or ""))
+        candidate_id = str(payload.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        candidate = candidates.get(candidate_id)
+        if not candidate:
+            continue
+        status = str(candidate.get("status") or "candidate")
+        pressure = float(candidate.get("pressure", 0) or 0)
+        if status == "candidate" and pressure >= DEFAULT_DISPATCH_PRESSURE_THRESHOLD:
+            continue
+        items.append(
+            {
+                "intake_task_id": intake_task_id,
+                "candidate_id": candidate_id,
+                "candidate_status": status,
+                "reason": "underlying_candidate_not_active",
+            }
+        )
+    return {
+        "cleanup_task_ids": [item["intake_task_id"] for item in items],
+        "items": items,
     }
 
 
@@ -553,7 +749,7 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         "- For `attention_policy_review` intakes: this is Sensorium self-improvement evidence, not ordinary noise. Unless an equivalent conscious review is already active, PROMOTE_CONSCIOUS to `default`; Conscious must decide NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, and must record future_tendency_delta, verification_condition, and rollback_condition. Subconscious must not mutate wake behavior directly.\n"
         "- CRITICAL: after deciding, propagate every consumed intake decision back into Sensorium truth by running the settlement CLI once with a JSON list of settlement records:\n"
         "  `python /home/entity/.hermes/plugins/agent-sensorium/scripts/sensorium_kanban_settle.py --instance sera --file /tmp/sensorium_settlements_<review>.json --json`\n"
-        "  Record shape: {decision: DROP|SAVE|PROMOTE_CONSCIOUS, event_id, fingerprint, correlation_keys, intake_task_id, review_task_id, conscious_task_ref?, reason}. Use event_id/fingerprint/correlation_keys from each intake's Compact event payload.\n"
+        "  Record shape: {decision: DROP|SAVE|PROMOTE_CONSCIOUS, candidate_id?, event_id?, fingerprint?, correlation_keys?, intake_task_id, review_task_id, conscious_task_ref?, reason}. For Compact candidate payloads, candidate_id is mandatory and should be the primary resolver. For Compact event payloads, use event_id first. Treat settlement_cli_result.no_candidate_match > 0 as unresolved, not settled.\n"
         "  This is mandatory so Kanban DROP/SAVE/PROMOTE removes the underlying Sensorium candidate from the active promotion pool; do not rely on Kanban comments alone.\n"
         "- After any DROP/SAVE/PROMOTE decision, comment and complete/archive every intake task you consumed so the board does not accumulate unassigned ready substrate.\n"
         "- Completion summary must include YAML-ish fields: decision, reason, intake_tasks, promoted_task, settlement_cli_result, state_updated.\n"
@@ -772,10 +968,35 @@ def main() -> int:
                 }
             seen.add(eid)
         tasks = _list_tasks()
+        all_tasks = _list_tasks(include_archived=True)
         post_review_settlement = _post_review_settle_completed_intakes(
             SensoriumStore(instance=INSTANCE),
-            tasks,
+            all_tasks,
         )
+        open_intake_details: list[dict[str, Any]] = []
+        for intake in _open_sensor_intakes(tasks):
+            task_id = str(intake.get("id") or "")
+            if not task_id:
+                continue
+            detail = _show_task(task_id)
+            if detail:
+                open_intake_details.append(detail)
+        reviewed_open_settlement = _post_review_settle_open_intakes(
+            SensoriumStore(instance=INSTANCE),
+            open_intake_details,
+        )
+        inactive_open_cleanup = _inactive_candidate_open_intake_cleanup(
+            SensoriumStore(instance=INSTANCE),
+            open_intake_details,
+        )
+        reviewed_open_cleanup = {"cleaned": [], "errors": []}
+        cleanup_task_ids = list(reviewed_open_settlement.get("cleanup_task_ids") or [])
+        cleanup_task_ids.extend(inactive_open_cleanup.get("cleanup_task_ids") or [])
+        if cleanup_task_ids:
+            reviewed_open_cleanup = _cleanup_settled_open_intakes(cleanup_task_ids)
+            tasks = _list_tasks()
+        reviewed_open_settlement["cleanup"] = reviewed_open_cleanup
+        reviewed_open_settlement["inactive_candidate_cleanup"] = inactive_open_cleanup
         improvement_collect = run_improvement_collector(
             SensoriumStore(instance=INSTANCE),
             bridge_state=state,
@@ -836,6 +1057,7 @@ def main() -> int:
                 "reconciled_candidates": reconciled_candidates,
                 "last_reconcile": reconcile_summary,
                 "last_post_review_settlement": post_review_settlement,
+                "last_reviewed_open_settlement": reviewed_open_settlement,
                 "last_improvement_collect": improvement_collect,
                 "last_reconciled_intake_count": len(reconcile.get("minted", [])),
                 "last_reconciled_settle_count": len(reconcile.get("settled", [])),
@@ -861,6 +1083,7 @@ def main() -> int:
                 "suppressed_events": suppressed_events,
                 "reconcile": reconcile_summary,
                 "post_review_settlement": post_review_settlement,
+                "reviewed_open_settlement": reviewed_open_settlement,
                 "improvement_collect": improvement_collect,
                 "open_intake_count": len(open_intakes),
                 "active_review_count": len(active_reviews),

@@ -29,6 +29,7 @@ from agent_sensorium.settlement import (
     extract_kanban_intake_payload,
     infer_kanban_settlement_decision,
     plan_completed_intake_settlements,
+    plan_reviewed_open_intake_settlements,
 )
 from agent_sensorium.store import SensoriumStore
 
@@ -464,6 +465,71 @@ class TestCompletedIntakeSettlementRecovery:
                 "reason": "closed_intake_missing_decision",
             }
         ]
+
+    def test_plans_reviewed_open_intake_settlement_record(self):
+        task = self._intake_task(
+            status="ready",
+            comment="decision: DROP — reviewed but worker could not archive",
+            summary="",
+        )
+        plan = plan_reviewed_open_intake_settlements(
+            [task],
+            decisions=[],
+            active_candidate_ids={"cand_dash1"},
+        )
+        assert plan["gaps"] == []
+        assert len(plan["records"]) == 1
+        record = plan["records"][0]
+        assert record["decision"] == "DROP"
+        assert record["candidate_id"] == "cand_dash1"
+        assert record["event_id"] == "evt_dash1"
+        assert record["intake_task_id"] == "kt_intake_done"
+        assert plan["cleanup_task_ids"] == ["kt_intake_done"]
+
+    def test_reviewed_open_intake_without_decision_is_visible_gap(self):
+        task = self._intake_task(status="ready", comment="looked at it", summary="")
+        plan = plan_reviewed_open_intake_settlements(
+            [task],
+            decisions=[],
+            active_candidate_ids={"cand_dash1"},
+        )
+        assert plan["records"] == []
+        assert plan["cleanup_task_ids"] == []
+        assert plan["gaps"] == [
+            {
+                "intake_task_id": "kt_intake_done",
+                "candidate_id": "cand_dash1",
+                "reason": "reviewed_open_intake_missing_decision",
+            }
+        ]
+
+    def test_unreviewed_open_intake_does_not_become_gap(self):
+        task = self._intake_task(status="ready", comment="", summary="")
+        plan = plan_reviewed_open_intake_settlements(
+            [task],
+            decisions=[],
+            active_candidate_ids={"cand_dash1"},
+        )
+        assert plan["records"] == []
+        assert plan["gaps"] == []
+        assert plan["cleanup_task_ids"] == []
+
+    def test_reviewed_open_intake_recovery_closes_dispatch_gap(self, store):
+        store.append_jsonl("candidates", _make_candidate())
+        before = dispatch_once(store, dry_run=True)
+        assert before["action"] == "kanban_review_required"
+
+        plan = plan_reviewed_open_intake_settlements(
+            [self._intake_task(status="ready", comment="decision: DROP", summary="")],
+            decisions=store.read_jsonl("decisions"),
+            active_candidate_ids={"cand_dash1"},
+        )
+        assert len(plan["records"]) == 1
+        result = apply_settlement_record(store, plan["records"][0])
+        assert result["action"] == "settled"
+
+        after = dispatch_once(store, dry_run=True)
+        assert after["action"] == "no_candidate"
 
 
 class TestFirstIncidentNotSuppressedBeforeSubconscious:
