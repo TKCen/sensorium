@@ -3,7 +3,7 @@
   "label": "Sensorium",
   "description": "Read-only cockpit for Agent Sensorium candidates, conscious threads, outbox requests, and lifecycle receipts.",
   "icon": "BrainCircuit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/sensorium",
     "position": "after:inference-budget"

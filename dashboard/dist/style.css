@@ -51,7 +51,7 @@
 
 .sx-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
   gap: 0.75rem;
 }
 
@@ -139,12 +139,49 @@
   line-height: 1.45;
 }
 
+.sx-result {
+  padding: 0.55rem 0.65rem;
+  border-left: 2px solid rgba(34, 197, 94, 0.55);
+  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  border-radius: 0.4rem;
+}
+
+.sx-safety {
+  color: color-mix(in srgb, var(--foreground) 80%, var(--muted-foreground));
+}
+
 .sx-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem 0.7rem;
   color: var(--muted-foreground);
   font-size: 0.78rem;
+}
+
+.sx-ref-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sx-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.18rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+
+.sx-warning-card {
+  background:
+    radial-gradient(circle at top right, rgba(234, 179, 8, 0.10), transparent 18rem),
+    color-mix(in srgb, var(--card) 88%, transparent);
 }
 
 .sx-warn {
