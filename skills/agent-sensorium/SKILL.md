@@ -18,7 +18,7 @@ During normal operation exactly one tool is exposed: `sensorium`. It always oper
 ### When to use `ingest`
 
 Call `sensorium(action="ingest", text="...", kind="...", strength=0.7)` when the current exchange contains:
-- An explicit operator correction or design decision
+- An explicit correction from your user or a design decision you should not lose
 - Durable relational salience or a "this matters" cue
 - An unresolved question worth revisiting later
 
@@ -32,7 +32,7 @@ The pre-LLM hook may inject a pointer like:
 Sensorium has something pending: <short title>. Say "take it up" to open it.
 ```
 
-When the operator says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
+When your user says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
 
 The pointer is a doorway only — capsule internals are not returned until `open` is called and the surface/sensitivity gate passes.
 
@@ -93,7 +93,7 @@ Config-only tool for the per-profile sensor registry (`sensors/registry.json`). 
 
 ### Other admin tools
 
-The admin surface also includes granular tools for direct signal/event ingestion, dispatch, thread service, subconscious advisory, outbox management, artifact records, thread actions, and probe audit. These are for operator inspection and controlled intervention — not for ordinary agent use.
+The admin surface also includes granular tools for direct signal/event ingestion, dispatch, thread service, subconscious advisory, outbox management, artifact records, thread actions, and probe audit. These are for setup, inspection, and controlled intervention — not for ordinary agent use.
 
 ---
 
@@ -120,8 +120,8 @@ These are admin/CLI surfaces — never the live `sensorium` tool. Load `agent-se
 
 ## Key boundaries
 
-- **Pull-based.** Nothing is pushed. The agent and operator request status; the pipeline does not deliver unsolicited messages.
-- **No autonomous outbound delivery.** Artifacts queued in the outbox are never delivered without a conscious receipt and explicit operator-configured dispatch rules.
+- **Pull-based.** Nothing is pushed. The agent and user/admin request status; the pipeline does not deliver unsolicited messages.
+- **No autonomous outbound delivery.** Artifacts queued in the outbox are never delivered without a conscious receipt and explicit user/admin-configured dispatch rules.
 - **No external task creation without explicit approval.**
 - **Subconscious advisory is disabled by default.** The cheap model lane is explicit opt-in (`--subconscious-model` flag on tick).
 - **Missing config fails safe.** Local-only surfaces, private sensitivity.
