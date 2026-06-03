@@ -5,7 +5,6 @@ import json
 import pytest
 
 from agent_sensorium.gate import (
-    is_feedback_self_loop,
     is_settled_feedback_signal,
     should_promote_feedback,
     should_promote_signal,

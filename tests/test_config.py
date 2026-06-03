@@ -6,7 +6,6 @@ import os
 import pytest
 
 from agent_sensorium.config import (
-    SAFE_DEFAULTS,
     apply_sensitivity_policy,
     apply_surface_policy,
     load_instance_config,

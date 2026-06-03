@@ -5,13 +5,7 @@ import json
 import pytest
 
 from agent_sensorium.actions import (
-    ACTION_DEFAULTS,
-    TERMINAL_STATUSES,
-    VALID_ATTACHMENT_KINDS,
-    VALID_OUTCOMES,
     attach_action_ref,
-    compact_actions_for_thread,
-    count_active_actions_for_thread,
     list_thread_actions,
     prepare_action,
     record_action_result,

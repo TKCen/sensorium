@@ -4,11 +4,9 @@ import json
 
 import pytest
 
-from agent_sensorium.schemas import utc_now_iso
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.workers import (
     FakeWorkerAdapter,
-    WORKER_DEFAULTS,
     dispatch_worker_request,
     list_worker_requests,
     prepare_worker_request,

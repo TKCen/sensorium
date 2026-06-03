@@ -3,7 +3,6 @@
 import json
 import tempfile
 
-import pytest
 
 from agent_sensorium.sensors import (
     MAX_REF_CHARS,
@@ -477,7 +476,8 @@ class TestHindsightPressure:
 
 class TestKanbanPressure:
     def test_kanban_sample_reads_counts_only(self, tmp_path):
-        import sqlite3, time
+        import sqlite3
+        import time
 
         db = tmp_path / "kanban.db"
         con = sqlite3.connect(db)
@@ -486,7 +486,8 @@ class TestKanbanPressure:
             "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
             [("t1", "ready", 100, 0, None), ("t2", "running", 50, 0, int(time.time()) - 9999), ("t3", "failed", 10, 3, None)],
         )
-        con.commit(); con.close()
+        con.commit()
+        con.close()
 
         sample = kanban_pressure_sample(board_paths=[str(db)], now_epoch=int(time.time()))
 

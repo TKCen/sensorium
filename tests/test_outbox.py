@@ -3,7 +3,6 @@
 import pytest
 
 from agent_sensorium.outbox import (
-    OUTBOX_DEFAULTS,
     FakeDiscordAdapter,
     dispatch_outbox_request,
     prepare_outbox_request,

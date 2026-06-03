@@ -2,7 +2,6 @@
 import json
 from datetime import datetime, timezone, timedelta
 
-import pytest
 
 from agent_sensorium.tools import (
     handle_sensorium_service_threads,

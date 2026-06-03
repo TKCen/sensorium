@@ -7,9 +7,7 @@ import pytest
 from agent_sensorium.schemas import (
     DELIVERY_ONLY_OUTCOMES,
     FAILURE_OUTCOMES,
-    FEEDBACK_REQUIRED_FIELDS,
     SUCCESS_OUTCOMES,
-    VALID_FEEDBACK_SCOPES,
     classify_feedback_outcome,
     normalize_signal,
     validate_signal,

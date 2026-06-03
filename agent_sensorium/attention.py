@@ -6,7 +6,7 @@ review surface filtered by surface and sensitivity policy. Never mutates state.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from .config import load_instance_config, visible_on_surface
 from .schemas import truncate_text, utc_now_iso
