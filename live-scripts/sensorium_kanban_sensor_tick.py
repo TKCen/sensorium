@@ -583,6 +583,36 @@ def _compact_event_body(event: dict[str, Any]) -> str:
     )
 
 
+def _sticky_block_and_assign_intake(task_id: str, reason: str) -> None:
+    """Make a substrate intake sticky-blocked, then assign it for review.
+
+    Kanban's dependency recompute can auto-promote initial ``blocked`` tasks
+    that have no parents unless there is an explicit block event. Create the
+    substrate row first, emit that sticky block event, and only then assign the
+    review profile so the gateway dispatcher never sees a runnable intake.
+    """
+    if not task_id:
+        return
+    _run_checked([
+        "hermes",
+        "kanban",
+        "--board",
+        BOARD,
+        "block",
+        task_id,
+        reason,
+    ], timeout=60)
+    _run_checked([
+        "hermes",
+        "kanban",
+        "--board",
+        BOARD,
+        "assign",
+        task_id,
+        PROFILE,
+    ], timeout=60)
+
+
 def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
     kind = str(event.get("kind") or "event")[:80]
     eid = str(event.get("id"))
@@ -600,8 +630,6 @@ def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
         body,
         "--initial-status",
         "blocked",
-        "--assignee",
-        PROFILE,
         "--idempotency-key",
         key,
         "--created-by",
@@ -613,6 +641,11 @@ def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
         data = json.loads(proc.stdout or "{}")
     except Exception:
         data = {"raw": proc.stdout}
+    if data.get("status") not in {"done", "archived"}:
+        _sticky_block_and_assign_intake(
+            str(data.get("id") or ""),
+            "Sensorium substrate intake: sticky-blocked so only Subconscious review may settle it.",
+        )
     return {"event_id": eid, "title": title, "idempotency_key": key, "create_result": data}
 
 
@@ -692,8 +725,6 @@ def _create_candidate_intake(candidate: dict[str, Any]) -> dict[str, Any]:
         body,
         "--initial-status",
         "blocked",
-        "--assignee",
-        PROFILE,
         "--idempotency-key",
         key,
         "--created-by",
@@ -705,6 +736,11 @@ def _create_candidate_intake(candidate: dict[str, Any]) -> dict[str, Any]:
         data = json.loads(proc.stdout or "{}")
     except Exception:
         data = {"raw": proc.stdout}
+    if data.get("status") not in {"done", "archived"}:
+        _sticky_block_and_assign_intake(
+            str(data.get("id") or ""),
+            "Sensorium reconciliation intake: sticky-blocked so only Subconscious review may settle it.",
+        )
     return {
         "candidate_id": cand_id,
         "title": title,

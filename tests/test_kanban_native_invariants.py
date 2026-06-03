@@ -578,7 +578,7 @@ class TestRuntimeKanbanBridgeIntakeRows:
         idx = cmd.index(flag)
         return cmd[idx + 1]
 
-    def _assert_blocked_assigned_intake_cmd(
+    def _assert_substrate_create_cmd(
         self,
         cmd: list[str],
         *,
@@ -586,9 +586,14 @@ class TestRuntimeKanbanBridgeIntakeRows:
     ) -> None:
         assert cmd[:5] == ["hermes", "kanban", "--board", "sensorium", "create"]
         assert self._flag_value(cmd, "--initial-status") == "blocked"
-        assert self._flag_value(cmd, "--assignee") == "serasubconscious"
         assert self._flag_value(cmd, "--created-by") == created_by
+        assert "--assignee" not in cmd
         assert "--triage" not in cmd
+
+    def _assert_sticky_block_then_assign(self, calls: list[list[str]], start: int) -> None:
+        assert calls[start][:5] == ["hermes", "kanban", "--board", "sensorium", "block"]
+        assert calls[start + 1][:5] == ["hermes", "kanban", "--board", "sensorium", "assign"]
+        assert calls[start + 1][-1] == "serasubconscious"
 
     @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
     def test_event_and_reconciliation_intakes_are_blocked_assigned(
@@ -628,13 +633,15 @@ class TestRuntimeKanbanBridgeIntakeRows:
         )
 
         assert event_result["create_result"]["id"] == "t_fake_1"
-        assert candidate_result["create_result"]["id"] == "t_fake_2"
-        self._assert_blocked_assigned_intake_cmd(
+        assert candidate_result["create_result"]["id"] == "t_fake_4"
+        self._assert_substrate_create_cmd(
             calls[0], created_by="sensorium-kanban-sensor"
         )
-        self._assert_blocked_assigned_intake_cmd(
-            calls[1], created_by="sensorium-kanban-reconcile"
+        self._assert_sticky_block_then_assign(calls, 1)
+        self._assert_substrate_create_cmd(
+            calls[3], created_by="sensorium-kanban-reconcile"
         )
+        self._assert_sticky_block_then_assign(calls, 4)
 
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:
