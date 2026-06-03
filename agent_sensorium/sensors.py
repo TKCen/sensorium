@@ -10,10 +10,13 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .schemas import VALID_SENSITIVITIES, truncate_text
@@ -41,26 +44,149 @@ def _safe_sensitivity(value: str) -> str:
     return value if value in VALID_SENSITIVITIES else "private"
 
 
+_SENSOR_STATUSES = {"active", "paused", "deprecated"}
+_sensor_registry: dict[str, dict] = {}
+
+
+def _safe_sensor_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", (name or "").strip()).strip("_")
+    return cleaned[:80]
+
+
+def sensor_registry_snapshot() -> dict:
+    """Return deterministic runtime sensor registry state."""
+    return {name: _sensor_registry[name] for name in sorted(_sensor_registry)}
+
+
+def register_sensor_kind(
+    name: str,
+    *,
+    defaults: dict | None = None,
+    status: str = "active",
+    store=None,
+) -> dict:
+    """Register/modify/pause/deprecate a deterministic sensor kind at runtime."""
+    safe_name = _safe_sensor_name(name)
+    if not safe_name:
+        raise ValueError("sensor name required")
+    if status not in _SENSOR_STATUSES:
+        raise ValueError(f"invalid sensor status: {status}")
+    existing = dict(_sensor_registry.get(safe_name, {}))
+    merged_defaults = dict(existing.get("defaults") or {})
+    if defaults:
+        for key, value in defaults.items():
+            if key in {"strength_hint", "sensitivity", "allowed_surfaces", "correlation_keys"}:
+                merged_defaults[key] = value
+    entry = {
+        "name": safe_name,
+        "status": status,
+        "defaults": merged_defaults,
+    }
+    _sensor_registry[safe_name] = entry
+    if store is not None:
+        save_sensor_registry(store)
+    return dict(entry)
+
+
+def save_sensor_registry(store) -> dict:
+    snapshot = sensor_registry_snapshot()
+    store.write_sensor_registry(snapshot)
+    return snapshot
+
+
+def load_sensor_registry(store) -> dict:
+    _sensor_registry.clear()
+    for name, entry in sorted(store.read_sensor_registry().items()):
+        if isinstance(entry, dict):
+            safe_name = _safe_sensor_name(name)
+            if safe_name:
+                _sensor_registry[safe_name] = {
+                    "name": safe_name,
+                    "status": entry.get("status") if entry.get("status") in _SENSOR_STATUSES else "active",
+                    "defaults": dict(entry.get("defaults") or {}),
+                }
+    return sensor_registry_snapshot()
+
+
+def _active_sensor_defaults(kind: str) -> dict:
+    entry = _sensor_registry.get(kind)
+    if not entry or entry.get("status") != "active":
+        return {}
+    defaults = entry.get("defaults")
+    return dict(defaults) if isinstance(defaults, dict) else {}
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def apply_pressure_delta(candidate: dict, delta: float, *, reason: str = "") -> dict:
+    updated = dict(candidate)
+    updated["pressure"] = round(_clamp(float(updated.get("pressure", 0.0)) + float(delta)), 3)
+    meta = dict(updated.get("pressure_meta") or {})
+    meta["last_delta"] = round(float(delta), 3)
+    meta["last_delta_reason"] = truncate_text(reason, 120)
+    updated["pressure_meta"] = meta
+    return updated
+
+
+def mark_extinct(candidate: dict, *, reason: str = "") -> dict:
+    updated = apply_pressure_delta(candidate, -1.0, reason=reason or "extinction")
+    updated["extinct"] = True
+    updated["extinct_at"] = _utc_now().isoformat().replace("+00:00", "Z")
+    meta = dict(updated.get("pressure_meta") or {})
+    meta["extinction_reason"] = truncate_text(reason, 160)
+    updated["pressure_meta"] = meta
+    return updated
+
+
+def is_candidate_extinct(candidate: dict, *, now: str | None = None, silence_ttl_hours: float = 168.0) -> bool:
+    if candidate.get("extinct"):
+        return True
+    outcome = (candidate.get("feedback_meta") or {}).get("outcome")
+    if outcome in {"operator_rejected", "silence", "rejected"}:
+        return True
+    reference = _parse_iso(candidate.get("updated_at") or candidate.get("created_at"))
+    current = _parse_iso(now) if now else _utc_now()
+    if reference is None or current is None:
+        return False
+    return (current - reference).total_seconds() >= float(silence_ttl_hours) * 3600.0
+
+
 def session_event_signal(
     *,
     kind: str,
     summary: str,
     session_ref: str = "",
-    strength_hint: float = 0.5,
+    strength_hint: float | None = None,
     sensitivity: str = "private",
     allowed_surfaces: list[str] | None = None,
     correlation_keys: list[str] | None = None,
 ) -> dict:
+    defaults = _active_sensor_defaults(kind)
+    effective_strength = defaults.get("strength_hint", 0.5) if strength_hint is None else strength_hint
+    effective_sensitivity = defaults.get("sensitivity", sensitivity)
+    effective_surfaces = allowed_surfaces if allowed_surfaces is not None else defaults.get("allowed_surfaces")
+    effective_keys = correlation_keys if correlation_keys is not None else defaults.get("correlation_keys")
     return {
         "sensor": "sensorium.session_event",
         "source": "hermes_session",
         "kind": kind,
         "summary": truncate_text(summary, MAX_SUMMARY_CHARS),
         "session_ref": truncate_text(session_ref, MAX_REF_CHARS),
-        "strength_hint": _clamp(strength_hint),
-        "sensitivity": _safe_sensitivity(sensitivity),
-        "allowed_surfaces": _safe_list(allowed_surfaces, default=["local"]),
-        "correlation_keys": _safe_list(correlation_keys, default=[]),
+        "strength_hint": _clamp(effective_strength),
+        "sensitivity": _safe_sensitivity(effective_sensitivity),
+        "allowed_surfaces": _safe_list(effective_surfaces, default=["local"]),
+        "correlation_keys": _safe_list(effective_keys, default=[]),
     }
 
 
@@ -305,8 +431,11 @@ def _pressure_reasons(sample: dict, cfg: dict) -> list[dict]:
                 }
             )
 
-    less = lambda value, threshold: value < threshold
-    greater = lambda value, threshold: value >= threshold
+    def less(value, threshold):
+        return value < threshold
+
+    def greater(value, threshold):
+        return value >= threshold
     add_if("mem_available_pct", "memory", less, less, cfg["mem_degraded_pct"], cfg["mem_critical_pct"])
     add_if("swap_used_pct", "memory", greater, greater, cfg["swap_degraded_pct"], cfg["swap_critical_pct"])
     add_if("load_per_cpu", "cpu", greater, greater, cfg["load_degraded_per_cpu"], cfg["load_critical_per_cpu"])
@@ -574,6 +703,220 @@ def _transition_classifier(
     return signal, st
 
 
+CODEX_USAGE_DEFAULT_CONFIG = {
+    "primary_over_expected_degraded_pp": 10.0,
+    "primary_over_expected_critical_pp": 25.0,
+    "weekly_over_expected_degraded_pp": 5.0,
+    "weekly_over_expected_critical_pp": 15.0,
+    "reset_near_seconds": 3600,
+}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _window_pace_points(*, used_percent, reset_after_seconds, window_seconds) -> tuple[float, float, float] | None:
+    window = _safe_float(window_seconds, -1.0)
+    if window <= 0:
+        return None
+    reset_after = max(0.0, min(window, _safe_float(reset_after_seconds)))
+    used = _safe_float(used_percent)
+    elapsed_percent = ((window - reset_after) / window) * 100.0
+    over_expected_pp = used - elapsed_percent
+    return round(used, 3), round(elapsed_percent, 3), round(over_expected_pp, 3)
+
+
+def codex_usage_sample(
+    *,
+    probe_path: str | None = None,
+    timeout_seconds: int = 45,
+) -> dict:
+    """Read the existing Codex/OpenAI subscription usage probe.
+
+    This is deliberately a tiny adapter around the already-audited read-only
+    probe. It stores no tokens/account identifiers and returns only compact
+    budget/window metadata for Sensorium classification.
+    """
+    path = Path(probe_path or (Path.home() / ".hermes" / "scripts" / "subscription_usage_probe.py"))
+    if not path.exists():
+        return {"available": False, "error": "usage_probe_missing", "probe_path": str(path)}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(path), "--json"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False, "error": "usage_probe_timeout", "probe_path": str(path)}
+    except Exception as exc:
+        return {"available": False, "error": f"usage_probe_error:{type(exc).__name__}", "probe_path": str(path)}
+    if proc.returncode != 0:
+        return {"available": False, "error": "usage_probe_failed", "probe_path": str(path)}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"available": False, "error": "usage_probe_bad_json", "probe_path": str(path)}
+    codex = data.get("codex_openai") if isinstance(data, dict) else None
+    if not isinstance(codex, dict):
+        return {"available": False, "error": "codex_payload_missing", "probe_path": str(path)}
+    return codex_usage_compact_sample(codex, generated_at=data.get("generated_at"))
+
+
+def codex_usage_compact_sample(codex: dict, *, generated_at: str | None = None) -> dict:
+    """Sanitize a Codex usage payload down to pressure-relevant fields."""
+    raw_main = codex.get("main_rate_limit")
+    main = raw_main if isinstance(raw_main, dict) else {}
+    raw_primary = main.get("primary")
+    primary = raw_primary if isinstance(raw_primary, dict) else {}
+    raw_secondary = main.get("secondary")
+    secondary = raw_secondary if isinstance(raw_secondary, dict) else {}
+    extras: list[dict] = []
+    for item in codex.get("additional_rate_limits") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_rl = item.get("rate_limit")
+        rl = raw_rl if isinstance(raw_rl, dict) else {}
+        raw_p = rl.get("primary")
+        p = raw_p if isinstance(raw_p, dict) else {}
+        raw_s = rl.get("secondary")
+        s = raw_s if isinstance(raw_s, dict) else {}
+        extras.append({
+            "limit_name": truncate_text(str(item.get("limit_name") or ""), 80),
+            "metered_feature": truncate_text(str(item.get("metered_feature") or ""), 80),
+            "allowed": rl.get("allowed"),
+            "limit_reached": rl.get("limit_reached"),
+            "primary_used_percent": p.get("used_percent"),
+            "primary_reset_after_seconds": p.get("reset_after_seconds"),
+            "primary_window_seconds": p.get("window_seconds"),
+            "weekly_used_percent": s.get("used_percent"),
+            "weekly_reset_after_seconds": s.get("reset_after_seconds"),
+            "weekly_window_seconds": s.get("window_seconds"),
+        })
+    return {
+        "available": bool(codex.get("available")),
+        "generated_at": truncate_text(str(generated_at or ""), 64),
+        "plan_type": truncate_text(str(codex.get("plan_type") or ""), 80),
+        "allowed": main.get("allowed"),
+        "limit_reached": main.get("limit_reached"),
+        "primary_used_percent": primary.get("used_percent"),
+        "primary_reset_after_seconds": primary.get("reset_after_seconds"),
+        "primary_window_seconds": primary.get("window_seconds"),
+        "weekly_used_percent": secondary.get("used_percent"),
+        "weekly_reset_after_seconds": secondary.get("reset_after_seconds"),
+        "weekly_window_seconds": secondary.get("window_seconds"),
+        "additional_limits": extras[:8],
+        "error": truncate_text(str(codex.get("error") or ""), 120),
+    }
+
+
+def classify_codex_usage_pressure(
+    sample: dict,
+    *,
+    state: dict | None = None,
+    config: dict | None = None,
+) -> tuple[dict | None, dict]:
+    """Classify Codex/OpenAI reservoir pressure from compact usage metadata."""
+    cfg = dict(CODEX_USAGE_DEFAULT_CONFIG)
+    if config:
+        cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
+    available = bool(sample.get("available"))
+    allowed = sample.get("allowed")
+    limit_reached = bool(sample.get("limit_reached"))
+    primary_used = _safe_float(sample.get("primary_used_percent"))
+    weekly_used = _safe_float(sample.get("weekly_used_percent"))
+    reset_after = _safe_int(sample.get("primary_reset_after_seconds"))
+    weekly_reset_after = _safe_int(sample.get("weekly_reset_after_seconds"))
+    primary_window = _safe_int(sample.get("primary_window_seconds"))
+    weekly_window = _safe_int(sample.get("weekly_window_seconds"))
+    primary_pace = _window_pace_points(
+        used_percent=primary_used,
+        reset_after_seconds=reset_after,
+        window_seconds=primary_window,
+    )
+    weekly_pace = _window_pace_points(
+        used_percent=weekly_used,
+        reset_after_seconds=weekly_reset_after,
+        window_seconds=weekly_window,
+    )
+    primary_elapsed = primary_pace[1] if primary_pace else 0.0
+    primary_over = primary_pace[2] if primary_pace else primary_used
+    weekly_elapsed = weekly_pace[1] if weekly_pace else 0.0
+    weekly_over = weekly_pace[2] if weekly_pace else weekly_used
+    reset_near = bool(reset_after and reset_after <= int(cfg["reset_near_seconds"]))
+    level = "healthy"
+    family = "codex_usage"
+    reason = ""
+    if not available:
+        level = "critical"
+        family = "availability"
+        reason = sample.get("error") or "codex usage unavailable"
+    elif allowed is False or limit_reached:
+        level = "critical"
+        family = "quota"
+        reason = "codex main limit reached"
+    elif weekly_over >= float(cfg["weekly_over_expected_critical_pp"]):
+        level = "critical"
+        family = "weekly_pace"
+        reason = f"weekly_over_expected={weekly_over:.0f}pp used={weekly_used:.0f}% elapsed={weekly_elapsed:.0f}%"
+    elif primary_over >= float(cfg["primary_over_expected_critical_pp"]):
+        level = "critical"
+        family = "primary_pace"
+        reason = f"primary_over_expected={primary_over:.0f}pp used={primary_used:.0f}% elapsed={primary_elapsed:.0f}%"
+    elif weekly_over >= float(cfg["weekly_over_expected_degraded_pp"]):
+        level = "degraded"
+        family = "weekly_pace"
+        reason = f"weekly_over_expected={weekly_over:.0f}pp used={weekly_used:.0f}% elapsed={weekly_elapsed:.0f}%"
+    elif primary_over >= float(cfg["primary_over_expected_degraded_pp"]):
+        level = "degraded"
+        family = "primary_pace"
+        reason = f"primary_over_expected={primary_over:.0f}pp used={primary_used:.0f}% elapsed={primary_elapsed:.0f}%"
+
+    values = {
+        "provider": "codex_openai",
+        "plan_type": sample.get("plan_type") or "",
+        "primary_used_percent": primary_used,
+        "primary_reset_after_seconds": reset_after,
+        "primary_window_seconds": primary_window,
+        "primary_elapsed_percent": primary_elapsed,
+        "primary_over_expected_pp": primary_over,
+        "weekly_used_percent": weekly_used,
+        "weekly_reset_after_seconds": weekly_reset_after,
+        "weekly_window_seconds": weekly_window,
+        "weekly_elapsed_percent": weekly_elapsed,
+        "weekly_over_expected_pp": weekly_over,
+        "reset_near": reset_near,
+        "additional_limit_count": len(sample.get("additional_limits") or []),
+    }
+    sig, next_state = _transition_classifier(
+        sample,
+        state=state,
+        observed_level=level,
+        metric_family=family,
+        reason=reason,
+        values=values,
+        sensor="sensorium.codex_usage_pressure",
+        source="provider_budget",
+        kind="inference_budget_pressure",
+        correlation_key="codex-openai-energy",
+    )
+    next_state["last_generated_at"] = sample.get("generated_at") or ""
+    next_state["last_values"] = values
+    return sig, next_state
+
+
 _TCP_STATE_NAMES = {
     "01": "ESTABLISHED",
     "02": "SYN_SENT",
@@ -615,8 +958,10 @@ def machine_network_pressure_sample(*, proc_root: str = "/proc") -> dict:
             continue
         interfaces.append(name)
         try:
-            rx_errors += int(values[2]); rx_drops += int(values[3])
-            tx_errors += int(values[10]); tx_drops += int(values[11])
+            rx_errors += int(values[2])
+            rx_drops += int(values[3])
+            tx_errors += int(values[10])
+            tx_drops += int(values[11])
         except ValueError:
             continue
     tcp_states: dict[str, int] = {}
@@ -645,17 +990,29 @@ def classify_machine_network_pressure(sample: dict, *, state: dict | None = None
     tcp = sample.get("tcp_states", {}) if isinstance(sample.get("tcp_states"), dict) else {}
     syn = int(tcp.get("SYN_SENT", 0) or 0) + int(tcp.get("SYN_RECV", 0) or 0)
     close_wait = int(tcp.get("CLOSE_WAIT", 0) or 0)
-    level = "healthy"; family = "network"; reason = ""
+    level = "healthy"
+    family = "network"
+    reason = ""
     if int(sample.get("non_loopback_interfaces", 0) or 0) == 0:
-        level = "critical"; family = "interface"; reason = "no non-loopback interfaces"
+        level = "critical"
+        family = "interface"
+        reason = "no non-loopback interfaces"
     elif close_wait >= cfg["close_wait_degraded"]:
-        level = "degraded"; family = "tcp"; reason = f"CLOSE_WAIT={close_wait}"
+        level = "degraded"
+        family = "tcp"
+        reason = f"CLOSE_WAIT={close_wait}"
     elif syn >= cfg["syn_degraded"]:
-        level = "degraded"; family = "tcp"; reason = f"SYN backlog={syn}"
+        level = "degraded"
+        family = "tcp"
+        reason = f"SYN backlog={syn}"
     elif "last_error_total" in st and (errors - int(st.get("last_error_total", 0))) >= cfg["error_delta_degraded"]:
-        level = "degraded"; family = "errors"; reason = f"network errors increased to {errors}"
+        level = "degraded"
+        family = "errors"
+        reason = f"network errors increased to {errors}"
     elif "last_drop_total" in st and (drops - int(st.get("last_drop_total", 0))) >= cfg["error_delta_degraded"]:
-        level = "degraded"; family = "drops"; reason = f"network drops increased to {drops}"
+        level = "degraded"
+        family = "drops"
+        reason = f"network drops increased to {drops}"
     values = {
         "interface_count": len(sample.get("interfaces", []) or []),
         "non_loopback_interfaces": int(sample.get("non_loopback_interfaces", 0) or 0),
@@ -706,15 +1063,25 @@ def classify_machine_process_pressure(sample: dict, *, state: dict | None = None
         cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
     zombies = int(sample.get("zombie_count", 0) or 0)
     d_count = int(sample.get("uninterruptible_count", 0) or 0)
-    level = "healthy"; family = "process"; reason = ""
+    level = "healthy"
+    family = "process"
+    reason = ""
     if zombies >= cfg["zombie_critical"]:
-        level = "critical"; family = "zombie"; reason = f"zombies={zombies}"
+        level = "critical"
+        family = "zombie"
+        reason = f"zombies={zombies}"
     elif d_count >= cfg["d_critical"]:
-        level = "critical"; family = "uninterruptible"; reason = f"D-state={d_count}"
+        level = "critical"
+        family = "uninterruptible"
+        reason = f"D-state={d_count}"
     elif zombies >= cfg["zombie_degraded"]:
-        level = "degraded"; family = "zombie"; reason = f"zombies={zombies}"
+        level = "degraded"
+        family = "zombie"
+        reason = f"zombies={zombies}"
     elif d_count >= cfg["d_degraded"]:
-        level = "degraded"; family = "uninterruptible"; reason = f"D-state={d_count}"
+        level = "degraded"
+        family = "uninterruptible"
+        reason = f"D-state={d_count}"
     values = {"process_count": int(sample.get("process_count", 0) or 0), "zombie_count": zombies, "uninterruptible_count": d_count}
     return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.machine_process_pressure", source="machine", kind="process_pressure", correlation_key="machine-process-pressure")
 
@@ -1253,7 +1620,9 @@ def classify_hindsight_pressure(sample: dict, *, state: dict | None = None, conf
     }
     if config:
         cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
-    pending = int(sample.get("pending_total", 0) or 0); processing = int(sample.get("processing_total", 0) or 0); failed = int(sample.get("failed_total", 0) or 0)
+    pending = int(sample.get("pending_total", 0) or 0)
+    processing = int(sample.get("processing_total", 0) or 0)
+    failed = int(sample.get("failed_total", 0) or 0)
     counts_by_status = sample.get("operation_counts") if isinstance(sample.get("operation_counts"), dict) else {}
     has_family_counts = bool(counts_by_status)
     if has_family_counts:
@@ -1266,23 +1635,41 @@ def classify_hindsight_pressure(sample: dict, *, state: dict | None = None, conf
     else:
         refresh_pending = refresh_processing = refresh_failed = 0
         core_pending, core_processing, core_failed = pending, processing, failed
-    level = "healthy"; family = "memory_queue"; reason = ""
+    level = "healthy"
+    family = "memory_queue"
+    reason = ""
     if not sample.get("api_available", False):
-        level = "degraded"; family = "api"; reason = "Hindsight API unavailable"
+        level = "degraded"
+        family = "api"
+        reason = "Hindsight API unavailable"
     elif core_pending >= cfg["pending_critical"]:
-        level = "critical"; family = "core_pending"; reason = f"core_pending={core_pending}"
+        level = "critical"
+        family = "core_pending"
+        reason = f"core_pending={core_pending}"
     elif core_processing >= cfg["processing_critical"]:
-        level = "critical"; family = "core_processing"; reason = f"core_processing={core_processing}"
+        level = "critical"
+        family = "core_processing"
+        reason = f"core_processing={core_processing}"
     elif core_pending >= cfg["pending_degraded"]:
-        level = "degraded"; family = "core_pending"; reason = f"core_pending={core_pending}"
+        level = "degraded"
+        family = "core_pending"
+        reason = f"core_pending={core_pending}"
     elif core_failed >= cfg["failed_degraded"]:
-        level = "degraded"; family = "core_failed"; reason = f"core_failed={core_failed}"
+        level = "degraded"
+        family = "core_failed"
+        reason = f"core_failed={core_failed}"
     elif refresh_pending >= cfg["refresh_pending_degraded"]:
-        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model pending={refresh_pending}"
+        level = "degraded"
+        family = "refresh_mental_model"
+        reason = f"refresh_mental_model pending={refresh_pending}"
     elif refresh_processing >= cfg["refresh_processing_degraded"]:
-        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model processing={refresh_processing}"
+        level = "degraded"
+        family = "refresh_mental_model"
+        reason = f"refresh_mental_model processing={refresh_processing}"
     elif refresh_failed >= cfg["refresh_failed_degraded"]:
-        level = "degraded"; family = "refresh_mental_model"; reason = f"refresh_mental_model failed={refresh_failed}"
+        level = "degraded"
+        family = "refresh_mental_model"
+        reason = f"refresh_mental_model failed={refresh_failed}"
     values = {
         "api_available": bool(sample.get("api_available", False)),
         "pending_total": pending,
@@ -1346,18 +1733,32 @@ def classify_kanban_pressure(sample: dict, *, state: dict | None = None, config:
     cfg = {"stale_degraded": 1, "stale_critical": 5, "failed_degraded": 3, "failed_critical": 10, "blocked_degraded": 10}
     if config:
         cfg.update({k: v for k, v in config.items() if k in cfg and isinstance(v, (int, float))})
-    stale = int(sample.get("stale_running_tasks", 0) or 0); failed = int(sample.get("failed_tasks", 0) or 0); blocked = int(sample.get("blocked_tasks", 0) or 0)
-    level = "healthy"; family = "kanban"; reason = ""
+    stale = int(sample.get("stale_running_tasks", 0) or 0)
+    failed = int(sample.get("failed_tasks", 0) or 0)
+    blocked = int(sample.get("blocked_tasks", 0) or 0)
+    level = "healthy"
+    family = "kanban"
+    reason = ""
     if stale >= cfg["stale_critical"]:
-        level = "critical"; family = "stale_running"; reason = f"stale_running={stale}"
+        level = "critical"
+        family = "stale_running"
+        reason = f"stale_running={stale}"
     elif failed >= cfg["failed_critical"]:
-        level = "critical"; family = "failed"; reason = f"failed={failed}"
+        level = "critical"
+        family = "failed"
+        reason = f"failed={failed}"
     elif stale >= cfg["stale_degraded"]:
-        level = "degraded"; family = "stale_running"; reason = f"stale_running={stale}"
+        level = "degraded"
+        family = "stale_running"
+        reason = f"stale_running={stale}"
     elif failed >= cfg["failed_degraded"]:
-        level = "degraded"; family = "failed"; reason = f"failed={failed}"
+        level = "degraded"
+        family = "failed"
+        reason = f"failed={failed}"
     elif blocked >= cfg["blocked_degraded"]:
-        level = "degraded"; family = "blocked"; reason = f"blocked={blocked}"
+        level = "degraded"
+        family = "blocked"
+        reason = f"blocked={blocked}"
     values = {"board_count": int(sample.get("board_count", 0) or 0), "task_count": int(sample.get("task_count", 0) or 0), "failed_tasks": failed, "blocked_tasks": blocked, "stale_running_tasks": stale, "status_counts": dict(sample.get("status_counts", {}) or {})}
     return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.kanban_pressure", source="kanban", kind="kanban_pressure", correlation_key="kanban-pressure")
 

@@ -63,6 +63,7 @@ def register(ctx) -> None:
         handle_sensorium_outbox_dispatch,
         handle_sensorium_outbox_prepare,
         handle_sensorium_service_threads,
+        handle_sensorium_sensor_config,
         handle_sensorium_status,
         handle_sensorium_subconscious_advisory,
         handle_sensorium_thread_open,
@@ -125,6 +126,44 @@ def register(ctx) -> None:
             state_dir=args.get("state_dir"),
         ),
         description="Ingest a low-level signal and promote if threshold is met.",
+    )
+    ctx.register_tool(
+        name="sensorium_sensor_config",
+        toolset=_TOOLSET,
+        schema=_schema(
+            "sensorium_sensor_config",
+            "Register, modify, pause, deprecate, or list deterministic Sensorium sensor kinds. Config-only; no sensor execution or task spawning.",
+            {
+                **common,
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "register", "modify", "pause", "deprecate"],
+                    "description": "Registry action to perform.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Sensor kind name for register/modify/pause/deprecate.",
+                },
+                "defaults": {
+                    "type": "object",
+                    "description": "Optional compact signal defaults: strength_hint, sensitivity, allowed_surfaces, correlation_keys.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "paused", "deprecated"],
+                    "description": "Explicit status for register/modify; pause/deprecate override this.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_sensor_config(
+            action=args.get("action", "list"),
+            name=args.get("name", ""),
+            defaults=args.get("defaults"),
+            status=args.get("status", "active"),
+            instance=_arg_instance(args),
+            state_dir=args.get("state_dir"),
+        ),
+        description="Runtime sensor registry management without external action.",
     )
     ctx.register_tool(
         name="sensorium_ingest_event",

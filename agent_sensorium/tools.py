@@ -2,13 +2,19 @@
 
 import json
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from .attention import build_attention_inbox
-from .dispatcher import dispatch_once as _dispatch_once
+from .dispatcher import current_budget_state, dispatch_once as _dispatch_once
 from .gate import (
+    build_pressure_pitch,
     candidate_fingerprint,
+    decayed_candidate,
+    DEFAULT_CONFIG,
     event_fingerprint,
     event_to_candidate,
+    inhibited_by_sensor_policy,
+    prune_sensor_policy,
     promote_signal_to_event,
     should_promote_signal,
     signal_fingerprint,
@@ -24,6 +30,13 @@ from .schemas import (
     validate_signal,
 )
 from .store import SensoriumStore
+from .sensors import (
+    is_candidate_extinct,
+    load_sensor_registry,
+    mark_extinct,
+    register_sensor_kind,
+    sensor_registry_snapshot,
+)
 from .subconscious import run_subconscious_advisory
 from .improvement import (
     record_attention_policy_decision,
@@ -74,6 +87,26 @@ def _err(instance: str, error: str) -> str:
     return json.dumps({"success": False, "instance": instance, "data": None, "error": error})
 
 
+def _file_mtime_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _legacy_state_latest_info(store: SensoriumStore, state: dict) -> dict:
+    path = store.root / "state.latest.json"
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "mtime": _file_mtime_iso(path),
+        "updated_at": state.get("updated_at") if isinstance(state, dict) else None,
+        "deprecated": True,
+        "role": "legacy_dispatch_snapshot",
+        "excluded_from_freshness": True,
+    }
+
+
 def handle_sensorium_status(
     *, instance: str = "default", state_dir: str | None = None,
     config_path: str | None = None,
@@ -83,7 +116,7 @@ def handle_sensorium_status(
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
 
-    _, config_diag = load_instance_config(
+    instance_config, config_diag = load_instance_config(
         config_path=config_path, state_dir=str(store.root),
     )
 
@@ -164,6 +197,8 @@ def handle_sensorium_status(
             for t in visible_threads[:5]
         ],
         "config": config_diag,
+        "budgets": current_budget_state(store, instance_config),
+        "legacy_state_latest": _legacy_state_latest_info(store, state),
         "ts": utc_now_iso(),
     }
 
@@ -195,8 +230,6 @@ def handle_sensorium_status(
                 "activation_substrate": "kanban",
                 "ignored_as_activation": True,
             }
-        if "budgets" in state:
-            data["budgets"] = state.get("budgets")
         if "locks" in state:
             data["locks"] = state.get("locks")
 
@@ -272,6 +305,49 @@ def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
         if incoming_keys & set(candidate.get("correlation_keys") or []):
             return candidate
     return None
+
+
+def _read_pruned_sensor_policy(
+    store: SensoriumStore,
+    *,
+    config: dict | None = None,
+    now: str | None = None,
+) -> dict:
+    policy = store.read_sensor_policy()
+    pruned = prune_sensor_policy(policy, config=config, now=now)
+    if pruned != policy:
+        store.write_sensor_policy(pruned)
+    return pruned
+
+
+def _apply_candidate_decay(
+    store: SensoriumStore,
+    candidates: list[dict],
+    *,
+    config: dict | None = None,
+    now: str | None = None,
+) -> int:
+    """Persist one cheap habituation pass over active candidates."""
+    decayed_count = 0
+    for idx, candidate in enumerate(candidates):
+        if candidate.get("status", "candidate") != "candidate":
+            continue
+        decayed = decayed_candidate(candidate, now=now, config=config)
+        silence_ttl_hours = (config or {}).get("silence_ttl_hours", DEFAULT_CONFIG["inhibition"]["ttl_hours"])
+        try:
+            silence_ttl_hours = float(silence_ttl_hours)
+        except (TypeError, ValueError):
+            silence_ttl_hours = DEFAULT_CONFIG["inhibition"]["ttl_hours"]
+        if is_candidate_extinct(decayed, now=now, silence_ttl_hours=silence_ttl_hours):
+            decayed = mark_extinct(decayed, reason="silence_ttl_expired")
+            decayed["status"] = "suppressed"
+            decayed["updated_at"] = now or utc_now_iso()
+        if decayed != candidate:
+            candidates[idx] = decayed
+            decayed_count += 1
+    if decayed_count:
+        _rewrite_jsonl(store, "candidates", candidates)
+    return decayed_count
 
 
 def _event_to_existing_result(event: dict, candidates: list[dict]) -> dict:
@@ -360,6 +436,7 @@ def _append_event_and_create_or_update_candidate(
 ) -> dict:
     events = store.read_jsonl("events")
     candidates = store.read_jsonl("candidates")
+    _apply_candidate_decay(store, candidates, config=config)
 
     existing_event = _find_existing_event(events, event)
     if existing_event:
@@ -393,6 +470,37 @@ def _append_event_and_create_or_update_candidate(
     }
 
 
+def handle_sensorium_sensor_config(
+    *,
+    action: str,
+    name: str = "",
+    defaults: dict | None = None,
+    status: str = "active",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Runtime programmable sensor registry management.
+
+    This is configuration-only: it never runs sensors, emits signals, spawns tasks,
+    or performs external action.
+    """
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    load_sensor_registry(store)
+    try:
+        if action == "list":
+            registry = sensor_registry_snapshot()
+        elif action in {"register", "modify", "pause", "deprecate"}:
+            effective_status = {"pause": "paused", "deprecate": "deprecated"}.get(action, status)
+            register_sensor_kind(name, defaults=defaults or {}, status=effective_status, store=store)
+            registry = sensor_registry_snapshot()
+        else:
+            return _err(instance, "Invalid action. Must be one of: list, register, modify, pause, deprecate")
+    except ValueError as e:
+        return _err(instance, str(e))
+    return _ok(instance, {"action": action, "registry": registry})
+
+
 def handle_sensorium_ingest_signal(
     *,
     signal: dict,
@@ -411,6 +519,9 @@ def handle_sensorium_ingest_signal(
     normalized = normalize_signal(signal)
     normalized["fingerprint"] = signal_fingerprint(normalized)
 
+    policy = _read_pruned_sensor_policy(store, config=config)
+    inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
+
     signals = store.read_jsonl("signals")
     existing_signal = _find_existing_signal(signals, normalized)
     if existing_signal:
@@ -419,6 +530,14 @@ def handle_sensorium_ingest_signal(
         return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
 
     store.append_jsonl("signals", normalized)
+
+    if inhibited:
+        return _ok(instance, {
+            "signal_id": normalized["id"],
+            "promoted": False,
+            "duplicate": False,
+            "reason": f"inhibited: {inhibition_reason}",
+        })
 
     promoted, reason = should_promote_signal(normalized, config)
     result: dict = {
@@ -434,6 +553,17 @@ def handle_sensorium_ingest_signal(
         result["event_id"] = event_result["event_id"]
         if "candidate_id" in event_result:
             result["candidate_id"] = event_result["candidate_id"]
+            candidate = next((c for c in store.read_jsonl("candidates") if c.get("id") == event_result["candidate_id"]), None)
+            if candidate:
+                thresholds = dict(DEFAULT_CONFIG["thresholds"])
+                if isinstance((config or {}).get("thresholds"), dict):
+                    thresholds.update((config or {})["thresholds"])
+                if candidate.get("pressure", 0.0) >= thresholds["candidate_pressure"]:
+                    result["pitch"] = build_pressure_pitch(
+                        candidate,
+                        events=store.read_jsonl("events"),
+                        threshold=thresholds["candidate_pressure"],
+                    )
         result["coalesced"] = event_result.get("coalesced", False)
 
     return _ok(instance, result)
@@ -676,6 +806,32 @@ def handle_sensorium_candidate_update(
 
     target["status"] = new_status
     target["updated_at"] = utc_now_iso()
+    if action in {"suppress", "cancel", "mark_reviewed"}:
+        reason_lower = reason.lower()
+        if action == "suppress" or "reject" in reason_lower or "silence" in reason_lower:
+            extinguished = mark_extinct(target, reason=reason or action)
+            target.clear()
+            target.update(extinguished)
+            policy = _read_pruned_sensor_policy(store)
+            existing_inhibitions = policy.get("inhibitions")
+            inhibitions = existing_inhibitions if isinstance(existing_inhibitions, list) else []
+            created_at = utc_now_iso()
+            expires_at = (
+                datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                + timedelta(hours=DEFAULT_CONFIG["inhibition"]["ttl_hours"])
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            inhibition = {
+                "kind": target.get("kind", ""),
+                "correlation_keys": list(target.get("correlation_keys", []) or []),
+                "reason": reason or action,
+                "candidate_id": candidate_id,
+                "created_at": created_at,
+                "expires_at": expires_at,
+            }
+            if inhibition["kind"] and inhibition not in inhibitions:
+                inhibitions.append(inhibition)
+                policy["inhibitions"] = inhibitions
+                store.write_sensor_policy(prune_sensor_policy(policy))
 
     receipt = {
         "ts": utc_now_iso(),
@@ -1101,6 +1257,8 @@ def handle_sensorium_service_threads(
 
     now_ts = now or utc_now_iso()
     threads = store.read_jsonl("threads")
+    candidates = store.read_jsonl("candidates")
+    decayed_candidates = _apply_candidate_decay(store, candidates, config=config, now=now_ts)
 
     cfg = config or {}
     raw_thresholds = cfg.get("thresholds")
@@ -1171,6 +1329,7 @@ def handle_sensorium_service_threads(
         "dirty": dirty_ids,
         "expiring": expiring_ids,
         "receipts_written": len(receipts),
+        "decayed_candidates": decayed_candidates,
     }
     return _ok(instance, data)
 

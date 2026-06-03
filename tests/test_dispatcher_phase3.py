@@ -87,6 +87,35 @@ class TestDispatcherStateLatest:
         assert state["budgets"]["dispatch"]["remaining"] == state["budgets"]["dispatch"]["capacity"]
         assert store.read_jsonl("threads") == []
 
+    def test_status_refreshes_expired_legacy_budget_without_rewriting_state_latest(self, tmp_path):
+        state_dir = str(tmp_path / "sensorium")
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        expired_reset = datetime.now(timezone.utc) - timedelta(days=1)
+        store.write_state({
+            "state_version": 1,
+            "updated_at": _iso(expired_reset),
+            "budgets": {
+                "dispatch": {
+                    "capacity": 10,
+                    "remaining": 10,
+                    "window_seconds": 3600,
+                    "reset_at": _iso(expired_reset),
+                }
+            },
+            "last_dispatch_result": {"action": "no_candidate"},
+        })
+        before = store.read_state()
+
+        status = json.loads(handle_sensorium_status(instance="test", state_dir=state_dir))["data"]
+
+        dispatch_budget = status["budgets"]["dispatch"]
+        reset_at = datetime.strptime(dispatch_budget["reset_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        assert reset_at > datetime.now(timezone.utc)
+        assert dispatch_budget["source"] == "current_config_window"
+        assert status["legacy_state_latest"]["deprecated"] is True
+        assert status["legacy_state_latest"]["excluded_from_freshness"] is True
+        assert store.read_state() == before
+
 
 class TestDispatcherLocksAndBudgets:
     def test_active_dispatch_lock_refuses_mutating_dispatch(self, tmp_path):

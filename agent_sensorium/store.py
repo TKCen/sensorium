@@ -95,6 +95,37 @@ class SensoriumStore:
         (self._root / "signals").mkdir(exist_ok=True)
         (self._root / "archive").mkdir(exist_ok=True)
         (self._root / "locks").mkdir(exist_ok=True)
+        (self._root / "sensors").mkdir(exist_ok=True)
+
+    def read_sensor_registry(self) -> dict:
+        path = self._root / "sensors" / "registry.json"
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def write_sensor_registry(self, registry: dict) -> None:
+        self.ensure_dirs()
+        atomic_write_json(self._root / "sensors" / "registry.json", registry)
+
+    def read_sensor_policy(self) -> dict:
+        path = self._root / "sensors" / "policy.json"
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def write_sensor_policy(self, policy: dict) -> None:
+        self.ensure_dirs()
+        atomic_write_json(self._root / "sensors" / "policy.json", policy)
 
     def _resolve(self, name: str) -> Path:
         rel = _STATE_NAMES.get(name)

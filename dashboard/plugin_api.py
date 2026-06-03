@@ -33,6 +33,7 @@ def _default_instance() -> str:
 
 DEFAULT_INSTANCE = _default_instance()
 DEFAULT_ROOT = Path(os.environ.get("SENSORIUM_STATE_DIR", Path.home() / ".hermes" / "agent-sensorium" / DEFAULT_INSTANCE))
+METRICS_DIR = Path(os.environ.get("SENSORIUM_METRICS_DIR", Path.home() / ".hermes" / "ops" / "sensorium-metrics"))
 STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
     "events": "events.jsonl",
@@ -71,6 +72,43 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except Exception:
+        return []
+    if limit is not None:
+        lines = lines[-limit:]
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
+    latest = _read_json(METRICS_DIR / "latest.json", {})
+    series = _read_plain_jsonl(METRICS_DIR / "timeseries.jsonl", limit=limit)
+    return {
+        "ok": bool(latest),
+        "dir": str(METRICS_DIR),
+        "latest_mtime": _mtime(METRICS_DIR / "latest.json"),
+        "timeseries_path": str(METRICS_DIR / "timeseries.jsonl"),
+        "series_count": len(series),
+        "latest": latest,
+        "series": series,
+    }
+
+
 def _read_jsonl(root: Path, name: str, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
     rel = STATE_NAMES[name]
     path = root / rel
@@ -105,33 +143,67 @@ def _mtime(path: Path) -> str | None:
         return None
 
 
-def _freshness_mtime(root: Path) -> str | None:
-    """Return the newest mtime for live Sensorium state, not only state.latest.
-
-    `state.latest.json` is dispatcher-oriented and can stay unchanged while the
-    Kanban activation substrate, sensor JSONL files, and quiet tick receipts are
-    current. The dashboard uses this value as its freshness indicator.
-    """
-    candidates = [root / "state.latest.json"]
-    candidates.extend(root / rel for rel in STATE_NAMES.values())
-    kanban_root = root.parent / "kanban"
-    candidates.extend(
-        [
-            kanban_root / "last_sensorium_kanban_tick.json",
-            kanban_root / "sensor_kanban_state.json",
-            kanban_root / "sera_tick_quiet.latest.json",
-        ]
-    )
-    newest: float | None = None
-    for path in candidates:
-        try:
-            mtime = path.stat().st_mtime
-        except Exception:
-            continue
-        newest = mtime if newest is None else max(newest, mtime)
-    if newest is None:
+def _mtime_ts(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except Exception:
         return None
-    return datetime.fromtimestamp(newest, timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _source_info(path: Path, *, deprecated: bool = False, excluded_from_canonical: bool = False) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "mtime": _mtime(path),
+    }
+    if deprecated:
+        info["deprecated"] = True
+    if excluded_from_canonical:
+        info["excluded_from_canonical"] = True
+    return info
+
+
+def _freshness_snapshot(root: Path) -> dict[str, Any]:
+    kanban_root = root.parent / "kanban"
+    jsonl = {name: _source_info(root / rel) for name, rel in STATE_NAMES.items()}
+    sources = {
+        "jsonl": jsonl,
+        "last_sensorium_kanban_tick": _source_info(kanban_root / "last_sensorium_kanban_tick.json"),
+        "sensor_kanban_state": _source_info(kanban_root / "sensor_kanban_state.json"),
+        "sera_tick_quiet_latest": _source_info(kanban_root / "sera_tick_quiet.latest.json"),
+        "metrics_latest": _source_info(METRICS_DIR / "latest.json"),
+        "legacy_state_latest": _source_info(
+            root / "state.latest.json",
+            deprecated=True,
+            excluded_from_canonical=True,
+        ),
+    }
+    canonical_paths = [root / rel for rel in STATE_NAMES.values()]
+    canonical_paths.extend([
+        kanban_root / "last_sensorium_kanban_tick.json",
+        kanban_root / "sensor_kanban_state.json",
+        kanban_root / "sera_tick_quiet.latest.json",
+        METRICS_DIR / "latest.json",
+    ])
+    latest_ts = max((ts for ts in (_mtime_ts(path) for path in canonical_paths) if ts is not None), default=None)
+    sources["canonical_latest_mtime"] = (
+        datetime.fromtimestamp(latest_ts, timezone.utc).astimezone().isoformat(timespec="seconds")
+        if latest_ts is not None
+        else None
+    )
+    sources["canonical_excludes"] = ["legacy_state_latest"]
+    return sources
+
+
+def _freshness_mtime(root: Path) -> str | None:
+    """Return newest canonical Sensorium freshness mtime, excluding state.latest.
+
+    `state.latest.json` is a legacy dispatcher snapshot and can stay unchanged
+    while JSONL, Kanban tick receipts, quiet tick receipts, and metrics are
+    current. Keep the legacy file visible separately, but never let it define
+    dashboard freshness.
+    """
+    return _freshness_snapshot(root).get("canonical_latest_mtime")
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -147,6 +219,25 @@ def _parse_dt(value: Any) -> datetime | None:
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _current_budgets(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.dispatcher import current_budget_state
+        from agent_sensorium.store import SensoriumStore
+
+        store = SensoriumStore(instance="dashboard", state_dir=str(root))
+        return current_budget_state(store, config if isinstance(config, dict) else None)
+    except Exception:
+        # If the runtime package is not importable, avoid echoing stale expired
+        # reset windows as healthy. The dashboard will show no budget snapshot
+        # rather than replaying legacy state.latest indefinitely.
+        return {}
 
 
 def _sort_key(row: dict[str, Any]) -> str:
@@ -190,6 +281,23 @@ def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
         "sensitivity": candidate.get("sensitivity"),
         "allowed_surfaces": candidate.get("allowed_surfaces") or [],
         "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
+    }
+
+
+def _signal_item(signal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": signal.get("id"),
+        "sensor": signal.get("sensor"),
+        "source": signal.get("source"),
+        "kind": signal.get("kind"),
+        "summary": _truncate(signal.get("summary"), 180),
+        "strength_hint": signal.get("strength_hint"),
+        "pressure_level": signal.get("pressure_level"),
+        "transition": signal.get("transition"),
+        "correlation_keys": signal.get("correlation_keys") or [],
+        "sensitivity": signal.get("sensitivity"),
+        "allowed_surfaces": signal.get("allowed_surfaces") or [],
+        "ts": signal.get("ts") or signal.get("created_at") or signal.get("updated_at"),
     }
 
 
@@ -627,6 +735,12 @@ async def attention(instance: str | None = None, surface: str = "local", limit: 
     return {"ok": True, "generated_at": _now(), "instance": effective_instance, **inbox}
 
 
+@router.get("/metrics")
+async def metrics() -> dict[str, Any]:
+    """Read-only Sensorium efficiency metrics time series."""
+    return {"ok": True, "generated_at": _now(), "metrics": _metrics_snapshot(limit=288)}
+
+
 @router.get("/snapshot")
 async def snapshot(instance: str | None = None) -> dict[str, Any]:
     # `instance` is surfaced for multi-instance UI without allowing arbitrary
@@ -636,6 +750,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
     state = _read_json(root / "state.latest.json", {})
     config = _read_json(root / "instance.config.json", {})
+    freshness = _freshness_snapshot(root)
 
     rows: dict[str, list[dict[str, Any]]] = {}
     corrupt = 0
@@ -663,6 +778,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     visible_threads.sort(key=_sort_key, reverse=True)
 
     recent_outbox = sorted(outbox, key=_sort_key, reverse=True)
+    recent_signals = sorted(rows["signals"], key=_sort_key, reverse=True)
     recent_actions = sorted(actions, key=_sort_key, reverse=True)
     recent_artifacts = sorted(artifacts, key=_sort_key, reverse=True)
     artifact_groups = _artifact_groups(
@@ -724,9 +840,10 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "instance": effective_instance,
         "state_dir": str(root),
         "state_exists": root.exists(),
-        "state_mtime": _freshness_mtime(root),
-        "state_latest_mtime": _mtime(root / "state.latest.json"),
-        "kanban_tick_mtime": _mtime(root.parent / "kanban" / "last_sensorium_kanban_tick.json"),
+        "state_mtime": freshness.get("canonical_latest_mtime"),
+        "state_latest_mtime": freshness.get("legacy_state_latest", {}).get("mtime"),
+        "kanban_tick_mtime": freshness.get("last_sensorium_kanban_tick", {}).get("mtime"),
+        "freshness": freshness,
         "config": {
             "instance_name": config.get("instance_name") or effective_instance,
             "allowed_surfaces": config.get("allowed_surfaces") or ["local"],
@@ -751,6 +868,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             "outbox": dict(Counter(str(o.get("status") or "unknown") for o in outbox)),
         },
         "top_candidates": [_candidate_item(c) for c in active_candidates[:6]],
+        "recent_signals": [_signal_item(s) for s in recent_signals[:12]],
         "threads": [_thread_item(t) for t in visible_threads[:8]],
         "actions": [_action_item(a) for a in recent_actions[:10]],
         "artifacts": [_artifact_item(a) for a in recent_artifacts[:10]],
@@ -758,5 +876,6 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "outbox": outbox_items,
         "lifecycle_warnings": warnings,
         "decisions": [_decision_item(d) for d in decisions[-14:]][::-1],
-        "budgets": state.get("budgets") if isinstance(state.get("budgets"), dict) else {},
+        "budgets": _current_budgets(root, config),
+        "metrics": _metrics_snapshot(),
     }

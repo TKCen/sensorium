@@ -45,7 +45,8 @@ class TestSalienceContextForLl:
         lower = ctx.lower()
         assert "examples" in lower
         assert "not exhaustive" in lower
-        assert "choose" in lower
+        assert "use a concise kind" in lower
+        assert "handle the live turn normally first" in lower
         assert "appropriate kind (" not in ctx
         assert "supported kinds" not in lower
 

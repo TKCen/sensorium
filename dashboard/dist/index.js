@@ -135,6 +135,29 @@
     );
   }
 
+  function SignalCard(props) {
+    const s = props.signal;
+    const strength = s.strength_hint === null || s.strength_hint === undefined ? "—" : Number(s.strength_hint).toFixed(2);
+    return React.createElement(Card, { className: "sx-card" },
+      React.createElement(CardContent, { className: "sx-card-content" },
+        React.createElement("div", { className: "sx-row sx-between" },
+          React.createElement("div", null,
+            React.createElement("div", { className: "sx-title" }, s.kind || "signal"),
+            React.createElement("div", { className: "sx-id" }, s.id || s.sensor || "—"),
+          ),
+          React.createElement(Badge, { variant: "outline", className: "sx-badge sx-pressure" }, s.pressure_level || strength),
+        ),
+        React.createElement("p", { className: "sx-summary" }, s.summary || "No summary."),
+        React.createElement("div", { className: "sx-meta" },
+          React.createElement("span", null, "sensor: ", s.sensor || "—"),
+          React.createElement("span", null, "transition: ", s.transition || "—"),
+          React.createElement("span", null, "when: ", timeText(s.ts)),
+          React.createElement("span", null, "keys: ", listText((s.correlation_keys || []).slice(0, 3))),
+        ),
+      ),
+    );
+  }
+
   function ActionCard(props) {
     const a = props.action;
     return React.createElement(Card, { className: "sx-card sx-action-card" },
@@ -326,6 +349,9 @@
           React.createElement(Section, { title: "Top candidates", subtitle: "Pressure sorted, compact summaries only." },
             data.top_candidates && data.top_candidates.length ? data.top_candidates.map(function (c) { return React.createElement(CandidateCard, { key: c.id, candidate: c }); }) : React.createElement(Empty, { text: "No active candidates." }),
           ),
+        ),
+        React.createElement(Section, { title: "Recent signals", subtitle: "Raw sensory transitions before settlement/coalescing." },
+          data.recent_signals && data.recent_signals.length ? React.createElement("div", { className: "sx-grid" }, data.recent_signals.map(function (s, i) { return React.createElement(SignalCard, { key: (s.id || String(i)) + (s.ts || ""), signal: s }); })) : React.createElement(Empty, { text: "No recent signals." }),
         ),
         React.createElement(Section, { title: "Recent receipts", subtitle: "Decision log tail." },
           data.decisions && data.decisions.length ? React.createElement(Card, { className: "sx-card" }, React.createElement(CardContent, { className: "sx-decision-list" }, data.decisions.map(function (d, i) { return React.createElement(DecisionRow, { key: String(i) + (d.ts || ""), decision: d }); }))) : React.createElement(Empty, { text: "No decisions yet." }),

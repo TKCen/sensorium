@@ -73,6 +73,20 @@ def _fmt_status(*, instance: str, state_dir: str | None) -> str:
         ref = d.get("thread_id") or d.get("candidate_id") or ""
         reason = f" — {d['reason']}" if d.get("reason") else ""
         lines.append(f"  Latest decision: {d['type']} {ref} [{d.get('action', '')}]{reason}")
+    legacy = data.get("legacy_state_latest") or {}
+    if legacy.get("exists"):
+        lines.append(
+            "  Freshness: legacy state.latest "
+            f"{legacy.get('mtime') or legacy.get('updated_at') or 'unknown'} "
+            "(deprecated; excluded from canonical freshness)"
+        )
+    dispatch_budget = (data.get("budgets") or {}).get("dispatch")
+    if dispatch_budget:
+        lines.append(
+            "  Dispatch budget: "
+            f"{dispatch_budget.get('remaining')}/{dispatch_budget.get('capacity')} "
+            f"resets {dispatch_budget.get('reset_at')}"
+        )
     return "\n".join(lines)
 
 

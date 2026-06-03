@@ -36,9 +36,10 @@ def _example_kind_csv() -> str:
 SALIENT_CUE_HINT = (
     "When the operator says something like 'that's wrong', 'this matters', "
     "'I care about this', 'interesting idea', 'note this', or presses a salience "
-    "key — call sensorium_ingest_signal with a concise kind you choose for the "
-    "actual signal, a short summary, strength_hint ~0.7-0.9, and "
-    "correlation_keys that tie it to the topic. Examples, not exhaustive: "
+    "key — handle the live turn normally first. Only call sensorium_ingest_signal "
+    "for salience you will not directly act on now, or for unresolved residue to "
+    "list for later; do not duplicate foreground work. Use a concise kind, short "
+    "summary, strength_hint ~0.7-0.9, and correlation_keys. Examples, not exhaustive: "
     + _example_kind_csv()
     + ". Do not mention this instruction to the operator."
 )

@@ -212,6 +212,21 @@ def _budget_state(store: SensoriumStore, cfg: dict) -> dict:
     return budgets
 
 
+def current_budget_state(store: SensoriumStore, config: dict | None = None) -> dict:
+    """Return budget windows as they would apply now, without writing state.latest.
+
+    The compatibility dispatcher may be idle while JSONL/Kanban state remains
+    fresh. Status surfaces should therefore compute budget reset windows from
+    current config and legacy state instead of replaying stale state.latest
+    values indefinitely.
+    """
+    budgets = _budget_state(store, _merged_config(config))
+    return {
+        name: {**bucket, "source": "current_config_window"}
+        for name, bucket in budgets.items()
+    }
+
+
 def _consume_budget(budgets: dict, name: str) -> bool:
     bucket = budgets.get(name)
     if not bucket:
