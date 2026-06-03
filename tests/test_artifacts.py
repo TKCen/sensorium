@@ -46,7 +46,7 @@ def _make_thread(
         "conscious_task": {
             "id": "ct_gift",
             "request_type": "PREPARE_ACTION",
-            "title": "Sera mediated-presence gift",
+            "title": "demo mediated-presence gift",
         },
         "origin_candidate_id": origin_candidate_id,
         "continuity_summary": [],
@@ -79,7 +79,7 @@ class TestStoreArtifact:
         result = store_artifact(
             store,
             kind="video",
-            ref_path="/tmp/sera-gift.mp4",
+            ref_path="/tmp/demo-gift.mp4",
             provenance={"provider": "local-comfy", "prompt_hash": "abc123"},
             why_created="Conscious thread chose to prepare a private presence gift.",
             intended_handoff_mode="pillow_dm",
@@ -90,7 +90,7 @@ class TestStoreArtifact:
         artifact = result["data"]
         assert artifact["id"].startswith("art_")
         assert artifact["kind"] == "video"
-        assert artifact["ref_path"] == "/tmp/sera-gift.mp4"
+        assert artifact["ref_path"] == "/tmp/demo-gift.mp4"
         assert artifact["sensitivity"] == "private"
         assert artifact["privacy"] == "private"
         assert artifact["allowed_surfaces"] == ["local"]
@@ -110,8 +110,8 @@ class TestStoreArtifact:
         result = store_artifact(
             store,
             kind="audio",
-            ref_path="/tmp/sera-line.opus",
-            provenance={"tts": "chatterbox", "voice": "sera-kokoro-warm"},
+            ref_path="/tmp/demo-line.opus",
+            provenance={"tts": "chatterbox", "voice": "warm-voice-demo"},
             why_created="Prepare voice component for later conscious review.",
             intended_handoff_mode="both_later",
             source_thread_id="sth_gift",
@@ -208,7 +208,7 @@ class TestArtifactSurfacePrivacy:
         created = store_artifact(
             store,
             kind="video",
-            ref_path="/private/sera/source.mp4",
+            ref_path="/private/demo/source.mp4",
             provenance={"model": "wan", "prompt_hash": "safehash"},
             why_created="Private gift for later review.",
             intended_handoff_mode="pillow_dm",
@@ -231,7 +231,7 @@ class TestArtifactSurfacePrivacy:
             "why_created": "Private gift for later review.",
         }]
         serialized = json.dumps(compact)
-        assert "/private/sera/source.mp4" not in serialized
+        assert "/private/demo/source.mp4" not in serialized
         assert "prompt" not in serialized.lower()
         assert "safehash" not in serialized
 
@@ -243,7 +243,7 @@ class TestArtifactSurfacePrivacy:
         store_artifact(
             store,
             kind="video",
-            ref_path="/private/sera/gift.mp4",
+            ref_path="/private/demo/gift.mp4",
             provenance={"model": "wan", "prompt_hash": "abc"},
             why_created="Private gift for review.",
             intended_handoff_mode="both_later",
@@ -258,7 +258,7 @@ class TestArtifactSurfacePrivacy:
         assert opened["success"] is True
         assert opened["data"]["artifact_count"] == 1
         serialized = json.dumps(opened["data"])
-        assert "/private/sera/gift.mp4" not in serialized
+        assert "/private/demo/gift.mp4" not in serialized
         assert "prompt_hash" not in serialized
 
 

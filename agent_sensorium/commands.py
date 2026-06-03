@@ -5,11 +5,9 @@ import json
 from .tools import (
     handle_sensorium_attention_pointer,
     handle_sensorium_compact,
-    handle_sensorium_dispatch_once,
     handle_sensorium_status,
     handle_sensorium_thread_open,
     handle_sensorium_thread_update,
-    handle_sensorium_worker_status,
 )
 
 
@@ -34,14 +32,8 @@ def handle_sensorium_command(
         return _fmt_open(thread_id=thread_id, surface=surface, **kw)
     elif sub == "thread":
         return _fmt_thread_update(args=parts[1:], **kw)
-    elif sub == "dispatch":
-        return _fmt_dispatch(**kw)
     elif sub == "compact":
         return _fmt_compact(**kw)
-    elif sub == "outbox":
-        return _fmt_outbox(args=parts[1:], **kw)
-    elif sub == "workers":
-        return _fmt_workers(args=parts[1:], **kw)
     elif sub == "help":
         return _help()
     else:
@@ -158,30 +150,6 @@ def _fmt_thread_update(*, instance: str, state_dir: str | None, args: list[str])
     )
 
 
-def _fmt_dispatch(*, instance: str, state_dir: str | None) -> str:
-    raw = handle_sensorium_dispatch_once(
-        instance=instance, state_dir=state_dir, dry_run=True
-    )
-    data = json.loads(raw)["data"]
-    action = data["action"]
-    if action == "no_candidate":
-        return f"Sensorium [{instance}] dispatch: no eligible candidate."
-    elif action == "kanban_review_required":
-        cid = data["candidate_id"]
-        pressure = data.get("candidate_pressure", "?")
-        kind = data.get("candidate_kind", "?")
-        return (
-            f"Sensorium [{instance}] activation is Kanban-only:\n"
-            f"  candidate {cid} ({kind}, pressure {pressure}) needs sensor:intake/subconscious review."
-        )
-    elif action == "already_exists":
-        return (
-            f"Sensorium [{instance}] dispatch: thread {data['thread_id']}"
-            f" already exists for {data['candidate_id']}."
-        )
-    return f"Sensorium [{instance}] dispatch: {action}"
-
-
 def _fmt_compact(*, instance: str, state_dir: str | None) -> str:
     raw = handle_sensorium_compact(instance=instance, state_dir=state_dir)
     data = json.loads(raw)["data"]
@@ -194,39 +162,6 @@ def _fmt_compact(*, instance: str, state_dir: str | None) -> str:
     )
 
 
-def _fmt_outbox(*, instance: str, state_dir: str | None, args: list[str]) -> str:
-    from .store import SensoriumStore
-
-    store = SensoriumStore(instance=instance, state_dir=state_dir)
-    store.ensure_dirs()
-    requests = store.read_jsonl("outbox")
-    if not requests:
-        return f"Sensorium [{instance}] outbox: empty."
-    lines = [f"Sensorium [{instance}] outbox ({len(requests)} requests):"]
-    for req in requests[-5:]:
-        mode = req.get("delivery_mode", "?")
-        surface = req.get("surface", "?")
-        status = req.get("status", "?")
-        lines.append(f"  [{status}] {req.get('id', '?')} {surface}/{mode} -> {req.get('origin_thread_id', '?')}")
-    return "\n".join(lines)
-
-
-def _fmt_workers(*, instance: str, state_dir: str | None, args: list[str]) -> str:
-    raw = handle_sensorium_worker_status(instance=instance, state_dir=state_dir)
-    data = json.loads(raw)["data"]
-    items = data.get("worker_requests", [])
-    if not items:
-        return f"Sensorium [{instance}] workers: no requests."
-    lines = [f"Sensorium [{instance}] workers ({data['count']} requests):"]
-    for req in items[-10:]:
-        outcome = f" -> {req['outcome']}" if req.get("outcome") else ""
-        lines.append(
-            f"  [{req.get('status', '?')}] {req.get('id', '?')} "
-            f"{req.get('worker_type', '?')}: {req.get('title', '')}{outcome}"
-        )
-    return "\n".join(lines)
-
-
 def _help() -> str:
     return (
         "Usage: /sensorium [subcommand]\n"
@@ -237,9 +172,6 @@ def _help() -> str:
         "  pointer [surf] Show the active-session pointer for a surface\n"
         "  open [id] [surf] Open a compact thread capsule if allowed on surface\n"
         "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
-        "  dispatch       Deprecated read-only Kanban activation advisory\n"
         "  compact        Archive expired items\n"
-        "  outbox         List recent outbox requests\n"
-        "  workers        List worker requests\n"
         "  help           This message"
     )

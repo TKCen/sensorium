@@ -79,17 +79,17 @@ class TestConfigLoading:
     def test_config_file_loaded(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({
-            "instance_name": "sera",
-            "policy_card_ref": "docs/sera-policy.md",
+            "instance_name": "demo",
+            "policy_card_ref": "docs/demo-policy.md",
             "allowed_surfaces": ["local", "discord"],
             "max_sensitivity": "private",
         }))
         config, diag = load_instance_config(config_path=str(cfg))
-        assert config["instance_name"] == "sera"
-        assert config["policy_card_ref"] == "docs/sera-policy.md"
+        assert config["instance_name"] == "demo"
+        assert config["policy_card_ref"] == "docs/demo-policy.md"
         assert diag["source"] == "file"
         assert diag["path"] == str(cfg)
-        assert diag["policy_card_ref"] == "docs/sera-policy.md"
+        assert diag["policy_card_ref"] == "docs/demo-policy.md"
 
     def test_corrupt_config_falls_back_to_defaults(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
@@ -196,7 +196,7 @@ class TestConfigLoading:
     def test_diagnostics_never_expose_raw_config(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({
-            "instance_name": "sera",
+            "instance_name": "demo",
             "budgets": {"dispatch": {"capacity": 99}},
             "thresholds": {"starvation_hours": 12},
         }))
@@ -378,16 +378,16 @@ class TestStatusConfigDiagnostics:
         os.makedirs(sd, exist_ok=True)
         cfg_path = tmp_path / "sensorium" / "instance.config.json"
         cfg_path.write_text(json.dumps({
-            "instance_name": "sera",
-            "policy_card_ref": "sera-policy.md",
+            "instance_name": "demo",
+            "policy_card_ref": "demo-policy.md",
             "allowed_surfaces": ["local", "discord"],
         }))
         raw = handle_sensorium_status(instance="test", state_dir=sd)
         result = json.loads(raw)
         cfg = result["data"]["config"]
         assert cfg["source"] == "file"
-        assert cfg["instance_name"] == "sera"
-        assert cfg["policy_card_ref"] == "sera-policy.md"
+        assert cfg["instance_name"] == "demo"
+        assert cfg["policy_card_ref"] == "demo-policy.md"
 
     def test_status_with_explicit_config_path(self, tmp_path):
         sd = str(tmp_path / "sensorium")

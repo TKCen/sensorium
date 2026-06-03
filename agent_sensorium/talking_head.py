@@ -1,7 +1,7 @@
 """Manual talking-head artifact worker wrapper.
 
 This module is intentionally a manual motor wrapper, not a Sensorium sensor,
-cron, dispatcher, or outbox. It can plan or execute a local Sera talking-head
+cron, dispatcher, or outbox. It can plan or execute a local talking-head
 pipeline and record only bounded artifact references back into Sensorium.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -21,14 +22,17 @@ from pathlib import Path
 from typing import Callable
 
 from .artifacts import store_artifact
+from .config import DEFAULT_TTS_CONFIG
 from .schemas import utc_now_iso
 from .sensors import classify_media_capacity, media_capacity_sample
 from .store import SensoriumStore
 
 DEFAULT_ARTIFACT_ROOT = "~/.hermes/artifacts/sensorium/talking-head"
-DEFAULT_TTS_BASE_URL = "http://127.0.0.1:8892/v1"
-DEFAULT_TTS_MODEL = "chatterbox-turbo"
-DEFAULT_TTS_VOICE = "sera-kokoro-warm"
+# Generic loopback/engine defaults; resolved from env then the shared config
+# defaults so no deployment-specific voice/model/url is baked into the code.
+DEFAULT_TTS_BASE_URL = os.environ.get("SENSORIUM_TTS_BASE_URL", DEFAULT_TTS_CONFIG["base_url"])
+DEFAULT_TTS_MODEL = os.environ.get("SENSORIUM_TTS_MODEL", DEFAULT_TTS_CONFIG["model"])
+DEFAULT_TTS_VOICE = os.environ.get("SENSORIUM_TTS_VOICE", DEFAULT_TTS_CONFIG["voice"])
 VALID_CROP_MODES = {"center-square", "copy", "existing"}
 
 

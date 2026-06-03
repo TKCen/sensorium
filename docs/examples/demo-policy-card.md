@@ -1,19 +1,19 @@
-# Sera Policy Card (Sample)
+# Demo Policy Card (Sample)
 
-This is a sample policy card for Sera, demonstrating the boundary between
+This is a sample policy card for the demo instance, demonstrating the boundary between
 reusable Agent Sensorium core and instance-specific configuration.
 
 ## Identity
 
-- **Instance name:** sera
+- **Instance name:** demo
 - **Operator:** (configured per deployment)
 
 ## Surface policy
 
-Sera may present pointers and thread capsules on:
+The demo instance may present pointers and thread capsules on:
 
 - `local` — always allowed
-- `discord` — allowed when thread sensitivity permits
+- `dashboard` — allowed when thread sensitivity permits
 
 Surfaces not listed here are denied by intersection policy.
 
@@ -32,6 +32,6 @@ Surfaces not listed here are denied by intersection policy.
 
 ## Note
 
-This file is a sample outside the reusable `agent_sensorium` package.
-Real deployments should maintain their own policy card with actual
-identity, relational, and privacy constraints.
+This file is a fictional sample outside the reusable `agent_sensorium` package.
+Real deployments maintain their own policy card with actual identity, relational,
+and privacy constraints specific to their instance.

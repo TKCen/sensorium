@@ -42,19 +42,12 @@ def register(ctx) -> None:
     from .pointers import handle_pointer_pre_llm
     from .pre_llm_salience import handle_salience_pre_llm
     from .tools import (
-        handle_sensorium_action_attach,
-        handle_sensorium_action_prepare,
-        handle_sensorium_action_result,
-        handle_sensorium_action_status,
         handle_sensorium_artifact_status,
         handle_sensorium_artifact_store,
         handle_sensorium_attention_inbox,
         handle_sensorium_attention_pointer,
         handle_sensorium_candidate_update,
         handle_sensorium_compact,
-        handle_sensorium_conscious_claim,
-        handle_sensorium_conscious_complete,
-        handle_sensorium_dispatch_once,
         handle_sensorium_improvement_collect,
         handle_sensorium_improvement_status,
         handle_sensorium_attention_policy_decide,
@@ -62,18 +55,13 @@ def register(ctx) -> None:
         handle_sensorium_ingest_event,
         handle_sensorium_ingest_signal,
         handle_sensorium_media_gift_decide,
-        handle_sensorium_outbox_dispatch,
-        handle_sensorium_outbox_prepare,
+        handle_sensorium_profile,
         handle_sensorium_service_threads,
         handle_sensorium_sensor_config,
         handle_sensorium_status,
         handle_sensorium_subconscious_advisory,
         handle_sensorium_thread_open,
         handle_sensorium_thread_update,
-        handle_sensorium_worker_dispatch,
-        handle_sensorium_worker_prepare,
-        handle_sensorium_worker_result,
-        handle_sensorium_worker_status,
     )
 
     common = {
@@ -279,6 +267,35 @@ def register(ctx) -> None:
         description="Runtime sensor registry management without external action.",
     )
     ctx.register_tool(
+        name="sensorium_profile",
+        toolset=_ADMIN_TOOLSET,
+        schema=_schema(
+            "sensorium_profile",
+            "List, show, initialize, or set the default Sensorium profile (a named runtime config/state namespace). Config-only: writes only a profile's instance.config.json or the active-profile marker; no sensor execution, ingestion, or arbitrary file writes.",
+            {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "show", "init", "set_default"],
+                    "description": "Profile operation: list profiles, show one profile's resolved config, init a new profile, or set the active/default profile.",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Profile name for show/init/set_default. Safe names only; defaults to the active profile for show.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "For init: overwrite an existing instance.config.json with defaults. Defaults to false.",
+                },
+            },
+        ),
+        handler=lambda args, **kw: handle_sensorium_profile(
+            action=args.get("action", "list"),
+            profile=args.get("profile", ""),
+            overwrite=bool(args.get("overwrite", False)),
+        ),
+        description="Manage Sensorium profiles (config/state namespaces) without external action.",
+    )
+    ctx.register_tool(
         name="sensorium_ingest_event",
         toolset=_ADMIN_TOOLSET,
         schema=_schema(
@@ -304,32 +321,7 @@ def register(ctx) -> None:
         ),
         description="Ingest a trusted event and create a candidate.",
     )
-    ctx.register_tool(
-        name="sensorium_dispatch_once",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_dispatch_once",
-            "Deprecated compatibility advisory for the old Sensorium dispatcher. Default is read-only; mutating thread dispatch requires config.legacy_thread_dispatch_enabled=True and should be replaced by the Kanban bridge.",
-            {
-                **common,
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, preview without mutating state. Defaults to true for compatibility safety.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional dispatcher config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_dispatch_once(
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-            dry_run=bool(args.get("dry_run", True)),
-            config=args.get("config"),
-        ),
-        description="Deprecated dispatcher advisory; use Sensorium-on-Kanban intake/review for activation.",
-    )
+
     ctx.register_tool(
         name="sensorium_candidate_update",
         toolset=_ADMIN_TOOLSET,
@@ -724,267 +716,18 @@ def register(ctx) -> None:
         ),
         description="Read-only attention inbox with surface/sensitivity filtering.",
     )
-    ctx.register_tool(
-        name="sensorium_outbox_prepare",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_outbox_prepare",
-            "Deprecated compatibility: prepare a Sensorium-local outbox receipt for old thread state. Prefer Kanban-reviewed action/artifact/outbox work with Sensorium refs.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Sensorium thread ID to create the outbox request for.",
-                },
-                "request_type": {
-                    "type": "string",
-                    "enum": ["REACH_OUT", "PRIVATE_EXPRESSION", "THINK"],
-                    "description": "Type of outbox request. Defaults to THINK.",
-                },
-                "surface": {
-                    "type": "string",
-                    "description": "Target surface: discord or local. Defaults to local.",
-                },
-                "delivery_mode": {
-                    "type": "string",
-                    "enum": ["peripheral_reference", "context_pointer", "discord_channel_thread", "discord_dm_bound_session"],
-                    "description": "Delivery mode. Direct Discord modes disabled by default.",
-                },
-                "target": {
-                    "type": "object",
-                    "description": "Target descriptor: channel_id, thread_id, dm_channel_id, session_ref.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short title for the outbox request.",
-                },
-                "message_preview": {
-                    "type": "string",
-                    "description": "Compact message preview (metadata only, not full content).",
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true (default), return the would-be request without writing.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional outbox config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_outbox_prepare(
-            thread_id=args.get("thread_id", ""),
-            request_type=args.get("request_type", "THINK"),
-            surface=args.get("surface", "local"),
-            delivery_mode=args.get("delivery_mode", ""),
-            target=args.get("target"),
-            title=args.get("title", ""),
-            message_preview=args.get("message_preview", ""),
-            dry_run=bool(args.get("dry_run", True)),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Prepare a Sensorium outbox request (internal state, no live Discord).",
-    )
-    ctx.register_tool(
-        name="sensorium_outbox_dispatch",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_outbox_dispatch",
-            "Deprecated compatibility: dispatch a Sensorium-local outbox receipt. Live delivery should be routed through Kanban-reviewed work; direct modes remain fail-closed.",
-            {
-                **common,
-                "outbox_id": {
-                    "type": "string",
-                    "description": "Outbox request ID to dispatch.",
-                },
-                "execute": {
-                    "type": "boolean",
-                    "description": "Must be true to actually dispatch. Default false (dry-run).",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional outbox config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_outbox_dispatch(
-            outbox_id=args.get("outbox_id", ""),
-            execute=bool(args.get("execute", False)),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Dispatch a prepared Sensorium outbox request.",
-    )
-    ctx.register_tool(
-        name="sensorium_worker_prepare",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_worker_prepare",
-            "Deprecated compatibility: prepare a Sensorium-local worker receipt. Prefer Kanban child tasks/comments/artifact refs for live worker ticketing.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Sensorium thread ID to create the worker request for.",
-                },
-                "worker_type": {
-                    "type": "string",
-                    "enum": ["manual", "hermes_subagent", "kanban_task", "script"],
-                    "description": "Type of worker to prepare.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short title for the worker request.",
-                },
-                "task_summary": {
-                    "type": "string",
-                    "description": "Bounded task description (truncated to max_prompt_chars).",
-                },
-                "target": {
-                    "type": "object",
-                    "description": "Optional target/ref metadata.",
-                },
-                "profile": {
-                    "type": "object",
-                    "description": "Optional profile/toolsets/model hints.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional worker config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_worker_prepare(
-            thread_id=args.get("thread_id", ""),
-            worker_type=args.get("worker_type", ""),
-            title=args.get("title", ""),
-            task_summary=args.get("task_summary", ""),
-            target=args.get("target"),
-            profile=args.get("profile"),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Deprecated compatibility worker receipt; prefer Kanban child tasks/comments/artifact refs.",
-    )
-    ctx.register_tool(
-        name="sensorium_worker_dispatch",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_worker_dispatch",
-            "Deprecated compatibility: dispatch a Sensorium-local worker request. Live worker dispatch belongs to Kanban; direct dispatch remains opt-in/fail-closed.",
-            {
-                **common,
-                "worker_request_id": {
-                    "type": "string",
-                    "description": "Worker request ID to dispatch.",
-                },
-                "execute": {
-                    "type": "boolean",
-                    "description": "Must be true to attempt dispatch. Default false (dry-run).",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional worker config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_worker_dispatch(
-            worker_request_id=args.get("worker_request_id", ""),
-            execute=bool(args.get("execute", False)),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Deprecated compatibility worker dispatch (requires execute + config opt-in).",
-    )
-    ctx.register_tool(
-        name="sensorium_worker_result",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_worker_result",
-            "Record a worker result: update request status, write receipt, and emit feedback signal with causal refs.",
-            {
-                **common,
-                "worker_request_id": {
-                    "type": "string",
-                    "description": "Worker request ID to record result for.",
-                },
-                "outcome": {
-                    "type": "string",
-                    "enum": ["completed", "failed", "cancelled", "timeout"],
-                    "description": "Worker outcome.",
-                },
-                "result_summary": {
-                    "type": "string",
-                    "description": "Compact result summary (truncated to max_result_chars).",
-                },
-                "output_refs": {
-                    "type": "array",
-                    "description": "Optional list of output reference metadata dicts (not raw content).",
-                },
-                "error_summary": {
-                    "type": "string",
-                    "description": "Compact error summary if outcome is failed/timeout.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional worker config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_worker_result(
-            worker_request_id=args.get("worker_request_id", ""),
-            outcome=args.get("outcome", ""),
-            result_summary=args.get("result_summary", ""),
-            output_refs=args.get("output_refs"),
-            error_summary=args.get("error_summary", ""),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Record worker result with feedback signal emission.",
-    )
-    ctx.register_tool(
-        name="sensorium_worker_status",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_worker_status",
-            "List worker requests with optional thread/status filters.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Optional thread ID filter.",
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Optional status filter (prepared, dispatched, completed, failed, cancelled).",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max items to return. Defaults to 20.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_worker_status(
-            thread_id=args.get("thread_id"),
-            status=args.get("status"),
-            limit=int(args.get("limit") or 20),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="List worker requests with optional filters.",
-    )
+
+
+
+
+
+
     ctx.register_tool(
         name="sensorium_media_gift_decide",
         toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_media_gift_decide",
-            "Apply Sera mediated-presence gift conscious-choice policy and write receipts. Subconscious may only propose; no automatic outbound delivery or scheduler spam.",
+            "Apply mediated-presence gift conscious-choice policy and write receipts. Subconscious may only propose; no automatic outbound delivery or scheduler spam.",
             {
                 **common,
                 "config_path": {
@@ -1011,7 +754,7 @@ def register(ctx) -> None:
                 },
                 "source": {
                     "type": "string",
-                    "enum": ["inner_salience", "sebastian_prompt", "manual_review", "worker_result", "scheduler", "test"],
+                    "enum": ["inner_salience", "operator_prompt", "manual_review", "worker_result", "scheduler", "test"],
                     "description": "Origin of the pressure/request.",
                 },
                 "why_now": {
@@ -1025,7 +768,7 @@ def register(ctx) -> None:
                 "thread_id": {"type": "string", "description": "Sensorium thread id."},
                 "artifact_id": {"type": "string", "description": "Existing thread artifact id for delivery approval."},
                 "surface": {"type": "string", "description": "Requested delivery/review surface."},
-                "target_ref": {"type": "string", "description": "Compact configured target ref, e.g. discord:#pics or dm alias."},
+                "target_ref": {"type": "string", "description": "Compact configured target ref, e.g. discord:#general or dm alias."},
                 "config": {
                     "type": "object",
                     "description": "Optional media_gift_policy override for tests/manual smoke; cannot dispatch delivery.",
@@ -1176,249 +919,12 @@ def register(ctx) -> None:
         ),
         description="List Sensorium mediated-presence artifacts.",
     )
-    ctx.register_tool(
-        name="sensorium_action_prepare",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_action_prepare",
-            "Deprecated compatibility: prepare a Sensorium-local action receipt. Prefer Kanban task comments/children/artifact refs for live action ticketing.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Conscious thread ID to attach the prepared action to.",
-                },
-                "intent": {
-                    "type": "string",
-                    "description": "Short intent string (free-form, bounded).",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short title for the action.",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Bounded action summary.",
-                },
-                "why_now": {
-                    "type": "string",
-                    "description": "Optional rationale string.",
-                },
-                "refs": {
-                    "type": "object",
-                    "description": "Optional small string-keyed refs map.",
-                },
-                "resume_trigger": {
-                    "type": "string",
-                    "description": "Optional resume trigger string.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional action config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_action_prepare(
-            thread_id=args.get("thread_id", ""),
-            intent=args.get("intent", ""),
-            title=args.get("title", ""),
-            summary=args.get("summary", ""),
-            why_now=args.get("why_now", ""),
-            refs=args.get("refs"),
-            resume_trigger=args.get("resume_trigger", ""),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Deprecated compatibility action receipt; prefer Kanban task comments/children/artifact refs.",
-    )
-    ctx.register_tool(
-        name="sensorium_action_attach",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_action_attach",
-            "Attach a worker/outbox/artifact/external ref to a prepared thread action.",
-            {
-                **common,
-                "action_id": {
-                    "type": "string",
-                    "description": "Thread action ID to attach to.",
-                },
-                "kind": {
-                    "type": "string",
-                    "enum": ["worker_request", "outbox_request", "artifact_ref", "external_ref"],
-                    "description": "Attachment kind.",
-                },
-                "ref_id": {
-                    "type": "string",
-                    "description": "Non-empty reference ID.",
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional bounded metadata dict.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional action config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_action_attach(
-            action_id=args.get("action_id", ""),
-            kind=args.get("kind", ""),
-            ref_id=args.get("ref_id", ""),
-            metadata=args.get("metadata"),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Attach a ref (worker/outbox/artifact/external) to a thread action.",
-    )
-    ctx.register_tool(
-        name="sensorium_action_result",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_action_result",
-            "Record outcome for a prepared thread action, emit feedback signal, and close the action.",
-            {
-                **common,
-                "action_id": {
-                    "type": "string",
-                    "description": "Thread action ID to close with a result.",
-                },
-                "outcome": {
-                    "type": "string",
-                    "enum": ["completed", "failed", "cancelled", "expired", "rejected", "superseded"],
-                    "description": "Action outcome.",
-                },
-                "result_summary": {
-                    "type": "string",
-                    "description": "Bounded result summary.",
-                },
-                "closed_reason": {
-                    "type": "string",
-                    "description": "Optional close reason.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional action config overrides.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_action_result(
-            action_id=args.get("action_id", ""),
-            outcome=args.get("outcome", ""),
-            result_summary=args.get("result_summary", ""),
-            closed_reason=args.get("closed_reason", ""),
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Record result for a thread action and emit feedback.",
-    )
-    ctx.register_tool(
-        name="sensorium_action_status",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_action_status",
-            "List thread actions with optional thread/status filters.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Optional thread ID filter.",
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Optional action status filter.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max items to return. Defaults to 20.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_action_status(
-            thread_id=args.get("thread_id"),
-            status=args.get("status"),
-            limit=int(args.get("limit") or 20),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="List thread actions with optional filters.",
-    )
-    ctx.register_tool(
-        name="sensorium_conscious_claim",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_conscious_claim",
-            "Deprecated compatibility lease for old internal Sensorium threads. Disabled by default; create conscious:review Kanban tasks for live activation.",
-            {
-                **common,
-                "actor": {
-                    "type": "string",
-                    "description": "Lease actor identifier. Defaults to sera_background_conscious.",
-                },
-                "mode": {
-                    "type": "string",
-                    "description": "Claim mode. Defaults to background.",
-                },
-                "thread_id": {
-                    "type": "string",
-                    "description": "Optional explicit thread to claim. If omitted, eligibility selects one.",
-                },
-                "config": {
-                    "type": "object",
-                    "description": "Optional claim config overrides (lease_seconds, allowed_request_types).",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_conscious_claim(
-            actor=args.get("actor") or "",
-            mode=args.get("mode") or "",
-            thread_id=args.get("thread_id") or "",
-            config=args.get("config"),
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Deprecated compatibility lease for old internal Sensorium threads.",
-    )
-    ctx.register_tool(
-        name="sensorium_conscious_complete",
-        toolset=_ADMIN_TOOLSET,
-        schema=_schema(
-            "sensorium_conscious_complete",
-            "Complete a background-conscious lease for a claimed thread. Clears active_lease and writes a decision receipt.",
-            {
-                **common,
-                "thread_id": {
-                    "type": "string",
-                    "description": "Claimed thread ID.",
-                },
-                "lease_id": {
-                    "type": "string",
-                    "description": "Lease ID returned by sensorium_conscious_claim.",
-                },
-                "outcome": {
-                    "type": "string",
-                    "description": "Free-form outcome label (e.g., processed, deferred, no_op).",
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Optional short notes recorded on the receipt.",
-                },
-            },
-        ),
-        handler=lambda args, **kw: handle_sensorium_conscious_complete(
-            thread_id=args.get("thread_id", ""),
-            lease_id=args.get("lease_id", ""),
-            outcome=args.get("outcome") or "",
-            notes=args.get("notes") or "",
-            instance=_arg_instance(args),
-            state_dir=args.get("state_dir"),
-        ),
-        description="Complete a background-conscious lease on a thread.",
-    )
+
+
+
+
+
+
     ctx.register_command(
         "sensorium",
         lambda raw_args: handle_sensorium_command(raw_args, instance=_default_instance()),

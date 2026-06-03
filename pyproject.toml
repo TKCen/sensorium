@@ -1,9 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "agent-sensorium"
 version = "0.1.0"
 description = "Bounded autonomous inner lifecycle plugin for Hermes agents."
 requires-python = ">=3.11"
 dependencies = []
+license = {text = "MIT"}
+authors = [{name = "Agent Sensorium contributors"}]
+readme = "README.md"
+
+[project.optional-dependencies]
+dashboard = ["fastapi>=0.110"]
+test = ["fastapi>=0.110", "pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_sensorium"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

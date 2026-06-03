@@ -83,8 +83,8 @@ def test_requires_memory_grounding_positive_for_mediated_presence_relational():
     # mediated-presence is an explicit memory-grounding key marker
     row = {
         "kind": "relational_thread_pickup_request",
-        "summary": "Sebastian said I miss you",
-        "correlation_keys": ["sera-presence", "mediated-presence"],
+        "summary": "Operator said this work matters to them",
+        "correlation_keys": ["mediated-presence"],
     }
     assert requires_memory_grounding(row) is True
 
@@ -165,8 +165,8 @@ def test_memory_grounded_review_contract_returns_contract_for_mediated_presence(
     # mediated-presence is a memory-grounding key marker
     row = {
         "kind": "relational_thread_pickup_request",
-        "summary": "Sebastian said I miss you",
-        "correlation_keys": ["sera-presence", "mediated-presence"],
+        "summary": "Operator said this work matters to them",
+        "correlation_keys": ["mediated-presence"],
     }
     contract = memory_grounded_review_contract(row)
     # mediated-presence triggers memory-grounding; returns a contract

@@ -11,6 +11,7 @@ or allowed_surfaces beyond what the item already has.
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -75,6 +76,19 @@ _ALLOWED_RULE_FIELDS = {
     "source_weight",
 }
 
+# Generic local TTS / talking-head sidecar defaults. base_url/model are safe
+# loopback/engine names; the sidecar is dormant until an operator configures
+# sidecar_base/control_command/pid_file for their own local deployment. No
+# private checkout path is baked in here.
+DEFAULT_TTS_CONFIG: dict = {
+    "base_url": "http://127.0.0.1:8892/v1",
+    "model": "chatterbox-turbo",
+    "voice": "warm-voice-demo",
+    "sidecar_base": None,
+    "control_command": None,
+    "pid_file": None,
+}
+
 SAFE_DEFAULTS: dict = {
     "instance_name": "default",
     "policy_card_ref": None,
@@ -86,6 +100,13 @@ SAFE_DEFAULTS: dict = {
     },
     "budgets": {},
     "thread_ttl_hours": 168,
+    # Generic default actor for the deprecated background-conscious lease lane.
+    "default_actor": "background_conscious",
+    # Generic cheap-reviewer profile the Kanban bridge assigns intake to.
+    "subconscious_profile": "subconscious_worker",
+    # Dashboard quiet-tick freshness filename (configurable, generic default).
+    "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
+    "tts": DEFAULT_TTS_CONFIG,
     "operational_pointer": {
         "enabled": False,
         "kinds": [],
@@ -231,18 +252,138 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
+# A Sensorium profile is a named runtime namespace (config + state) living in a
+# directory under the Sensorium state root. Internally the mechanism is the
+# "instance"; "profile" is the operator/agent-facing term. Profile names must be
+# safe directory names so they cannot traverse outside the state root.
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ACTIVE_PROFILE_MARKER = "active_profile.json"
+DEFAULT_STATE_ROOT = "~/.hermes/agent-sensorium"
+
+
+def sanitize_profile_name(name: str) -> str:
+    """Validate and return a safe profile (instance) name, else raise ValueError.
+
+    Rejects blank names, path traversal, separators, and leading dots so a
+    profile name can only ever address a direct child of the state root.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise ValueError("profile name must not be blank")
+    if len(candidate) > 64:
+        raise ValueError("profile name must be at most 64 characters")
+    if candidate.startswith(".") or candidate in {".", ".."}:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if not PROFILE_NAME_RE.match(candidate):
+        raise ValueError(
+            "profile name may only contain letters, digits, '.', '_', '-': "
+            f"{name!r}"
+        )
+    return candidate
+
+
+def sensorium_state_root(base_dir: str | None = None) -> Path:
+    """Resolve the Sensorium state root that holds per-profile namespaces."""
+    if base_dir and base_dir.strip():
+        return Path(base_dir).expanduser()
+    env = os.environ.get("AGENT_SENSORIUM_ROOT")
+    if env and env.strip():
+        return Path(env.strip()).expanduser()
+    return Path(os.path.expanduser(DEFAULT_STATE_ROOT))
+
+
+def read_active_profile(base_dir: str | None = None) -> str | None:
+    """Return the operator-selected active profile from the root marker, if any."""
+    path = sensorium_state_root(base_dir) / ACTIVE_PROFILE_MARKER
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = raw.get("profile") if isinstance(raw, dict) else None
+    if isinstance(value, str) and value.strip():
+        try:
+            return sanitize_profile_name(value)
+        except ValueError:
+            return None
+    return None
+
+
+def write_active_profile(name: str, base_dir: str | None = None) -> Path:
+    """Persist the active/default profile selection to the root marker file."""
+    safe = sanitize_profile_name(name)
+    path = sensorium_state_root(base_dir) / ACTIVE_PROFILE_MARKER
+    _atomic_write_json(path, {"profile": safe, "updated_at": utc_now_iso()})
+    return path
+
+
+def profile_state_dir(name: str, base_dir: str | None = None) -> Path:
+    """Return the state directory for a named profile under the state root."""
+    return sensorium_state_root(base_dir) / sanitize_profile_name(name)
+
+
+def list_profiles(base_dir: str | None = None) -> list[str]:
+    """List profile namespaces (safe-named child directories) under the root."""
+    root = sensorium_state_root(base_dir)
+    if not root.is_dir():
+        return []
+    names: set[str] = set()
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            names.add(sanitize_profile_name(child.name))
+        except ValueError:
+            continue
+    return sorted(names)
+
+
+def init_profile_config(
+    name: str,
+    *,
+    base_dir: str | None = None,
+    overwrite: bool = False,
+) -> dict:
+    """Create a profile namespace and write a default instance.config.json.
+
+    Idempotent: an existing config is left untouched unless overwrite is set.
+    """
+    safe = sanitize_profile_name(name)
+    state_dir = profile_state_dir(safe, base_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "instance.config.json"
+    created = False
+    if overwrite or not path.exists():
+        _atomic_write_json(path, _validate_config({"instance_name": safe}))
+        created = True
+    config, diagnostics = load_instance_config(state_dir=str(state_dir))
+    return {
+        "profile": safe,
+        "state_dir": str(state_dir),
+        "config_path": str(path),
+        "created": created,
+        "config": config,
+        "diagnostics": diagnostics,
+    }
+
+
 def default_instance_name(default: str = "default") -> str:
-    """Resolve the default Sensorium instance outside the Hermes tool wrapper.
+    """Resolve the active/default Sensorium profile outside the tool wrapper.
 
     Tool calls get the Hermes runtime context through the plugin wrapper, but
     cron scripts and dashboard plugin APIs can run as plain Python modules.
-    Keep all entrypoints aligned: environment override, Hermes config, then a
-    safe generic fallback.
+    Resolution order: environment override, operator-set active-profile marker,
+    Hermes config, then a safe generic fallback.
     """
     for env_name in ("AGENT_SENSORIUM_DEFAULT_INSTANCE", "SENSORIUM_INSTANCE"):
         value = os.environ.get(env_name)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    marker = read_active_profile()
+    if marker:
+        return marker
 
     try:
         from importlib import import_module
@@ -286,6 +427,10 @@ def _validate_config(raw: dict) -> dict:
         "thresholds": dict(SAFE_DEFAULTS["thresholds"]),
         "budgets": dict(SAFE_DEFAULTS["budgets"]),
         "thread_ttl_hours": SAFE_DEFAULTS["thread_ttl_hours"],
+        "default_actor": SAFE_DEFAULTS["default_actor"],
+        "subconscious_profile": SAFE_DEFAULTS["subconscious_profile"],
+        "tick_quiet_filename": SAFE_DEFAULTS["tick_quiet_filename"],
+        "tts": dict(SAFE_DEFAULTS["tts"]),
         "operational_pointer": dict(SAFE_DEFAULTS["operational_pointer"]),
         "pointer": dict(SAFE_DEFAULTS["pointer"]),
         "outbox": dict(SAFE_DEFAULTS["outbox"]),
@@ -326,6 +471,25 @@ def _validate_config(raw: dict) -> dict:
         val = raw["thread_ttl_hours"]
         if isinstance(val, (int, float)) and val > 0:
             config["thread_ttl_hours"] = val
+    for key in ("default_actor", "subconscious_profile"):
+        if key in raw and isinstance(raw[key], str) and raw[key].strip():
+            config[key] = raw[key].strip()
+    if "tick_quiet_filename" in raw and isinstance(raw["tick_quiet_filename"], str):
+        val = raw["tick_quiet_filename"].strip()
+        if val and "/" not in val and "\\" not in val and val not in {".", ".."}:
+            config["tick_quiet_filename"] = val
+    if "tts" in raw and isinstance(raw["tts"], dict):
+        tts = dict(config["tts"])
+        raw_tts = raw["tts"]
+        for k in ("base_url", "model", "voice", "sidecar_base", "control_command", "pid_file"):
+            if k not in raw_tts:
+                continue
+            v = raw_tts[k]
+            if isinstance(v, str) and v.strip():
+                tts[k] = v.strip()
+            elif v is None:
+                tts[k] = None
+        config["tts"] = tts
     if "operational_pointer" in raw and isinstance(raw["operational_pointer"], dict):
         val = raw["operational_pointer"]
         op = dict(config["operational_pointer"])

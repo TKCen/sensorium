@@ -36,6 +36,8 @@ from agent_sensorium.sensors import (
     machine_network_pressure_sample,
     machine_process_pressure_sample,
     media_capacity_sample,
+    runtime_heartbeat_sample,
+    build_runtime_heartbeat_signal,
     tts_sidecar_pressure_sample,
 )
 from agent_sensorium.store import SensoriumStore
@@ -140,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--media-capacity", action="store_true", help="Sample almost-idle local media gift capacity")
     parser.add_argument("--codex-usage", action="store_true", help="Sample Codex/OpenAI subscription usage pressure")
     parser.add_argument(
+        "--heartbeat", action="store_true",
+        help="Emit a compact deterministic runtime heartbeat signal (state-dir/registry/pending health)",
+    )
+    parser.add_argument(
         "--memory-reflection", action="store_true",
         help=(
             "Run due Subconscious-owned Hindsight reflect/recall memory probes "
@@ -203,6 +209,19 @@ def main(argv: list[str] | None = None) -> int:
                 store.ensure_dirs()
                 _write_body_state(body_path, next_state)
             steps["body_pressure"] = body_step
+
+        if args.heartbeat:
+            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+            sample = runtime_heartbeat_sample(store=store)
+            signal = build_runtime_heartbeat_signal(sample, instance=args.instance)
+            step = {"sampled": True, "emitted": True, "values": sample}
+            if not args.dry_run:
+                raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=instance_config, **kw))
+                if raw.get("success"):
+                    step["ingest"] = raw["data"]
+                else:
+                    errors.append(f"heartbeat_ingest: {raw.get('error', 'unknown')}")
+            steps["heartbeat"] = step
 
         transition_specs = [
             ("network_pressure", args.network_pressure, machine_network_pressure_sample, classify_machine_network_pressure),

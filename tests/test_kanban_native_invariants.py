@@ -590,10 +590,15 @@ class TestRuntimeKanbanBridgeIntakeRows:
         assert "--assignee" not in cmd
         assert "--triage" not in cmd
 
-    def _assert_sticky_block_then_assign(self, calls: list[list[str]], start: int) -> None:
+    def _assert_sticky_block_then_assign(
+        self, calls: list[list[str]], start: int, expected_profile: str
+    ) -> None:
         assert calls[start][:5] == ["hermes", "kanban", "--board", "sensorium", "block"]
         assert calls[start + 1][:5] == ["hermes", "kanban", "--board", "sensorium", "assign"]
-        assert calls[start + 1][-1] == "serasubconscious"
+        # Assert the intake is assigned to the bridge's configured reviewer
+        # profile, whatever it is — a generic invariant that holds for the
+        # generic repo default and for any deployment-configured runtime copy.
+        assert calls[start + 1][-1] == expected_profile
 
     @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
     def test_event_and_reconciliation_intakes_are_blocked_assigned(
@@ -637,11 +642,11 @@ class TestRuntimeKanbanBridgeIntakeRows:
         self._assert_substrate_create_cmd(
             calls[0], created_by="sensorium-kanban-sensor"
         )
-        self._assert_sticky_block_then_assign(calls, 1)
+        self._assert_sticky_block_then_assign(calls, 1, bridge.PROFILE)
         self._assert_substrate_create_cmd(
             calls[3], created_by="sensorium-kanban-reconcile"
         )
-        self._assert_sticky_block_then_assign(calls, 4)
+        self._assert_sticky_block_then_assign(calls, 4, bridge.PROFILE)
 
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:

@@ -1,6 +1,6 @@
 """Tests for Kanban Subconscious settlement propagation and incident coalescing.
 
-Covers the semantics required by the live `serasubconscious` Kanban gate:
+Covers the semantics required by the live `subconscious_worker` Kanban gate:
 - DROP suppresses the corresponding Sensorium candidate so the legacy dispatcher
   dry-run no longer reports `kanban_review_required` for it.
 - SAVE marks the candidate reviewed while preserving full audit trail.
@@ -403,7 +403,7 @@ class TestCompletedIntakeSettlementRecovery:
     def test_infers_decision_from_review_comment_or_completion_summary(self):
         task = self._intake_task(comment="decision: SAVE — keep compact memory", summary="")
         assert infer_kanban_settlement_decision(task) == "SAVE"
-        task = self._intake_task(comment="", summary="Settled as PROMOTE — needs Sera")
+        task = self._intake_task(comment="", summary="Settled as PROMOTE — needs conscious review")
         assert infer_kanban_settlement_decision(task) == "PROMOTE_CONSCIOUS"
 
     def test_plans_missing_completed_intake_settlement_record(self):

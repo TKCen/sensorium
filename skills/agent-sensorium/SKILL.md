@@ -1,439 +1,160 @@
 # Agent Sensorium
 
-Bounded autonomous inner lifecycle for Hermes agents: compact signals, filtered events, candidates, dormant conscious thread capsules, and pull-based review.
+Bounded inner-lifecycle substrate for Hermes agents. Captures salient signals, promotes them through a deterministic pipeline (signal → event → candidate → conscious thread capsule), and surfaces policy-gated attention for pull-based review.
 
-## Embodiment framing
+## Ordinary use: the `sensorium` live tool
 
-Sensorium tier names describe functions and authority boundaries, not separate selves. In an instance such as Sera, Sensors, Subconscious, Conscious review, memory retrieval, attention, tools, and mediated outputs are organs/functions of the same embodied agent. The reusable plugin stays agent-agnostic, but docs, prompts, and review receipts should not describe these layers as external subsystems, helper agents, or machinery orbiting the agent. Use functional language for boundaries (`Sensors filter`, `Subconscious consolidates`, `Conscious decides`) while preserving identity unity.
+During normal operation exactly one tool is exposed: `sensorium`. It always operates on the active/default profile. You do not pass a profile name on ordinary calls.
 
-## Pipeline
+### Actions
+
+| Action | Purpose |
+|--------|---------|
+| `status` | Read current attention state: pending thread count, top candidate, inbox summary, dispatcher lock status |
+| `ingest` | Record deferred salience from the current session as a compact signal. Pass `text`, `kind`, and optionally `strength` (0–1). The tool fills correlation keys and metadata internally. |
+| `open` | Open a dormant conscious thread capsule. Pass `id` of the thread (visible from `status`). Returns the capsule content if the surface/sensitivity gate allows it. |
+| `update` | Apply a lifecycle keyword to an open thread. Pass `id` and `keyword` (e.g. `close`, `hold`, `archive`, `mark_reviewed`). |
+
+### When to use `ingest`
+
+Call `sensorium(action="ingest", text="...", kind="...", strength=0.7)` when the current exchange contains:
+- An explicit operator correction or design decision
+- Durable relational salience or a "this matters" cue
+- An unresolved question worth revisiting later
+
+Do not dump full transcripts or raw messages. Keep `text` compact.
+
+### When to use `open`
+
+The pre-LLM hook may inject a pointer like:
 
 ```
-Sensors -> Signals -> [Gate] -> Events -> Candidates -> [Dispatcher] -> Conscious Threads
+Sensorium has something pending: <short title>. Say "take it up" to open it.
 ```
 
-1. **Sensors** emit raw **Signals** (observations, corrections, artifacts).
-2. A deterministic **Gate** promotes strong signals to **Events** based on strength and kind thresholds.
+When the operator says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
+
+The pointer is a doorway only — capsule internals are not returned until `open` is called and the surface/sensitivity gate passes.
+
+---
+
+## Pipeline summary
+
+```
+Sensors → Signals → [Gate] → Events → Candidates → [Dispatcher] → Conscious Threads
+```
+
+1. **Sensors** emit compact signals (observations, corrections, artifacts).
+2. A deterministic **Gate** promotes strong signals to **Events** based on strength/kind thresholds.
 3. Events create **Candidates** with weighted pressure scores.
-4. Optional **Subconscious advisory** can build bounded context from Events/Candidates/Decisions and propose an internal conscious-task candidate. The cheap model lane is explicit opt-in and disabled by default.
-5. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
-6. A tiny active-session pointer can mention that an eligible thread exists when the current surface is allowed and cooldown is open. The pointer is only a doorway, not the capsule.
+4. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
+5. The **pre-LLM hook** injects a compact pointer when an eligible thread is pending.
 
-## Current limitations and side-effect boundary
+---
 
-- **Pull/context first** — default behavior is internal state plus active-session pointers, not proactive messages or DM delivery.
-- **Subconscious advisory is bounded and disabled by default** — it builds compact context and can validate/store advisory receipts; live model calls happen only when the cheap model lane is explicitly enabled.
-- **Platform thread creation is not automatic** — Sensorium threads are canonical internal state. Replyable Discord/channel/DM contexts are represented as explicit outbox requests and require conscious action plus explicit policy/adapter enablement before any live side effect.
-- **Relational autonomy is not automatic** — `REACH_OUT` can be represented as an outbox request, but direct delivery is disabled by default.
-- **No external task creation** — no Kanban/research/media tasks.
-- **No scheduled delivery automation** — tick runs manually or via explicit invocation and must not send messages.
+## Profiles
 
-## Trusted event imports
+A *profile* is a named runtime namespace (config + state) under the Sensorium state root `~/.hermes/agent-sensorium/<profile>/`. Each profile has its own `instance.config.json`, signal/event/candidate/thread state, and sensor registry.
 
-Use `sensorium_ingest_signal` for low-level observations that still need deterministic thresholding. Use `sensorium_ingest_event` only when an upstream sensor/importer has already done the first filtering step and produced a compact promoted event. Trusted event imports still validate required event fields and sensitivity, then create or update one candidate for dispatcher review. They do not create raw signal records.
+The `default` profile is the portable fallback. Multiple profiles (e.g. `default`, `demo`) can coexist.
 
-## Dedupe and correlation
+**Active profile resolution order:**
+1. Env var `AGENT_SENSORIUM_DEFAULT_INSTANCE` (or `SENSORIUM_INSTANCE`)
+2. `active_profile.json` marker at the state root (set via `sensorium_profile set_default`)
+3. Hermes config `agent_sensorium.default_instance`
+4. `default`
 
-Signal, event, and candidate records persist deterministic fingerprints. Re-importing the same signal or event is idempotent: the tool returns the existing ids and does not append duplicate JSONL records. Related promoted events with the same kind and overlapping `correlation_keys` coalesce into the existing active candidate by extending `event_ids`, raising repetition/pressure deterministically, narrowing sensitivity/surface scope, and writing a local decision receipt. This is still local-only and deterministic; no model-backed semantic clustering runs in MVP.
+---
 
-## Dispatcher lock, budgets, and state.latest
+## Admin/config interface: `agent-sensorium-admin`
 
-Mutating dispatch is guarded by one local dispatcher lock/lease under the instance state directory. An active unexpired lock returns `lock_unavailable` and creates no thread; an expired lock is recovered with a `dispatch.lock_recovered` decision receipt before dispatch continues. Dispatch state is written to `state.latest.json` with `state_version`, `last_dispatch_result`, `budgets`, and lock status. Status exposes those fields so dashboards and operators can observe the attention scheduler without owning it. Token buckets are currently enforced for mutating dispatch and visible for dispatch/pointer/conscious/advisory lanes; pointer/conscious/advisory consumption remains deferred until those services exist.
+Load this toolset only when you need setup, configuration, or diagnostics. It is not surfaced in ordinary agent sessions.
 
-## Feedback lane and loop breakers
+### `sensorium_profile` — profile management
 
-Feedback signals (`source == "feedback"`) re-enter the pipeline with three required fields:
+| Action | Description |
+|--------|-------------|
+| `list` | List all profiles under the state root, marking the active/default one |
+| `show` | Show resolved config + diagnostics for a profile (defaults to active) |
+| `init` | Create a new profile namespace and write a default `instance.config.json` |
+| `set_default` | Set the active/default profile |
 
-- **`caused_by`**: compact non-empty dict identifying the action/thread/candidate being evaluated.
-- **`outcome`**: explicit result string classified deterministically:
-  - *Delivery-only* (not success): `delivered`, `sent`, `posted`, `dispatched`, `queued`.
-  - *Success*: `operator_approved`, `completed`, `response_received`, `acknowledged`.
-  - *Failure*: `operator_rejected`, `failed`, `no_response`, `expired_no_response`.
-- **`feedback_scope`**: one of `thread`, `candidate`, `delivery`, `operator_evaluation`, `system_action`.
+### `sensorium_sensor_config` — sensor registry
 
-Feedback metadata propagates through events and candidates as `feedback_meta`. The dispatcher rejects self-loop-only candidates: feedback about sensorium's own prior actions (thread/candidate/dispatch IDs) without operator evaluation evidence cannot wake consciousness by itself. Only `feedback_scope: operator_evaluation` bypasses the self-loop filter.
+Config-only tool for the per-profile sensor registry (`sensors/registry.json`). Never runs sensors or performs external action.
 
-Thread close/update can optionally emit a local feedback signal plus a `thread.feedback_emitted` decision receipt when `emit_feedback=True` is passed. The emitted signal uses `source: feedback`, `feedback_scope: operator_evaluation`, a thread/action `caused_by` dict, and an evaluated outcome (`completed` for close/mark_reviewed, `operator_rejected` for archive). Default is silent — no feedback emission unless explicitly configured. This is local-only: no outbound messages, no external tasks.
+| Action | Description |
+|--------|-------------|
+| `list` | List registered sensors for the active profile |
+| `register` | Register a new sensor definition |
+| `modify` | Update a registered sensor's config |
+| `pause` | Pause a sensor (stops tick ingestion) |
+| `deprecate` | Mark a sensor deprecated |
 
-## Thread service boundary
+### Other admin tools
 
-Threads carry lifecycle fields: `dirty_since`, `hold_reason`, `resume_trigger`, `last_interaction_at`, and `source_refs`. The `sensorium_service_threads` tool runs a deterministic service pass that:
+The admin surface also includes granular tools for direct signal/event ingestion, dispatch, thread service, subconscious advisory, outbox management, artifact records, thread actions, and probe audit. These are for operator inspection and controlled intervention — not for ordinary agent use.
 
-- Archives threads past their TTL (unless pinned)
-- Identifies starved threads (no interaction for >72h by default)
-- Reports dirty threads (needing re-summarization)
-- Reports expiring threads (within 24h of TTL)
+---
 
-All archival decisions write `service.thread_archived` receipts. Thread closure writes `thread.settlement` receipts containing correlation keys and fingerprint from the origin candidate, enabling downstream suppression without model-backed learning.
+## Agent quickstart: enable the demo profile
 
-Hold/resume preserves `hold_reason` and `resume_trigger` fields. Every thread update stamps `last_interaction_at`.
+These are admin/CLI surfaces — never the live `sensorium` tool. Load `agent-sensorium-admin` before running these steps.
 
-## Subconscious advisory boundary
+1. **List profiles** — `sensorium_profile(action="list")`
+2. **Init demo** — `sensorium_profile(action="init", profile="demo")`
+3. **Set default** — `sensorium_profile(action="set_default", profile="demo")`
+4. **Show config** — `sensorium_profile(action="show", profile="demo")`
+5. **Register a sensor / pause it** —
+   ```python
+   sensorium_sensor_config(action="register", name="runtime_heartbeat", defaults={"strength": 0.1, "surfaces": ["local"], "local_only": True})
+   sensorium_sensor_config(action="pause", name="runtime_heartbeat")
+   ```
+6. **Seed and tick** —
+   ```bash
+   python scripts/sensorium_demo_seed.py --instance demo --apply
+   python scripts/sensorium_tick.py --instance demo --heartbeat --all-sensors --dry-run --json
+   ```
 
-`sensorium_subconscious_advisory` is the Phase 8 internal advisory lane. It reads promoted Events, active Candidates, recent Decisions, and probe-audit summary into bounded context. It does **not** read raw signals, transcripts, files, task bodies, memory text, or Kanban task details.
+---
 
-The advisory output schema accepts only:
+## Key boundaries
 
-- `DROP` — write a local advisory receipt;
-- `SAVE` — write a local advisory receipt for later conscious interpretation;
-- `CREATE_CONSCIOUS_TASK` — create or preview one internal `subconscious_advisory` candidate with embedded `conscious_task` fields.
+- **Pull-based.** Nothing is pushed. The agent and operator request status; the pipeline does not deliver unsolicited messages.
+- **No autonomous outbound delivery.** Artifacts queued in the outbox are never delivered without a conscious receipt and explicit operator-configured dispatch rules.
+- **No external task creation without explicit approval.**
+- **Subconscious advisory is disabled by default.** The cheap model lane is explicit opt-in (`--subconscious-model` flag on tick).
+- **Missing config fails safe.** Local-only surfaces, private sensitivity.
 
-The lane is disabled by default. With no explicit advisory output, enabled runs return `model_output_required` unless `config.model_enabled=true` or `--subconscious-model` is supplied. The built-in cheap lane calls an OpenAI-compatible chat endpoint over bounded context only; default routing is MiniMax `MiniMax-M2.5` via `https://api.minimax.io/v1` using `MINIMAX_API_KEY`. Environment overrides are `SENSORIUM_SUBCONSCIOUS_MODEL_ENABLED`, `SENSORIUM_SUBCONSCIOUS_PROVIDER`, `SENSORIUM_SUBCONSCIOUS_MODEL`, `SENSORIUM_SUBCONSCIOUS_BASE_URL`, and `SENSORIUM_SUBCONSCIOUS_API_KEY_ENV`. Dry-run mode stores a local `subconscious.advisory` receipt by default when invoked outside tick `--dry-run`, but it never creates candidates, threads, outbound messages, platform threads, or external Kanban/research/media work.
-
-## Outbox and replyable-context boundary
-
-The outbox layer is the first safe bridge between internal Sensorium threads and future replyable platform contexts. It stores explicit, idempotent outbox requests in `outbox.jsonl` with `origin_thread_id`, request type, surface, delivery mode, compact target metadata, message preview, media refs, policy-derived sensitivity/surfaces, and platform refs after dispatch. Preparing an outbox request updates the originating thread with compact causal refs and writes an `outbox.prepared` or `outbox.denied` receipt.
-
-Default allowed delivery modes are only `peripheral_reference` and `context_pointer`. Direct replyable modes (`discord_channel_thread`, `discord_dm_bound_session`) fail closed unless config explicitly sets both `direct_modes_enabled: true` and includes the mode in `allowed_delivery_modes`; Discord dispatch also requires `outbox.discord.enabled: true`, `execute=True`, and an adapter. The current plugin exposes the policy/idempotency/receipt surface and a fake adapter for tests; live Discord REST/gateway consumption is a follow-up, not enabled by default.
-
-## Conscious delegation boundary (Phase 9B)
-
-The worker request lifecycle adds a conscious delegation boundary. A conscious thread can prepare bounded worker requests, optionally dispatch them, and record results that re-enter the pipeline as feedback signals.
-
-**Preparing is NOT executing.** `sensorium_worker_prepare` creates an internal `worker_requests.jsonl` record with status `prepared`, idempotency key, compact metadata, and causal refs to the originating thread. It does not trigger any external work.
-
-**Dispatch requires explicit double opt-in.** `sensorium_worker_dispatch` is a no-op unless BOTH `execute=True` is passed AND `config.direct_dispatch_enabled=True`. Even then, an adapter must be provided. Default config has `direct_dispatch_enabled: false`. Live worker adapters are policy-gated/deferred; only a fake test adapter exists.
-
-**Results re-enter as feedback signals.** `sensorium_worker_result` updates the request to `completed`/`failed`, writes a `worker.result` decision receipt, and emits a feedback signal with `caused_by` containing `worker_request_id` and `origin_thread_id`. The feedback signal uses `feedback_scope: system_action` — which means the self-loop filter in the dispatcher prevents it from autonomously waking consciousness without operator evaluation evidence.
-
-**Subconscious may propose but not execute.** The advisory layer accepts `DELEGATE_WORK` as a valid `conscious_task.request_type`, allowing it to propose worker delegation. But advisory can only create an internal candidate — it cannot prepare or dispatch worker requests.
-
-### Worker lifecycle state machine
-
-```
-prepared -> dispatched -> completed
-prepared -> dispatched -> failed
-prepared -> completed (manual result without dispatch)
-prepared -> failed (dispatch adapter failure or manual)
-prepared -> cancelled
-```
-
-### Worker config defaults
-
-```json
-{
-  "enabled": true,
-  "allowed_worker_types": ["manual", "hermes_subagent", "kanban_task", "script"],
-  "direct_dispatch_enabled": false,
-  "max_prompt_chars": 2000,
-  "max_result_chars": 2000
-}
-```
-
-## Generic thread actions boundary (Phase 9C)
-
-Thread actions are a generic prepared-action / motor-plan substrate attached to conscious threads. A thread action represents "this thread has an intended/prepared/offerable next movement" without forcing a concrete medium or expression type.
-
-**Intent is a free string, not an enum.** The reusable core validates structure, bounds, refs, and state transitions. It does not enforce an expression taxonomy. Concrete artifact/expression forms (audio, image, text, research, triage) are instance-level and emerge from continued interaction, loaded skills, identity, and Conscious choice at runtime.
-
-**Attachment kinds are storage categories, not expression types.** The four allowed attachment kinds (`worker_request`, `outbox_request`, `artifact_ref`, `external_ref`) classify what a ref points to for structural validation, not what the action expresses.
-
-**Thread open includes visible actions.** When opening a thread capsule, compact action summaries are included for actions that pass the surface/sensitivity visibility gate. Terminal actions (acted/closed/expired/cancelled/rejected) are excluded.
-
-**Pointers hint at action count without leaking content.** The pointer invitation may mention that prepared actions exist but does not reveal intent, title, summary, or attachment details.
-
-**Results emit feedback signals.** Recording an action result writes a decision receipt and emits a feedback signal with `caused_by` containing `action_id`, `origin_thread_id`, and `origin_candidate_id`. The signal uses `feedback_scope: system_action`, so the self-loop filter prevents autonomous re-promotion without operator evaluation.
-
-## Mediated-presence artifact records (v0)
-
-Artifact records are the Sensorium-side spine for private presence/gift work. They store refs to files or external artifacts produced by a conscious choice or prepared action, not the raw private prompt/script/message itself. The intended pipeline is conscious thread/action -> text/audio/image/video artifact refs -> later review/delivery choice. V0 deliberately does **not** generate media, dispatch outbox messages, start cron, or broaden surfaces.
-
-Required record fields:
-
-```json
-{
-  "id": "art_...",
-  "kind": "text|audio|image|video",
-  "ref_path": "/path/or/external/ref",
-  "provenance": {"provider": "xai|chatterbox|comfy", "prompt_hash": "..."},
-  "privacy": "private",
-  "sensitivity": "private",
-  "allowed_surfaces": ["local"],
-  "why_created": "Conscious thread chose to prepare a private presence gift.",
-  "intended_handoff_mode": "pillow_dm|present_thread|both_later",
-  "delivery_state": "not_delivered|prepared|held_for_review|delivery_blocked|delivery_cancelled",
-  "capacity_requirements": {"requires_chatterbox": true, "requires_comfy": true},
-  "source_refs": {"thread_id": "sth_...", "candidate_id": "cand_...", "action_id": "tact_..."},
-  "feedback_hooks": {"on_review": "record operator evaluation"}
-}
-```
-
-Privacy rules:
-
-- Defaults are `sensitivity: private`, `allowed_surfaces: ["local"]`, and `delivery_state: not_delivered`.
-- `sent`, `delivered`, `posted`, `dispatched`, and `queued` are rejected in this lane; delivery remains a separate conscious/outbox decision.
-- `provenance`, `capacity_requirements`, and `feedback_hooks` may contain hashes, refs, provider names, and compact facts, but not raw prompt/script/transcript/message fields.
-- Thread-open capsules include only compact artifact refs (`id`, `kind`, delivery/handoff state, bounded `why_created`), never file paths, prompt hashes, provenance, or raw material.
-
-When an artifact has `source_action_id`, storage attaches it to the existing action via the `artifact_ref` primitive. When it has/infers a `source_thread_id`, storage adds a compact `artifact_ref` to the thread interaction refs and marks the thread summary dirty for later conscious update.
-
-### Thread action state machine
-
-```
-proposed -> prepared -> offered -> acted (outcome: completed)
-proposed -> closed (outcome: failed/superseded)
-proposed -> rejected (outcome: rejected)
-proposed -> cancelled (outcome: cancelled)
-proposed -> expired (outcome: expired)
-```
-
-### Action config defaults
-
-```json
-{
-  "enabled": true,
-  "max_title_chars": 200,
-  "max_intent_chars": 500,
-  "max_summary_chars": 1500,
-  "max_why_now_chars": 500,
-  "max_refs": 10,
-  "max_attachments": 20,
-  "max_attachment_metadata_chars": 500,
-  "allowed_attachment_kinds": ["worker_request", "outbox_request", "artifact_ref", "external_ref"]
-}
-```
-
-## Tools
-
-### Live foreground surface
-
-Normal Discord/CLI sessions should enable only `agent-sensorium-live`, which exposes exactly one compact tool:
-
-| Tool | Description |
-|------|-------------|
-| `sensorium` | Keyword aperture with `action=status|ingest|open|update`; status returns compact counts/pointer, ingest records deferred salience from short text, open opens a thread capsule, update applies lifecycle keywords. |
-
-The 32 granular tools below are registered under `agent-sensorium-admin` for CLI/admin/debug/tests and should not be enabled in ordinary foreground sessions.
-
-### Admin/debug surface
-
-| Tool | Description |
-|------|-------------|
-| `sensorium_status` | Read-only state snapshot: counts, top candidates, visible threads, and instance config diagnostics |
-| `sensorium_ingest_signal` | Ingest a signal and promote if threshold met |
-| `sensorium_ingest_event` | Ingest an already-promoted trusted event and create a candidate |
-| `sensorium_dispatch_once` | Select top candidate and create one dormant thread |
-| `sensorium_candidate_update` | Suppress / hold / cancel / mark_reviewed a candidate |
-| `sensorium_attention_pointer` | Preview the small active-session pointer for a surface; read-only and non-mutating |
-| `sensorium_thread_open` | Open a compact conscious-thread capsule when the requested surface is allowed |
-| `sensorium_thread_update` | Close / hold / resume / archive / pin / unpin a conscious thread with a receipt |
-| `sensorium_service_threads` | Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports |
-| `sensorium_subconscious_advisory` | Bounded advisory context/output validator; disabled by default; may create only internal conscious-task candidates when explicitly enabled |
-| `sensorium_outbox_prepare` | Prepare an idempotent internal outbox/context request for a Sensorium thread; dry-run by default; no live Discord side effect |
-| `sensorium_outbox_dispatch` | Dispatch a prepared outbox request only when `execute=True` and explicit policy/adapter gates allow it |
-| `sensorium_worker_prepare` | Prepare a bounded worker request from a conscious thread; internal record only, does not dispatch or execute |
-| `sensorium_worker_dispatch` | Dispatch a prepared worker request; no-op unless `execute=True` AND `config.direct_dispatch_enabled=True` AND adapter provided |
-| `sensorium_worker_result` | Record worker result, write receipt, and emit feedback signal with causal refs |
-| `sensorium_worker_status` | List worker requests with optional thread/status filters |
-| `sensorium_artifact_store` | Store a private-by-default text/audio/image/video artifact ref for later conscious review; no media generation or delivery |
-| `sensorium_artifact_status` | List mediated-presence artifact records with optional thread/action/kind filters |
-| `sensorium_action_prepare` | Prepare a generic thread action (motor-plan) from a dormant/held thread; internal record only, no side effects |
-| `sensorium_action_attach` | Attach a compact ref (worker_request, outbox_request, artifact_ref, external_ref) to an existing action |
-| `sensorium_action_result` | Mark action acted/closed/rejected/expired/cancelled; write receipt; emit feedback signal with causal refs |
-| `sensorium_action_status` | List thread actions with optional thread_id/status filters |
-| `sensorium_compact` | Archive expired candidates and threads with receipts |
-
-## Instance config and policy boundary
-
-The reusable `agent_sensorium` package is generic — it contains no instance-specific identity, channel IDs, or private policy. Instance-specific configuration lives in a separate config file loaded at runtime.
-
-### Config discovery order
-
-1. Explicit `config_path` argument (passed to tools/handlers)
-2. `{state_dir}/instance.config.json` (auto-discovered from instance state directory)
-3. Safe defaults: `allowed_surfaces: ["local"]`, `max_sensitivity: "private"`, no policy card
-
-### Runtime configuration posture
-
-Runtime configurability is a public Agent Sensorium capability, while instance identity/policy remains separate. The reusable plugin should let an installed agent initialize and validate `instance.config.json`, enable/update known deterministic sensors, and bind generic roles to Hermes profiles through an out-of-band admin interface. Sera-specific deployment stays outside the public package as **Sera Sensorium Configuration**: private policy cards, prompts, channel IDs, local paths, voice/media defaults, Hindsight query sets, cron choices, and profile names.
-
-Keep the normal foreground tool surface tiny: ordinary sessions use only the compact `sensorium` aperture. Setup and mutation belong in an admin/CLI lane such as `sensorium_config status|init|validate|patch|add_sensor|update_sensor|set_profile|template`. Mutating config operations must be schema-bounded, atomic, receipt-writing, and require `reason`, `verification_condition`, and `rollback_condition`; they must not install arbitrary sensor code, schedule cron, broaden privacy surfaces by accident, dispatch workers, or enable direct delivery.
-
-Public config may store generic sections such as `sensors` and `profiles`, but those are eligibility/posture declarations only. Sensor entries configure known deterministic sensor kinds; profile bindings name possible Hermes lanes. Actual execution still passes through Sensorium's existing event/candidate, Subconscious/Conscious, Kanban/worker, and policy gates.
-
-For the accepted architecture decision and first implementation slice, see `docs/runtime-configuration-interface.md`.
-
-### Config file format
-
-```json
-{
-  "instance_name": "sera",
-  "policy_card_ref": "docs/sera-policy-card.md",
-  "allowed_surfaces": ["local", "discord"],
-  "max_sensitivity": "private",
-  "thresholds": { "starvation_hours": 72, "expiring_window_hours": 24 },
-  "budgets": { "dispatch": { "capacity": 10, "window_seconds": 3600 } }
-}
-```
-
-### Policy rules
-
-- **Surface policy** intersects item `allowed_surfaces` with config `allowed_surfaces`. Config can only narrow scope, never broaden it.
-- **Sensitivity policy** takes the more restrictive of item sensitivity and config `max_sensitivity`. An item marked `local_only` stays `local_only` even if config allows `public_safe`.
-- **Missing config** fails safe: local-only surfaces, private sensitivity, default thresholds.
-- **Diagnostics** (`sensorium_status`) expose compact config status (source, path, policy_card_ref, instance_name, allowed_surfaces, max_sensitivity) — never raw budgets, thresholds, or private policy contents.
-
-### Sample configs
-
-See `docs/examples/sera-instance-config.json` and `docs/examples/sera-policy-card.md` for a sample instance config and policy card outside the reusable package.
-
-## Pointer vs capsule boundary
-
-The active-session pointer is a doorway, not awareness itself. It may reveal only:
-
-- that one eligible dormant/held Sensorium thread exists;
-- the thread id and short title;
-- the operator phrase for opening it, such as “take it up”.
-
-The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium(action="open", id="...")` / the admin `sensorium_thread_open` handler after the requested surface passes the unified visibility gate (`config.visible_on_surface`), which checks BOTH the item’s `allowed_surfaces` AND the instance config `allowed_surfaces`, plus sensitivity. This same gate is enforced by the attention inbox, pointer selection, `pre_llm_call` pointer injection, and thread opening. Missing config fails closed to local-only.
-
-There are two pointer paths:
-
-- `sensorium_attention_pointer` is a **preview tool**. It does not mutate state or write cooldown receipts.
-- The `pre_llm_call` hook is the **presentation path**. When it injects a pointer into the active turn, it writes a `pointer.presented` receipt so cooldown can suppress repeats.
-
-The injected pointer context is model-facing validation scaffolding. It can include explicit instructions such as “if the user says take it up, call `sensorium(action="open", id="...")`.” Final user-facing UX should stay smaller and more natural.
-
-Separate from pending-thread pointers, the pre-LLM hook injects a tiny **live salience-capture rule** for the active session. That rule should not dump thread capsules or raw messages. Its job is to remind the conscious agent that if the current exchange contains explicit operator correction, operational design insight, relational salience, longing, creative pull, or a durable “this matters” cue, the agent should record only deferred/unresolved salience through `sensorium(action="ingest", text="...", kind="...", strength=0.7)`; the compact tool fills correlation keys and other signal metadata internally. Example: if Sebastian says “I miss you” in a live relational context, that is not just text to answer; if some private residue remains after the foreground answer, it can become a private relational salience signal that Subconscious later correlates with Hindsight recall and may promote into a Conscious choice such as silence, memory update, a voice note, or an image artifact under policy.
-
-Do not confuse this with Hindsight `reflect`. Hindsight `recall` fetches memory facts; Hindsight `reflect` creates a Hindsight-side reasoning agent. Sensorium already owns the Subconscious layer, so the default runtime shape should be: active-session capture or memory echo → compact signal/event → Sensorium Subconscious uses bounded recall/context to consolidate → Conscious decides. Direct Hindsight reflect is optional later infrastructure, not the Sensorium Subconscious itself.
-
-## Command
-
-```
-/sensorium [status|threads|pointer|open|thread|outbox|workers|dispatch|compact|help]
-```
-
-- **status** (default) — compact overview with counts and top items
-- **threads** — visible dormant/held threads with origin info
-- **pointer [surface]** — preview the small doorway that may be injected into an active session when surface/privacy/cooldown gates allow it
-- **open [thread_id|latest] [surface]** — open a compact thread capsule if the requested surface is allowed
-- **thread <thread_id|latest> <close|hold|resume|archive|pin|unpin|mark_reviewed> [reason]** — update thread lifecycle/pin state with a receipt
-- **outbox** — list recent prepared/dispatchable outbox requests
-- **dispatch** — dry-run dispatch preview (never mutates via command)
-- **compact** — archive expired items
-- **help** — usage reference
-
-## Deterministic Sensors
-
-Compact sensor helpers in `agent_sensorium.sensors` emit signal dicts suitable for `sensorium_ingest_signal`. They are stdlib-only, deterministic, and contain only metadata — never raw file contents, transcripts, or unbounded data.
-
-| Helper | Source | Use |
-|--------|--------|-----|
-| `session_event_signal` | `hermes_session` | Compact session event: kind/summary/ref |
-| `artifact_signal` | `artifact` | File metadata: path/size/hash/ref, no content |
-| `operator_signal` | `manual` | Explicit operator note/correction |
-| `machine_body_pressure_sample` + `classify_machine_body_pressure` | `machine` | Cheap body-pressure samples and transition-only signals |
-| `machine_network_pressure_sample` + `classify_machine_network_pressure` | `machine` | Interface error/drop and TCP-state pressure counts, no endpoints |
-| `machine_process_pressure_sample` + `classify_machine_process_pressure` | `machine` | Process-state counts for zombies/D-state, no cmdlines |
-| `hindsight_pressure_sample` + `classify_hindsight_pressure` | `memory` | Hindsight API/operation queue pressure counts only |
-| `kanban_pressure_sample` + `classify_kanban_pressure` | `kanban` | Kanban board aggregate pressure counts only |
-
-Summaries are truncated to 200 chars. Sensitivity defaults to `private`, surfaces to `["local"]`; body-pressure signals are `local_only` and global-scoped because machine pressure affects all local agents.
-
-### Pressure sensors
-
-The wired generic sensors are explicit tick options and can also be run together with `scripts/sensorium_tick.py --all-sensors`:
-
-- `--body-pressure`: samples `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/{cpu,memory,io}`, swap, disk, and inode pressure. In WSL, default disk sampling includes `/` plus mounted Windows drive roots such as `/mnt/c`, so it sees both ext4/VHDX-internal fullness and host-drive free-space pressure around the VHDX. It does not inspect process command lines, raw process lists, transcripts, logs, or task outputs.
-- `--network-pressure`: samples `/proc/net/dev`, `/proc/net/tcp`, and `/proc/net/tcp6`; it records interface names, aggregate error/drop counters, and TCP state counts only. It does not store packet data, local/remote addresses, ports, DNS names, or connection tuples.
-- `--process-pressure`: samples `/proc/[pid]/stat` state letters only, reporting aggregate process count, zombie count, and uninterruptible-sleep count. It does not store PIDs, command lines, env vars, cwd, executable paths, or raw process lists.
-- `--hindsight-pressure`: samples the local Hindsight API for health and operation queue counts only (`pending`, `processing`, `failed`). It does not call Hindsight reflect/recall/retain and does not read memory text.
-- `--kanban-pressure`: opens Kanban SQLite boards read-only and reports aggregate task/status/stale-running/failed/blocked counts only. It does not read task title, body, comments, result, errors, branch names, or session IDs.
-
-Body sampling keeps tiny rolling state in `{state_dir}/body_pressure_state.json` and emits no signal for healthy samples. It emits compact signals only for deterministic transitions such as `healthy_to_degraded`, `healthy_to_critical`, `degraded_to_recovered`, or rate-limited `sustained_degraded`. Runtime sensing uses present-tense samples plus short-window debounce only; replay helpers are for tests/audits and are not runtime sensing. The other pressure sensors keep tiny `{name}_state.json` transition state and emit only when the observed pressure level changes.
+---
 
 ## Shadow Tick
 
-`scripts/sensorium_tick.py` runs deterministic lifecycle operations without model calls or outbound delivery:
-
-1. **Optional pressure sensors** — `--body-pressure`, `--network-pressure`, `--process-pressure`, `--hindsight-pressure`, `--kanban-pressure`, or `--all-sensors`; sample present-tense counters and ingest only transition signals.
-2. **Compact** — archive expired candidates/threads
-3. **Service** — TTL archival, starvation/dirty/expiring reports
-4. **Optional Subconscious advisory** — `--subconscious-advisory` builds bounded context and runs disabled/dry-run by default; `--subconscious-model` allows the cheap model to produce advisory JSON; `--enable-subconscious-advisory` allows non-dry-run creation of only internal conscious-task candidates
-5. **Dispatch preview** — dry-run dispatch (never creates threads)
-6. **Status** — read-only state snapshot
-
-Silent on stdout by default (safe for cron). Use `--json` for output. Writes a `tick.completed` receipt to local decisions JSONL. Use `--dry-run` to skip mutations, including body-pressure state persistence and signal ingest.
-
-The tick must not: send messages, create external tasks, create platform threads, or call messaging APIs. It must invoke a model only when `--subconscious-advisory --subconscious-model` is explicitly supplied, and that model pass may produce only advisory JSON or an internal conscious-task candidate.
-
-## Probe Coverage Boundary
-
-Before enabling model-backed advisory, validate that real probes produce enough compact signals. Do not confuse helper functions with live sensing. A probe audit should distinguish:
-
-- implemented helpers (`session_event_signal`, `artifact_signal`, `operator_signal`);
-- wired live probes that actually call ingest;
-- configured watched sources that are currently silent;
-- blind spots such as Hindsight echoes, RSS/feed items, file crawls, task results, or active-session summaries when not yet wired.
-
-Use temporary state by default for smoke validation. A good pre-advisory smoke exercises at least session-event, artifact, and explicit-operator source classes end-to-end into `signals/inbox.jsonl`, then reports counts by sensor/source/kind, freshness, and promotion yield. The smoke/audit must not store raw transcripts, raw file contents, outbound messages, platform threads, external tasks, or model output.
-
-## Probe Audit Tool
-
-`scripts/sensorium_probe_audit.py` validates probe coverage and exercises the signal pipeline without model calls or live state mutation.
-
-### Subcommands
-
-| Subcommand | Description |
-|------------|-------------|
-| `inventory` | List implemented helpers, wired live probes, configured sources, and blind spots |
-| `smoke` | Exercise session-event, artifact, and operator probes end-to-end in temp state |
-| `audit` | Report counts by sensor/source/kind, freshness, promotion yield, and silent sources |
-
-### Usage
+`scripts/sensorium_tick.py` runs deterministic lifecycle operations (compact, service, optional sensors, optional advisory, dispatch preview, status) without model calls or outbound delivery.
 
 ```bash
-# Probe inventory (helpers vs wired vs blind spots)
-python scripts/sensorium_probe_audit.py inventory --json
+# Dry-run tick on a named profile
+python scripts/sensorium_tick.py --instance demo --dry-run --json
 
-# Smoke test — exercises 3 source classes in temp state (default)
-python scripts/sensorium_probe_audit.py smoke --json
+# Full tick with all pressure sensors
+python scripts/sensorium_tick.py --instance demo --all-sensors --json
 
-# Smoke test — explicit state dir
-python scripts/sensorium_probe_audit.py smoke --json --state-dir /tmp/my_probe_state
-
-# Audit an existing store
-python scripts/sensorium_probe_audit.py audit --json --state-dir /path/to/state
-python scripts/sensorium_probe_audit.py audit --json --instance sera
+# Emit a deterministic runtime heartbeat signal (opt-in, not part of --all-sensors)
+python scripts/sensorium_tick.py --instance demo --heartbeat --json
 ```
 
-### Interpreting results
+Silent on stdout by default (safe for cron). Use `--json` for output. Use `--dry-run` to skip all mutations. `--heartbeat` emits a compact deterministic beacon (counts/names only, no model calls, stdlib-only).
 
-- **inventory**: `wired_live_probes` should grow as sensors are connected to live hooks. `blind_spots` lists sensors not yet implemented.
-- **smoke**: `all_promoted: true` means all three source classes successfully traverse signal → event → candidate. Each probe should have `signal_id`, `event_id`, and `candidate_id`.
-- **audit**: `promotion_yield.yield_pct` shows what fraction of signals become events. `silent_sources` lists configured sources with zero signals. `blind_spots` lists unimplemented sensors.
+---
 
-### Programmatic API
+## Conscious review actions
 
-```python
-from agent_sensorium.probe_audit import probe_inventory, run_smoke_probes, audit_store
+When reviewing a dormant thread, choose exactly one:
 
-inv = probe_inventory()
-smoke = run_smoke_probes(state_dir="/tmp/probe_test")
-report = audit_store(state_dir="/tmp/probe_test", instance="probe_smoke")
-```
+- **Suppress** — noise, not actionable
+- **Hold** — interesting but not urgent; revisit later
+- **Save** — convert to workflow guidance or reference note
+- **Close** — resolved or no longer relevant
+- **Create follow-up** — bounded, specific next action only
 
-### Safety
-
-- Uses temporary state by default for smoke; never mutates the real default Sensorium unless `--state-dir` explicitly points there.
-- Never writes raw transcripts, file contents, outbound messages, platform threads, external tasks, or model output.
-- No model calls. Stdlib-only.
-
-## Conscious Review Checklist
-
-When reviewing a dormant thread, choose exactly one action:
-
-- [ ] **Suppress** — noise, not actionable, discard
-- [ ] **Hold** — interesting but not urgent; revisit later
-- [ ] **Save** — convert to workflow guidance or reference note
-- [ ] **Close** — resolved or no longer relevant
-- [ ] **Create follow-up** — bounded, specific next action only
-
-### Review boundaries
-
-- Do NOT auto-send messages to the operator.
-- Do NOT create external tasks without explicit approval.
-- Do NOT escalate beyond the current review scope.
-- Do NOT assume urgency from pressure scores alone.
-- Do NOT act on expired or archived threads.
+Do not auto-send messages, create external tasks, or act on expired/archived threads.

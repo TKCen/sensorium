@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply Kanban Subconscious settlement records back to Sensorium truth.
 
-The cheap `serasubconscious` Kanban reviewer decides DROP/SAVE/PROMOTE_CONSCIOUS
+The cheap subconscious-reviewer Kanban profile decides DROP/SAVE/PROMOTE_CONSCIOUS
 for each consumed intake. Without this CLI those decisions only land on the
 Kanban board: the source Sensorium candidate stays `candidate`, and the next
 `sensorium_status` dry-run reports `would_promote` for it, splitting truth.
@@ -58,7 +58,7 @@ def _load_records(args: argparse.Namespace) -> list[dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--instance", default="sera")
+    ap.add_argument("--instance", default="default")
     ap.add_argument("--state-dir", default=None,
                     help="Override Sensorium state dir (defaults to ~/.hermes/agent-sensorium/<instance>)")
     src = ap.add_mutually_exclusive_group()

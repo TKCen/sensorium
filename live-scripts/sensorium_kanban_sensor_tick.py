@@ -4,10 +4,14 @@
 Dumb fixture layer:
 - runs deterministic Agent Sensorium sensors without internal dispatch/advisory;
 - mirrors new promoted Events into the `sensorium` Kanban board as blocked
-  `sensor:intake:*` tasks assigned to `serasubconscious`;
+  `sensor:intake:*` tasks assigned to the subconscious-reviewer profile;
 - creates at most one ready `subconscious:review:*` task assigned to the cheap
-  `serasubconscious` profile when unresolved intake exists and no review is
+  subconscious-reviewer profile when unresolved intake exists and no review is
   already active.
+
+Profile/instance and the reviewer profile name are resolved from the
+environment with generic defaults, so this bridge ships free of any
+deployment-specific instance/profile values.
 
 Healthy/idle path prints nothing. Use --json for inspection or --force-canary
 for an end-to-end canary intake.
@@ -25,10 +29,25 @@ from pathlib import Path
 from typing import Any
 
 HOME = Path.home()
-INSTANCE = "sera"
-BOARD = "sensorium"
-PROFILE = "serasubconscious"
+# Profile (state namespace) and the cheap reviewer profile are resolved from the
+# environment with generic defaults; no deployment-specific value is baked in.
+INSTANCE = (
+    os.environ.get("AGENT_SENSORIUM_DEFAULT_INSTANCE")
+    or os.environ.get("SENSORIUM_INSTANCE")
+    or "default"
+)
+BOARD = os.environ.get("SENSORIUM_KANBAN_BOARD", "sensorium")
+PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "subconscious_worker")
+
+# Resolve the package root without hardcoding a private checkout path. Prefer the
+# repository copy that ships alongside this script (``<repo>/agent_sensorium``);
+# fall back to the installed Hermes plugin location for the runtime cron copy.
+_SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN = HOME / ".hermes" / "plugins" / "agent-sensorium"
+for _candidate in (_SCRIPT_DIR.parent, PLUGIN):
+    if (_candidate / "agent_sensorium").is_dir():
+        PLUGIN = _candidate
+        break
 if str(PLUGIN) not in sys.path:
     sys.path.insert(0, str(PLUGIN))
 from agent_sensorium.settlement import (  # noqa: E402
@@ -108,7 +127,7 @@ def _ensure_board() -> None:
             "--name",
             "Sensorium",
             "--description",
-            "Sera Sensorium task substrate: sensor intake, Subconscious review, Conscious attention heads.",
+            "Sensorium task substrate: sensor intake, Subconscious review, Conscious attention heads.",
             "--icon",
             "◌",
             "--color",
@@ -252,9 +271,9 @@ def _post_review_settle_completed_intakes(
 ) -> dict[str, Any]:
     """Apply/flag settlements claimed by completed intake tasks.
 
-    This is the enforcement backstop for the cheap review lane: if
-    serasubconscious comments/completes an intake as DROP/SAVE/PROMOTE but fails
-    to run the settlement CLI, the next bridge tick reads the completed intake,
+    This is the enforcement backstop for the cheap review lane: if the
+    subconscious reviewer comments/completes an intake as DROP/SAVE/PROMOTE but
+    fails to run the settlement CLI, the next bridge tick reads the completed intake,
     applies the canonical Sensorium settlement, and records the result. If the
     intake is closed without an explicit decision, the gap is surfaced in latest
     state rather than remaining invisible.
@@ -572,8 +591,8 @@ def _compact_event_body(event: dict[str, Any]) -> str:
     contract_note = ("\n\n" + " ".join(contract_note_parts)) if contract_note_parts else ""
     return (
         "Sensorium Kanban intake v1. This is substrate, not executable user work.\n\n"
-        "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the gateway "
-        "dispatcher will not run it directly. The serasubconscious review task reads and "
+        f"Status semantics: this task is intentionally blocked and assigned to {PROFILE} so the gateway "
+        f"dispatcher will not run it directly. The {PROFILE} review task reads and "
         "settles these intakes.\n\n"
         "Compact event payload:\n"
         + json.dumps(payload, indent=2, sort_keys=True)
@@ -695,8 +714,8 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         "the event-driven bridge never mirrored it. The reconciliation pass mirrors "
         "it now so an above-threshold candidate cannot remain a quiet pending "
         "activation invisible to Kanban.\n\n"
-        "Status semantics: this task is intentionally blocked and assigned to serasubconscious so the "
-        "gateway dispatcher will not run it directly. The serasubconscious review "
+        f"Status semantics: this task is intentionally blocked and assigned to {PROFILE} so the "
+        f"gateway dispatcher will not run it directly. The {PROFILE} review "
         "task reads and settles these intakes.\n\n"
         "Compact candidate payload:\n"
         + json.dumps(payload, indent=2, sort_keys=True)
@@ -859,9 +878,9 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         for t in open_intakes[:30]
     ]
     return (
-        "You are serasubconscious, Sera's cheap Sensorium Subconscious gate.\n\n"
+        f"You are the Sensorium Subconscious reviewer (profile: {PROFILE}), the cheap Sensorium Subconscious gate.\n\n"
         "Task: review all currently open Sensorium intake tasks, decide DROP/SAVE/PROMOTE_CONSCIOUS, "
-        "settle duplicates/noise, and promote at most one attention head to Conscious Sera if warranted.\n\n"
+        "settle duplicates/noise, and promote at most one attention head to Conscious if warranted.\n\n"
         f"Board: {BOARD}\n"
         f"State file: {SUBCONSCIOUS_STATE_PATH}\n\n"
         "Open intake tasks at creation time:\n"
@@ -875,7 +894,7 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         "- For intakes whose compact payload includes `conscious_review_contract.type == mediated_presence_artifact_decision`: PROMOTE_CONSCIOUS must create a `conscious:review:` task whose body explicitly requires one of prepare_thread_artifact, offer_choice, choose_silence, decline/block delivery, or HOLD with no-artifact reason. Conscious must use `sensorium_media_gift_decide` when a thread/artifact context exists, or record an explicit review receipt; do not settle the intake as generic SAVE if the artifact/action lane has not been consciously addressed.\n"
         "- For `attention_policy_review` intakes: this is Sensorium self-improvement evidence, not ordinary noise. Unless an equivalent conscious review is already active, PROMOTE_CONSCIOUS to `default`; Conscious must decide NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, and must record future_tendency_delta, verification_condition, and rollback_condition. Subconscious must not mutate wake behavior directly.\n"
         "- CRITICAL: after deciding, propagate every consumed intake decision back into Sensorium truth by running the settlement CLI once with a JSON list of settlement records:\n"
-        "  `python /home/entity/.hermes/plugins/agent-sensorium/scripts/sensorium_kanban_settle.py --instance sera --file /tmp/sensorium_settlements_<review>.json --json`\n"
+        f"  `python {PLUGIN}/scripts/sensorium_kanban_settle.py --instance {INSTANCE} --file /tmp/sensorium_settlements_<review>.json --json`\n"
         "  Record shape: {decision: DROP|SAVE|PROMOTE_CONSCIOUS, candidate_id?, event_id?, fingerprint?, correlation_keys?, intake_task_id, review_task_id, conscious_task_ref?, reason}. For Compact candidate payloads, candidate_id is mandatory and should be the primary resolver. For Compact event payloads, use event_id first. Treat settlement_cli_result.no_candidate_match > 0 as unresolved, not settled.\n"
         "  This is mandatory so Kanban DROP/SAVE/PROMOTE removes the underlying Sensorium candidate from the active promotion pool; do not rely on Kanban comments alone.\n"
         "- After any DROP/SAVE/PROMOTE decision, comment and complete/archive every intake task you consumed so the board does not accumulate unassigned ready substrate.\n"
@@ -930,7 +949,7 @@ def _force_canary_event(label: str | None = None, *, conscious: bool = False) ->
         kind = "operator_attention_canary"
         summary = (
             "Operator-requested canary: validate full Sensorium-on-Kanban "
-            "Subconscious promotion into a Conscious Sera review task. This is "
+            "Subconscious promotion into a Conscious review task. This is "
             "explicit test salience; promote exactly one conscious:review task, "
             "then the Conscious worker should close it as validation-only."
         )
@@ -956,6 +975,7 @@ def _force_canary_event(label: str | None = None, *, conscious: bool = False) ->
 
 
 def main() -> int:
+    global INSTANCE, EVENTS_PATH
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", default=INSTANCE)
     ap.add_argument("--json", action="store_true")
@@ -964,8 +984,10 @@ def main() -> int:
     ap.add_argument("--canary-label", default="")
     args = ap.parse_args()
 
-    if args.instance != INSTANCE:
-        raise SystemExit(f"Only instance={INSTANCE!r} is configured for this wrapper")
+    # Allow any profile/instance: align the module-level state namespace with the
+    # requested profile so all per-instance reads/writes below stay consistent.
+    INSTANCE = args.instance
+    EVENTS_PATH = HOME / ".hermes" / "agent-sensorium" / INSTANCE / "events.jsonl"
 
     state = _load_json(STATE_PATH, {})
     seen = set(state.get("seen_event_ids") or [])
@@ -1209,7 +1231,7 @@ def main() -> int:
                 SUBCONSCIOUS_STATE_PATH,
                 {
                     "created_at": _now_iso(),
-                    "purpose": "Cheap continuity for serasubconscious Sensorium Kanban reviews.",
+                    "purpose": f"Cheap continuity for {PROFILE} Sensorium Kanban reviews.",
                     "suppressions": [],
                     "promotions": [],
                     "last_reviewed": None,

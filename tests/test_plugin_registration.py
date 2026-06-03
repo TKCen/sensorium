@@ -44,8 +44,8 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_status",
         "sensorium_ingest_signal",
         "sensorium_sensor_config",
+        "sensorium_profile",
         "sensorium_ingest_event",
-        "sensorium_dispatch_once",
         "sensorium_candidate_update",
         "sensorium_attention_pointer",
         "sensorium_attention_inbox",
@@ -58,21 +58,9 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_attention_policy_decide",
         "sensorium_attention_policy_manage",
         "sensorium_improvement_status",
-        "sensorium_outbox_prepare",
-        "sensorium_outbox_dispatch",
-        "sensorium_worker_prepare",
-        "sensorium_worker_dispatch",
-        "sensorium_worker_result",
-        "sensorium_worker_status",
-        "sensorium_action_prepare",
-        "sensorium_action_attach",
-        "sensorium_action_result",
-        "sensorium_action_status",
         "sensorium_artifact_store",
         "sensorium_artifact_status",
         "sensorium_media_gift_decide",
-        "sensorium_conscious_claim",
-        "sensorium_conscious_complete",
     }
     assert set(ctx.tools) == {"sensorium", *expected_admin_tools}
     assert ctx.tools["sensorium"]["toolset"] == "agent-sensorium-live"
@@ -81,7 +69,9 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     } == {"agent-sensorium-admin"}
     help_output = ctx.commands["sensorium"]["handler"]("help")
     assert help_output.startswith("Usage: /sensorium")
-    assert "outbox" in help_output
+    assert "outbox" not in help_output
+    assert "dispatch" not in help_output
+    assert "workers" not in help_output
     assert "pre_llm_call" in ctx.hooks
     assert "agent-sensorium" in ctx.skills
 
@@ -204,7 +194,7 @@ def test_memory_reflection_not_in_live_tool_schema(tmp_path):
 
     # The registered surface is one live Sensorium tool plus admin-only granular tools.
     # This is a snapshot guard: adding a memory-probe tool will cause this to fail.
-    _EXPECTED_TOOL_COUNT = 33
+    _EXPECTED_TOOL_COUNT = 21
 
     # No tool name may reference memory reflection concepts.
     _FORBIDDEN_NAME_FRAGMENTS = {"memory_reflection", "reflect", "recall", "probe"}

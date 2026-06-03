@@ -61,12 +61,12 @@ def _operational_design_correction_fixture():
     """
     return session_event_signal(
         kind="design_insight",
-        summary="Operator corrected Sera identity image strategy: use references not copies",
+        summary="Operator corrected demo identity image strategy: use references not copies",
         session_ref="sess_test_design",
         strength_hint=0.82,
         sensitivity="private",
         allowed_surfaces=["local"],
-        correlation_keys=["design-insight", "operator-correction", "sera-identity"],
+        correlation_keys=["design-insight", "operator-correction", "identity"],
     )
 
 

@@ -19,7 +19,7 @@ def _thread(**overrides):
         "conscious_task": {
             "id": "ctask_testpointer",
             "request_type": "THINK",
-            "title": "Review design_decision: Operator corrected that Sera identity images should use references for sustained continuity",
+            "title": "Review design_decision: Operator corrected that demo identity images should use references for sustained continuity",
             "why": "test",
             "expected_decision": "test",
         },
@@ -162,7 +162,7 @@ def test_pointer_preview_can_still_fail_closed_on_cooldown_when_fallback_disable
 
 
 def test_truncate_text_avoids_mid_word_guillotine():
-    text = "Operator corrected that Sera identity images should use references for sustained continuity"
+    text = "Operator corrected that demo identity images should use references for sustained continuity"
     out = truncate_text(text, 62)
     assert out.endswith("…")
     assert "continuit…" not in out

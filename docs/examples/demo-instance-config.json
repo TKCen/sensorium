@@ -1,0 +1,25 @@
+{
+  "instance_name": "demo",
+  "policy_card_ref": "docs/examples/demo-policy-card.md",
+  "allowed_surfaces": ["local", "dashboard"],
+  "max_sensitivity": "private",
+  "thresholds": {
+    "starvation_hours": 72,
+    "expiring_window_hours": 24
+  },
+  "budgets": {
+    "dispatch": {"capacity": 10, "window_seconds": 3600},
+    "pointer": {"capacity": 12, "window_seconds": 3600}
+  },
+  "default_actor": "background_conscious",
+  "subconscious_profile": "subconscious_worker",
+  "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
+  "tts": {
+    "base_url": "http://127.0.0.1:8892/v1",
+    "model": "chatterbox-turbo",
+    "voice": "warm-voice-demo",
+    "sidecar_base": null,
+    "control_command": null,
+    "pid_file": null
+  }
+}

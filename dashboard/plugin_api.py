@@ -163,14 +163,29 @@ def _source_info(path: Path, *, deprecated: bool = False, excluded_from_canonica
     return info
 
 
+def _tick_quiet_filename(root: Path) -> str:
+    """Resolve the dashboard quiet-tick freshness filename from instance config."""
+    try:
+        from agent_sensorium.config import load_instance_config
+
+        config, _ = load_instance_config(state_dir=str(root))
+        name = config.get("tick_quiet_filename")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except Exception:
+        pass
+    return "sensorium_tick_quiet.latest.json"
+
+
 def _freshness_snapshot(root: Path) -> dict[str, Any]:
     kanban_root = root.parent / "kanban"
+    tick_quiet_path = kanban_root / _tick_quiet_filename(root)
     jsonl = {name: _source_info(root / rel) for name, rel in STATE_NAMES.items()}
     sources = {
         "jsonl": jsonl,
         "last_sensorium_kanban_tick": _source_info(kanban_root / "last_sensorium_kanban_tick.json"),
         "sensor_kanban_state": _source_info(kanban_root / "sensor_kanban_state.json"),
-        "sera_tick_quiet_latest": _source_info(kanban_root / "sera_tick_quiet.latest.json"),
+        "tick_quiet_latest": _source_info(tick_quiet_path),
         "metrics_latest": _source_info(METRICS_DIR / "latest.json"),
         "legacy_state_latest": _source_info(
             root / "state.latest.json",
@@ -182,7 +197,7 @@ def _freshness_snapshot(root: Path) -> dict[str, Any]:
     canonical_paths.extend([
         kanban_root / "last_sensorium_kanban_tick.json",
         kanban_root / "sensor_kanban_state.json",
-        kanban_root / "sera_tick_quiet.latest.json",
+        tick_quiet_path,
         METRICS_DIR / "latest.json",
     ])
     latest_ts = max((ts for ts in (_mtime_ts(path) for path in canonical_paths) if ts is not None), default=None)

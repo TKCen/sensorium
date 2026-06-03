@@ -243,6 +243,109 @@ def operator_signal(
     }
 
 
+def runtime_heartbeat_sample(*, store) -> dict:
+    """Compact deterministic runtime / state-dir health snapshot.
+
+    Counts and names only — never file contents, paths, or transcripts.
+    Safe on a brand-new profile (all zeros). No model calls.
+    """
+    try:
+        state_dir_exists = store.root.is_dir()
+    except OSError:
+        state_dir_exists = False
+
+    counts: dict[str, int] = {}
+    for name in ("signals", "events", "candidates", "threads"):
+        try:
+            counts[name] = len(store.read_jsonl(name))
+        except Exception:
+            counts[name] = 0
+
+    try:
+        threads = store.read_jsonl("threads")
+        pending_threads = sum(1 for t in threads if isinstance(t, dict) and t.get("status") == "dormant")
+    except Exception:
+        pending_threads = 0
+
+    active: list[str] = []
+    paused: list[str] = []
+    deprecated: list[str] = []
+    snapshot: dict = {}
+    try:
+        load_sensor_registry(store)
+        snapshot = sensor_registry_snapshot()
+        for entry in snapshot.values():
+            status = entry.get("status")
+            if status == "paused":
+                paused.append(entry["name"])
+            elif status == "deprecated":
+                deprecated.append(entry["name"])
+            else:
+                active.append(entry["name"])
+    except Exception:
+        snapshot = {}
+    registry = {
+        "sensor_count": len(snapshot),
+        "active": sorted(active),
+        "paused": sorted(paused),
+        "deprecated": sorted(deprecated),
+    }
+
+    last_decision_age_seconds: float | None = None
+    try:
+        decisions = store.read_jsonl("decisions")
+        if decisions:
+            last_ts = _parse_iso(decisions[-1].get("ts"))
+            if last_ts is not None:
+                last_decision_age_seconds = round((_utc_now() - last_ts).total_seconds(), 1)
+    except Exception:
+        last_decision_age_seconds = None
+
+    return {
+        "state_dir_exists": state_dir_exists,
+        "counts": counts,
+        "pending_threads": pending_threads,
+        "registry": registry,
+        "last_decision_age_seconds": last_decision_age_seconds,
+    }
+
+
+def build_runtime_heartbeat_signal(sample: dict, *, instance: str = "default") -> dict:
+    """Build a low-strength compact heartbeat signal from a sample.
+
+    Always emits (it is a status beacon). Low strength so it is recorded but not
+    promoted into candidates/threads. local_only, ["local"] surfaces.
+    """
+    counts = sample.get("counts") or {}
+    registry = sample.get("registry") or {}
+    sig = int(counts.get("signals", 0) or 0)
+    n = int(registry.get("sensor_count", 0) or 0)
+    pending = int(sample.get("pending_threads", 0) or 0)
+    return {
+        "sensor": "sensorium.runtime_heartbeat",
+        "source": "machine",
+        "kind": "runtime_heartbeat",
+        "summary": truncate_text(
+            f"runtime heartbeat: {sig} signals, {n} sensors, {pending} pending threads",
+            MAX_SUMMARY_CHARS,
+        ),
+        "actor": "tool",
+        "strength_hint": 0.2,
+        "sensitivity": "local_only",
+        "allowed_surfaces": ["local"],
+        "correlation_keys": ["runtime-heartbeat"],
+        "scope": "global",
+        "values": {
+            "state_dir_exists": sample.get("state_dir_exists"),
+            "counts": counts,
+            "pending_threads": pending,
+            "sensor_count": n,
+            "active_sensors": registry.get("active", []),
+            "last_decision_age_seconds": sample.get("last_decision_age_seconds"),
+        },
+    }
+
+
 BODY_PRESSURE_DEFAULT_CONFIG = {
     "mem_degraded_pct": 10.0,
     "mem_critical_pct": 5.0,
@@ -1086,23 +1189,40 @@ def classify_machine_process_pressure(sample: dict, *, state: dict | None = None
     return _transition_classifier(sample, state=state, observed_level=level, metric_family=family, reason=reason, values=values, sensor="sensorium.machine_process_pressure", source="machine", kind="process_pressure", correlation_key="machine-process-pressure")
 
 
-DEFAULT_CHATTERBOX_BASE = Path.home() / "projects" / "chatterbox-tts-spike"
-DEFAULT_CHATTERBOX_CONTROL = str(DEFAULT_CHATTERBOX_BASE / "chatterbox-turbo-sidecar")
-DEFAULT_CHATTERBOX_PID_FILE = str(
-    DEFAULT_CHATTERBOX_BASE / "artifacts" / "sidecar" / "chatterbox-turbo-sidecar.pid"
-)
+# The local TTS sidecar is an optional, operator-configured extension. No
+# private checkout path is baked in: the probe is dormant until a deployment
+# supplies a control command / pid file via the instance config `tts` block
+# (tts.control_command / tts.pid_file / tts.sidecar_base) or the matching env
+# vars. When unconfigured, the recovery checklist degrades to a generic hint.
+def _resolve_tts_sidecar(config: dict | None = None) -> dict:
+    tts = config.get("tts") if isinstance(config, dict) else None
+    tts = tts if isinstance(tts, dict) else {}
+    control = tts.get("control_command") or os.environ.get("SENSORIUM_TTS_CONTROL_COMMAND")
+    pid_file = tts.get("pid_file") or os.environ.get("SENSORIUM_TTS_PID_FILE")
+    base = tts.get("sidecar_base") or os.environ.get("SENSORIUM_TTS_SIDECAR_BASE")
+    if base:
+        base_path = Path(base).expanduser()
+        if not control:
+            control = str(base_path / "chatterbox-turbo-sidecar")
+        if not pid_file:
+            pid_file = str(base_path / "artifacts" / "sidecar" / "chatterbox-turbo-sidecar.pid")
+    return {"control_command": control, "pid_file": pid_file, "sidecar_base": base}
 
-TTS_SIDECAR_RECOVERY_CHECKLIST = [
-    f"{DEFAULT_CHATTERBOX_CONTROL} health",
-    f"{DEFAULT_CHATTERBOX_CONTROL} stop || true",
-    f"{DEFAULT_CHATTERBOX_CONTROL} start",
-    f"{DEFAULT_CHATTERBOX_CONTROL} health",
-    f"{DEFAULT_CHATTERBOX_CONTROL} test /tmp/chatterbox-tts-probe.mp3",
-    "retry the intended voice memo only if the probe succeeds",
-]
+
+def _tts_sidecar_recovery_checklist(control_command: str | None = None) -> list[str]:
+    ctl = control_command or "<configure tts.control_command for your local TTS sidecar>"
+    return [
+        f"{ctl} health",
+        f"{ctl} stop || true",
+        f"{ctl} start",
+        f"{ctl} health",
+        f"{ctl} test /tmp/sensorium-tts-probe.mp3",
+        "retry the intended voice memo only if the probe succeeds",
+    ]
+
 
 TTS_SIDECAR_VERIFICATION_CRITERIA = [
-    "health returns JSON from http://127.0.0.1:8892/health",
+    "health returns JSON from the configured TTS health URL",
     "short TTS probe writes playable non-empty audio",
     "no automatic repeated restart loop was started",
 ]
@@ -1154,7 +1274,7 @@ def tts_sidecar_pressure_sample(
     *,
     log_paths: list[str] | None = None,
     health_url: str | None = "http://127.0.0.1:8892/health",
-    pid_file: str = DEFAULT_CHATTERBOX_PID_FILE,
+    pid_file: str | None = None,
     timeout_seconds: float = 2.0,
     max_log_bytes: int = 131_072,
 ) -> dict:
@@ -1190,7 +1310,7 @@ def tts_sidecar_pressure_sample(
     if matches:
         timeout_fingerprint = hashlib.sha256(json.dumps(matches, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
-    sidecar_running = _pid_running(Path(pid_file))
+    sidecar_running = _pid_running(Path(pid_file)) if pid_file else False
     health_available = False
     health_error = ""
     if health_url:
@@ -1258,7 +1378,9 @@ def classify_tts_sidecar_pressure(sample: dict, *, state: dict | None = None, co
             "pressure_level": "degraded",
             "metric_family": "tts_sidecar",
             "values": st["last_sample"],
-            "recovery_checklist": TTS_SIDECAR_RECOVERY_CHECKLIST,
+            "recovery_checklist": _tts_sidecar_recovery_checklist(
+                _resolve_tts_sidecar(config)["control_command"]
+            ),
             "verification_criteria": TTS_SIDECAR_VERIFICATION_CRITERIA,
             "policy": "cue_only_no_auto_restart",
         }
@@ -1490,7 +1612,7 @@ def classify_media_capacity(
             "strength_hint": 0.58,
             "sensitivity": "local_only",
             "allowed_surfaces": ["local"],
-            "correlation_keys": ["media-capacity", "mediated-presence", "sera-media-gifts"],
+            "correlation_keys": ["media-capacity", "mediated-presence", "media-gifts"],
             "scope": "local_media_stack",
             "capacity_status": status,
             "previous_status": previous,

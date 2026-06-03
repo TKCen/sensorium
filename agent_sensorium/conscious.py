@@ -22,7 +22,7 @@ CONSCIOUS_DEFAULTS: dict = {
     "enabled": False,
     "lease_seconds": 600,
     "allowed_request_types": sorted(SAFE_REQUEST_TYPES),
-    "default_actor": "sera_background_conscious",
+    "default_actor": "background_conscious",
     "default_mode": "background",
 }
 
@@ -176,7 +176,7 @@ def claim_dormant_thread(
 
     lease_seconds = max(60, int(cfg.get("lease_seconds", 600)))
     lease_id = new_id("lease")
-    actor_str = actor or cfg.get("default_actor", "sera_background_conscious")
+    actor_str = actor or cfg.get("default_actor", "background_conscious")
     mode_str = mode or cfg.get("default_mode", "background")
     expires_at = _iso(now_dt + timedelta(seconds=lease_seconds))
 

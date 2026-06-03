@@ -28,15 +28,15 @@ def _snapshot(api):
 
 def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_path, monkeypatch):
     api = _load_dashboard_api()
-    root = tmp_path / "sera"
+    root = tmp_path / "demo"
     root.mkdir(parents=True)
     monkeypatch.setattr(api, "DEFAULT_ROOT", root)
-    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "sera")
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
 
     (root / "instance.config.json").write_text(
         json.dumps(
             {
-                "instance_name": "sera",
+                "instance_name": "demo",
                 "allowed_surfaces": ["local", "discord"],
                 "max_sensitivity": "private",
                 "outbox": {
@@ -140,9 +140,9 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
 
 def test_snapshot_warns_on_unattached_prepared_outbox(tmp_path, monkeypatch):
     api = _load_dashboard_api()
-    root = tmp_path / "sera"
+    root = tmp_path / "demo"
     monkeypatch.setattr(api, "DEFAULT_ROOT", root)
-    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "sera")
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
 
     _append_jsonl(
         root,

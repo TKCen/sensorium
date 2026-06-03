@@ -30,7 +30,6 @@ MEDIA_ARTIFACT_KEY_MARKERS = (
     "artifact_handoff",
     "thread-pickup",
     "thread_pickup",
-    "sera-presence",
     "private-expression",
     "private_expression",
 )

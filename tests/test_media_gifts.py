@@ -32,7 +32,7 @@ def _thread(allowed_surfaces=None, sensitivity="private"):
         "conscious_task": {
             "id": "ct_gift",
             "request_type": "PRIVATE_EXPRESSION",
-            "title": "Sera mediated-presence gift",
+            "title": "demo mediated-presence gift",
         },
         "origin_candidate_id": "cand_gift",
         "continuity_summary": [],
@@ -57,7 +57,7 @@ def _config(delivery_enabled=False):
             "delivery": {
                 "enabled": delivery_enabled,
                 "allowed_surfaces": ["discord"],
-                "allowed_targets": ["discord:#pics"],
+                "allowed_targets": ["discord:#general"],
                 "cooldown_hours": 24,
             }
         },
@@ -69,9 +69,9 @@ def _artifact(store):
     return store_artifact(
         store,
         kind="video",
-        ref_path="/private/sera/gift.mp4",
+        ref_path="/private/demo/gift.mp4",
         provenance={"sha256": "abc"},
-        why_created="Conscious Sera prepared a private mediated-presence gift.",
+        why_created="The agent prepared a private mediated-presence gift.",
         intended_handoff_mode="both_later",
         delivery_state="held_for_review",
         source_thread_id="sth_gift",
@@ -98,7 +98,7 @@ class TestMediaGiftConfig:
                 "delivery": {
                     "enabled": True,
                     "allowed_surfaces": ["discord", "", "discord"],
-                    "allowed_targets": ["discord:#pics"],
+                    "allowed_targets": ["discord:#general"],
                     "cooldown_hours": 6,
                     "unknown": "ignored",
                 },
@@ -160,7 +160,7 @@ class TestMediaGiftChoicePolicy:
             store,
             decision="decline",
             actor_tier="conscious",
-            source="sebastian_prompt",
+            source="operator_prompt",
             reason="I choose not to send this one.",
             config=_config(delivery_enabled=True),
         )
@@ -179,7 +179,7 @@ class TestMediaGiftChoicePolicy:
             source="manual_review",
             why_now="A specific prepared gift is ready.",
             surface="discord",
-            target_ref="discord:#pics",
+            target_ref="discord:#general",
             config=_config(delivery_enabled=True),
         )
         assert no_artifact["success"] is False
@@ -210,7 +210,7 @@ class TestMediaGiftChoicePolicy:
             why_now="The artifact was prepared from inner salience and reviewed in-thread.",
             artifact_id=artifact["id"],
             surface="discord",
-            target_ref="discord:#pics",
+            target_ref="discord:#general",
             config=_config(delivery_enabled=True),
             now="2026-05-30T00:00:00Z",
         )
@@ -231,7 +231,7 @@ class TestMediaGiftChoicePolicy:
             why_now="Trying again too soon.",
             artifact_id=artifact["id"],
             surface="discord",
-            target_ref="discord:#pics",
+            target_ref="discord:#general",
             config=_config(delivery_enabled=True),
             now="2026-05-30T01:00:00Z",
         )
@@ -243,7 +243,7 @@ class TestMediaGiftChoicePolicy:
         artifact = store_artifact(
             store,
             kind="image",
-            ref_path="/private/sera/local-only.png",
+            ref_path="/private/demo/local-only.png",
             why_created="local-only gift",
             source_thread_id="sth_gift",
             allowed_surfaces=["local"],
@@ -256,7 +256,7 @@ class TestMediaGiftChoicePolicy:
             why_now="Try to broaden surface.",
             artifact_id=artifact["id"],
             surface="discord",
-            target_ref="discord:#pics",
+            target_ref="discord:#general",
             config=_config(delivery_enabled=True),
         )
         assert result["success"] is False
@@ -272,7 +272,7 @@ class TestMediaGiftChoicePolicy:
             why_now="scheduled tick should not do this",
             artifact_id=artifact["id"],
             surface="discord",
-            target_ref="discord:#pics",
+            target_ref="discord:#general",
             config=_config(delivery_enabled=True),
         )
         assert result["success"] is False

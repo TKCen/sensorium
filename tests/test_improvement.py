@@ -63,7 +63,7 @@ def _canary_drop_receipt(candidate_id: str) -> dict:
 def _memory_fact(idx: int, *, affected: bool = False) -> dict:
     return {
         "fact_ref": f"mem_{idx}",
-        "fact": f"Memory fact {idx}: Sebastian wants feedback tendency grounded in lived context, not scalar tuning.",
+        "fact": f"Memory fact {idx}: Operator wants feedback tendency grounded in lived context, not scalar tuning.",
         "source_tool": "hindsight_recall",
         "source_refs": [f"hindsight://memory/{idx}"],
         "query": "feedback tendency memory grounding",
@@ -236,7 +236,7 @@ def test_collector_creates_single_attention_policy_candidate(store):
 
 def test_memory_grounded_contract_triggers_for_relational_identity_and_correction_rows():
     assert requires_memory_grounding({"kind": "relational_salience", "summary": "I miss you"})
-    assert requires_memory_grounding({"kind": "identity", "summary": "Sera embodiment insight"})
+    assert requires_memory_grounding({"kind": "identity", "summary": "demo embodiment insight"})
     assert requires_memory_grounding({"kind": "explicit_correction", "summary": "that's wrong"})
     assert not requires_memory_grounding({"kind": "kanban_pressure", "correlation_keys": ["repeat-noise"]})
 

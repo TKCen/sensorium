@@ -1,7 +1,7 @@
 """Kanban Subconscious settlement propagation and incident coalescing.
 
 Bridges Kanban Subconscious decisions back into Sensorium candidate/event truth
-so a `serasubconscious` review that DROP/SAVE/PROMOTE_CONSCIOUS-settles an
+so a subconscious-reviewer profile that DROP/SAVE/PROMOTE_CONSCIOUS-settles an
 intake also settles the underlying Sensorium candidate. Also exposes the
 deterministic incident-key derivation the Kanban bridge uses to coalesce
 repeated jitter samples without re-spending Subconscious calls.
@@ -284,8 +284,8 @@ def apply_kanban_settlement(
 def apply_settlement_record(store: SensoriumStore, record: dict) -> dict:
     """Apply a structured settlement record as produced by the Kanban bridge.
 
-    The record is the single source-of-truth shape that `serasubconscious`
-    completion summaries (or the Kanban bridge wrapper) must emit. Keeping it
+    The record is the single source-of-truth shape that the subconscious
+    reviewer's completion summaries (or the Kanban bridge wrapper) must emit. Keeping it
     here lets the parser stay deterministic and tested without parsing free
     Kanban comment prose.
     """

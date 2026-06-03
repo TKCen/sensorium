@@ -25,7 +25,7 @@ def _append_jsonl(path: Path, row: dict):
 
 
 def test_snapshot_exposes_recent_signals_for_dashboard_drilldown(tmp_path, monkeypatch):
-    root = tmp_path / "sensorium" / "sera"
+    root = tmp_path / "sensorium" / "demo"
     _append_jsonl(root / "signals" / "inbox.jsonl", {
         "id": "sig_codex",
         "sensor": "sensorium.codex_usage_pressure",
@@ -42,7 +42,7 @@ def test_snapshot_exposes_recent_signals_for_dashboard_drilldown(tmp_path, monke
     })
     mod = _load_dashboard(monkeypatch, root)
 
-    data = asyncio.run(mod.snapshot(instance="sera"))
+    data = asyncio.run(mod.snapshot(instance="demo"))
 
     assert data["recent_signals"] == [{
         "id": "sig_codex",
@@ -61,7 +61,7 @@ def test_snapshot_exposes_recent_signals_for_dashboard_drilldown(tmp_path, monke
 
 
 def test_snapshot_separates_canonical_freshness_from_legacy_state_latest(tmp_path, monkeypatch):
-    root = tmp_path / "sensorium" / "sera"
+    root = tmp_path / "sensorium" / "demo"
     root.mkdir(parents=True)
     state_latest = root / "state.latest.json"
     state_latest.write_text(json.dumps({
@@ -78,7 +78,7 @@ def test_snapshot_separates_canonical_freshness_from_legacy_state_latest(tmp_pat
     _append_jsonl(root / "signals" / "inbox.jsonl", {"id": "sig_fresh", "ts": "2026-06-03T04:47:39Z"})
     kanban_root = root.parent / "kanban"
     kanban_root.mkdir(parents=True)
-    quiet_latest = kanban_root / "sera_tick_quiet.latest.json"
+    quiet_latest = kanban_root / "sensorium_tick_quiet.latest.json"
     quiet_latest.write_text(json.dumps({"ok": True, "ts": "2026-06-03T04:47:41Z"}))
 
     old = 1_780_000_000
@@ -89,14 +89,14 @@ def test_snapshot_separates_canonical_freshness_from_legacy_state_latest(tmp_pat
 
     mod = _load_dashboard(monkeypatch, root)
 
-    data = asyncio.run(mod.snapshot(instance="sera"))
+    data = asyncio.run(mod.snapshot(instance="demo"))
 
     freshness = data["freshness"]
     assert data["state_mtime"] == freshness["canonical_latest_mtime"]
     assert freshness["legacy_state_latest"]["deprecated"] is True
     assert freshness["legacy_state_latest"]["excluded_from_canonical"] is True
     assert freshness["jsonl"]["signals"]["mtime"] is not None
-    assert freshness["sera_tick_quiet_latest"]["mtime"] is not None
+    assert freshness["tick_quiet_latest"]["mtime"] is not None
     assert freshness["canonical_latest_mtime"] != freshness["legacy_state_latest"]["mtime"]
     reset_at = data["budgets"]["dispatch"]["reset_at"]
     assert reset_at != "2026-05-28T20:27:09Z"

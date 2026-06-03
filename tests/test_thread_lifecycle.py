@@ -21,7 +21,7 @@ def _thread(**overrides):
             "id": "ctask_lifecycle",
             "request_type": "THINK",
             "title": "Review reference-first identity media correction",
-            "why": "Operator corrected that Sera identity images need references for continuity.",
+            "why": "Operator corrected that demo identity images need references for continuity.",
             "expected_decision": "Decide whether to save as identity/media guardrail.",
         },
         "origin_candidate_id": "cand_lifecycle",

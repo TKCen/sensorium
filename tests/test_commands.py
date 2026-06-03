@@ -60,18 +60,6 @@ class TestThreadsCommand:
         assert "origin:" in out
 
 
-class TestDispatchCommand:
-    def test_dispatch_no_candidates(self, state_dir):
-        out = handle_sensorium_command("dispatch", instance="test", state_dir=state_dir)
-        assert "no eligible candidate" in out
-
-    def test_dispatch_preview(self, state_dir):
-        _ingest_strong(state_dir)
-        out = handle_sensorium_command("dispatch", instance="test", state_dir=state_dir)
-        assert "activation is Kanban-only" in out
-        assert "pressure" in out
-
-
 class TestCompactCommand:
     def test_compact_empty(self, state_dir):
         out = handle_sensorium_command("compact", instance="test", state_dir=state_dir)
@@ -88,7 +76,7 @@ class TestHelpCommand:
         assert "pointer" in out
         assert "open" in out
         assert "thread" in out
-        assert "dispatch" in out
+        assert "dispatch" not in out
         assert "compact" in out
 
     def test_unknown_subcommand(self, state_dir):

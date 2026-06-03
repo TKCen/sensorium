@@ -1,0 +1,42 @@
+{
+  "runtime_heartbeat": {
+    "name": "runtime_heartbeat",
+    "status": "active",
+    "defaults": {
+      "strength_hint": 0.2,
+      "sensitivity": "local_only",
+      "allowed_surfaces": ["local"],
+      "correlation_keys": ["runtime-heartbeat"]
+    }
+  },
+  "machine_body_pressure": {
+    "name": "machine_body_pressure",
+    "status": "active",
+    "defaults": {
+      "strength_hint": 0.8,
+      "sensitivity": "local_only",
+      "allowed_surfaces": ["local"],
+      "correlation_keys": ["machine-body-pressure"]
+    }
+  },
+  "machine_network_pressure": {
+    "name": "machine_network_pressure",
+    "status": "active",
+    "defaults": {
+      "strength_hint": 0.7,
+      "sensitivity": "local_only",
+      "allowed_surfaces": ["local"],
+      "correlation_keys": ["machine-network-pressure"]
+    }
+  },
+  "machine_process_pressure": {
+    "name": "machine_process_pressure",
+    "status": "active",
+    "defaults": {
+      "strength_hint": 0.7,
+      "sensitivity": "local_only",
+      "allowed_surfaces": ["local"],
+      "correlation_keys": ["machine-process-pressure"]
+    }
+  }
+}

@@ -16,3 +16,9 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Private dev artifacts
+artifacts/
+
+# Local Hermes plan/state
+.hermes/

@@ -163,9 +163,9 @@ class TestDispatchOnce:
             "sensor": "explicit_operator_signal",
             "source": "manual",
             "kind": "design_decision",
-            "summary": "Operator corrected Sera image references for continuity.",
+            "summary": "Operator corrected demo image references for continuity.",
             "strength_hint": 0.9,
-            "correlation_keys": ["sera-visual-continuity", "references-first"],
+            "correlation_keys": ["visual-continuity", "references-first"],
             "sensitivity": "private",
             "allowed_surfaces": ["local", "dashboard"],
         }

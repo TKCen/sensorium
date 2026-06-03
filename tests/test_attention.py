@@ -402,9 +402,9 @@ class TestToolHandler:
 
 class TestDashboardDefaultInstance:
     def test_default_instance_from_env(self, monkeypatch):
-        monkeypatch.setenv("AGENT_SENSORIUM_DEFAULT_INSTANCE", "sera")
+        monkeypatch.setenv("AGENT_SENSORIUM_DEFAULT_INSTANCE", "demo")
         from agent_sensorium.config import default_instance_name
-        assert default_instance_name("default") == "sera"
+        assert default_instance_name("default") == "demo"
 
     def test_env_var_takes_precedence(self, monkeypatch):
         monkeypatch.setenv("SENSORIUM_INSTANCE", "env-inst")

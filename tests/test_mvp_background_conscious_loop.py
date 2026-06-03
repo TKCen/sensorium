@@ -86,7 +86,7 @@ def test_mvp_background_conscious_loop_end_to_end(state_dir, store):
     threads = store.read_jsonl("threads")
     claimed = next(t for t in threads if t["id"] == thread_id)
     assert claimed["active_lease"]["lease_id"] == lease_id
-    assert claimed["active_lease"]["actor"] == "sera_background_conscious"
+    assert claimed["active_lease"]["actor"] == "background_conscious"
 
     # A second claim should not pick the same thread again while leased.
     second_claim = claim_dormant_thread(store, config={"enabled": True})

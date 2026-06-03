@@ -1,4 +1,4 @@
-"""Conscious-choice policy gate for Sera mediated-presence gifts.
+"""Conscious-choice policy gate for mediated-presence gifts.
 
 This module is intentionally a policy/receipt layer, not a delivery worker.
 It lets Subconscious propose, lets Conscious choose preparation/silence/decline,
@@ -27,7 +27,7 @@ VALID_GIFT_DECISIONS = {
 VALID_ACTOR_TIERS = {"subconscious", "conscious", "operator", "test"}
 VALID_SOURCES = {
     "inner_salience",
-    "sebastian_prompt",
+    "operator_prompt",
     "manual_review",
     "worker_result",
     "scheduler",
@@ -245,7 +245,7 @@ def apply_media_gift_choice(
             store,
             receipt,
             "conscious_choice_required",
-            f"{decision} requires a conscious Sera choice receipt.",
+            f"{decision} requires a conscious choice receipt.",
         )
 
     why_required = set(policy.get("require_why_now_for") or [])
@@ -260,7 +260,7 @@ def apply_media_gift_choice(
             "Scheduler/no-agent ticks may not approve mediated gift delivery.",
         )
 
-    if source == "sebastian_prompt":
+    if source == "operator_prompt":
         receipt["direct_prompt_mode"] = policy.get("direct_prompt_mode", "choice_required")
         receipt["operator_prompt_not_binding"] = True
 

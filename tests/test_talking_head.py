@@ -37,7 +37,7 @@ def _make_thread(thread_id="sth_talk"):
 
 def _inputs(tmp_path: Path):
     script = tmp_path / "script.txt"
-    script.write_text("Sebastian, this is a private selected line.\n")
+    script.write_text("Operator, this is a private selected line.\n")
     source = tmp_path / "source.png"
     source.write_bytes(b"not-a-real-png-but-dry-and-stub-tests-only")
     return script, source
@@ -87,7 +87,7 @@ class TestTalkingHeadDryRun:
         assert all(a["provenance"]["planned_only"] is True for a in artifacts)
 
         serialized = json.dumps(artifacts)
-        assert "Sebastian, this is a private selected line" not in serialized
+        assert "Operator, this is a private selected line" not in serialized
         assert "outbox.dispatched" not in json.dumps(store.read_jsonl("decisions"))
 
         thread = store.read_jsonl("threads")[0]
@@ -195,7 +195,7 @@ class TestTalkingHeadRealRun:
         assert len(manifest["artifact_ids"]) == 7
 
         serialized_manifest = json.dumps(manifest)
-        assert "Sebastian, this is a private selected line" not in serialized_manifest
+        assert "Operator, this is a private selected line" not in serialized_manifest
         assert "private selected line" not in serialized_manifest
         assert "stub {audio} {crop} {video}" not in serialized_manifest
 

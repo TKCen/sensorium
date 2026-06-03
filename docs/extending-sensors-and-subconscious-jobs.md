@@ -98,7 +98,7 @@ For transition sensors, persist only the prior level and tiny last sample under 
 Add an explicit flag first:
 
 ```bash
-python scripts/sensorium_tick.py --instance sera --gateway-pressure --json
+python scripts/sensorium_tick.py --instance demo --gateway-pressure --json
 ```
 
 Only add it to `--all-sensors` after tests prove it is quiet on healthy samples.

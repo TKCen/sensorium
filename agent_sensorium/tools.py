@@ -66,7 +66,16 @@ from .workers import (
     prepare_worker_request,
     record_worker_result,
 )
-from .config import load_instance_config, manage_attention_policy_config
+from .config import (
+    default_instance_name,
+    init_profile_config,
+    list_profiles,
+    load_instance_config,
+    manage_attention_policy_config,
+    profile_state_dir,
+    read_active_profile,
+    write_active_profile,
+)
 
 ARCHIVED_STATUSES = {"archived", "closed"}
 
@@ -499,6 +508,66 @@ def handle_sensorium_sensor_config(
     except ValueError as e:
         return _err(instance, str(e))
     return _ok(instance, {"action": action, "registry": registry})
+
+
+def handle_sensorium_profile(
+    *,
+    action: str = "list",
+    profile: str = "",
+    overwrite: bool = False,
+    base_dir: str | None = None,
+) -> str:
+    """List, show, initialize, or set the default of Sensorium profiles.
+
+    A profile is a named runtime namespace (config + state) under the Sensorium
+    state root. This is configuration-only: it never runs sensors, ingests
+    signals, spawns tasks, or performs external action. It can only write a
+    profile's own instance.config.json (init) and the root active-profile marker
+    (set_default) — not arbitrary files.
+    """
+    action = str(action or "list").strip().lower()
+    active = read_active_profile(base_dir) or default_instance_name("default")
+    try:
+        if action == "list":
+            names = list_profiles(base_dir)
+            if active not in names:
+                names = sorted(set(names) | {active})
+            return _ok(active, {
+                "action": action,
+                "active_profile": active,
+                "profiles": [
+                    {"profile": name, "active": name == active} for name in names
+                ],
+            })
+        if action == "show":
+            name = profile.strip() or active
+            state_dir = profile_state_dir(name, base_dir)
+            config, diagnostics = load_instance_config(state_dir=str(state_dir))
+            return _ok(name, {
+                "action": action,
+                "profile": name,
+                "active": name == active,
+                "state_dir": str(state_dir),
+                "config": config,
+                "diagnostics": diagnostics,
+            })
+        if action == "init":
+            if not profile.strip():
+                return _err(active, "profile name required for init")
+            result = init_profile_config(profile, base_dir=base_dir, overwrite=bool(overwrite))
+            return _ok(result["profile"], {"action": action, **result})
+        if action == "set_default":
+            if not profile.strip():
+                return _err(active, "profile name required for set_default")
+            path = write_active_profile(profile, base_dir=base_dir)
+            return _ok(profile.strip(), {
+                "action": action,
+                "profile": profile.strip(),
+                "active_profile_marker": str(path),
+            })
+        return _err(active, "Invalid action. Must be one of: list, show, init, set_default")
+    except ValueError as e:
+        return _err(active, str(e))
 
 
 def handle_sensorium_ingest_signal(
