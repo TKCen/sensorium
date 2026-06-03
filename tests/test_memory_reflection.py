@@ -777,3 +777,15 @@ class TestStoreRawOutput:
         )
         raw_content = json.loads(Path(ref["raw_ref"]).read_text())
         assert raw_content.get("synthesis") == "My secret finding"
+
+
+# ---------------------------------------------------------------------------
+# Bridge integration
+# ---------------------------------------------------------------------------
+
+
+def test_kanban_bridge_runs_memory_reflection_lane():
+    bridge_path = Path(__file__).resolve().parents[1] / "live-scripts" / "sensorium_kanban_sensor_tick.py"
+    text = bridge_path.read_text(encoding="utf-8")
+    assert '"--memory-reflection"' in text
+    assert "timeout=240" in text

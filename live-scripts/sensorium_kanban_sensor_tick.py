@@ -130,9 +130,10 @@ def _run_det_sensors() -> dict[str, Any]:
         INSTANCE,
         "--all-sensors",
         "--codex-usage",
+        "--memory-reflection",
         "--json",
     ]
-    proc = subprocess.run(cmd, cwd=str(PLUGIN), text=True, capture_output=True, timeout=90)
+    proc = subprocess.run(cmd, cwd=str(PLUGIN), text=True, capture_output=True, timeout=240)
     record = {
         "cmd": cmd,
         "exit_code": proc.returncode,
