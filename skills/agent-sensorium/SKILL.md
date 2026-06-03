@@ -243,6 +243,16 @@ The reusable `agent_sensorium` package is generic — it contains no instance-sp
 2. `{state_dir}/instance.config.json` (auto-discovered from instance state directory)
 3. Safe defaults: `allowed_surfaces: ["local"]`, `max_sensitivity: "private"`, no policy card
 
+### Runtime configuration posture
+
+Runtime configurability is a public Agent Sensorium capability, while instance identity/policy remains separate. The reusable plugin should let an installed agent initialize and validate `instance.config.json`, enable/update known deterministic sensors, and bind generic roles to Hermes profiles through an out-of-band admin interface. Sera-specific deployment stays outside the public package as **Sera Sensorium Configuration**: private policy cards, prompts, channel IDs, local paths, voice/media defaults, Hindsight query sets, cron choices, and profile names.
+
+Keep the normal foreground tool surface tiny: ordinary sessions use only the compact `sensorium` aperture. Setup and mutation belong in an admin/CLI lane such as `sensorium_config status|init|validate|patch|add_sensor|update_sensor|set_profile|template`. Mutating config operations must be schema-bounded, atomic, receipt-writing, and require `reason`, `verification_condition`, and `rollback_condition`; they must not install arbitrary sensor code, schedule cron, broaden privacy surfaces by accident, dispatch workers, or enable direct delivery.
+
+Public config may store generic sections such as `sensors` and `profiles`, but those are eligibility/posture declarations only. Sensor entries configure known deterministic sensor kinds; profile bindings name possible Hermes lanes. Actual execution still passes through Sensorium's existing event/candidate, Subconscious/Conscious, Kanban/worker, and policy gates.
+
+For the accepted architecture decision and first implementation slice, see `docs/runtime-configuration-interface.md`.
+
 ### Config file format
 
 ```json

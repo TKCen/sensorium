@@ -31,6 +31,7 @@ Explicitly out of scope for MVP:
 - `docs/agent-sensorium-mvp-implementation-plan.md` — original MVP build plan and acceptance gates.
 - `docs/agent-sensorium-buildout-plan-2026-05-25.md` — post-MVP full build-out backlog and phase gates.
 - `docs/extending-sensors-and-subconscious-jobs.md` — extension contract for adding cheap deterministic sensors and bounded Subconscious reasoning jobs.
+- `docs/runtime-configuration-interface.md` — accepted public/private split and first-step contract for runtime config, sensor/profile bindings, and an agent-friendly admin interface.
 
 ## Development shape
 
