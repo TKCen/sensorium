@@ -43,6 +43,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert set(ctx.tools) == {
         "sensorium_status",
         "sensorium_ingest_signal",
+        "sensorium_sensor_config",
         "sensorium_ingest_event",
         "sensorium_dispatch_once",
         "sensorium_candidate_update",
@@ -187,3 +188,38 @@ def test_root_plugin_entrypoint_reexports_register():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module.register)
+
+
+def test_memory_reflection_not_in_live_tool_schema(tmp_path):
+    """Memory reflection must never appear as a model-visible tool."""
+    from agent_sensorium.plugin import register
+
+    ctx = FakePluginContext()
+    register(ctx)
+
+    # The exact set from test_plugin_registers_with_real_plugin_context_shape.
+    # This is a snapshot guard: adding a memory-probe tool will cause this to fail.
+    _EXPECTED_TOOL_COUNT = 32
+
+    # No tool name may reference memory reflection concepts.
+    _FORBIDDEN_NAME_FRAGMENTS = {"memory_reflection", "reflect", "recall", "probe"}
+    for name in ctx.tools:
+        for fragment in _FORBIDDEN_NAME_FRAGMENTS:
+            assert fragment not in name, (
+                f"Tool name '{name}' contains forbidden fragment '{fragment}'"
+            )
+
+    # No tool schema JSON may mention memory_reflection concepts.
+    _FORBIDDEN_SCHEMA_SUBSTRINGS = {"memory_reflection", "memory reflection"}
+    for name, entry in ctx.tools.items():
+        schema_json = json.dumps(entry["schema"])
+        for substr in _FORBIDDEN_SCHEMA_SUBSTRINGS:
+            assert substr not in schema_json, (
+                f"Tool '{name}' schema contains forbidden substring '{substr}'"
+            )
+
+    # Snapshot guard: tool count must not grow due to memory reflection additions.
+    assert len(ctx.tools) == _EXPECTED_TOOL_COUNT, (
+        f"Tool count changed: expected {_EXPECTED_TOOL_COUNT}, got {len(ctx.tools)}. "
+        "If a memory reflection tool was added, remove it — reflection is out-of-band only."
+    )

@@ -17,9 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_sensorium import memory_reflection as memory_reflection_mod
 from agent_sensorium.config import default_instance_name, load_instance_config
 from agent_sensorium.schemas import utc_now_iso
 from agent_sensorium.sensors import (
+    classify_codex_usage_pressure,
     classify_media_capacity,
     classify_hindsight_pressure,
     classify_kanban_pressure,
@@ -27,6 +29,7 @@ from agent_sensorium.sensors import (
     classify_machine_network_pressure,
     classify_machine_process_pressure,
     classify_tts_sidecar_pressure,
+    codex_usage_sample,
     hindsight_pressure_sample,
     kanban_pressure_sample,
     machine_body_pressure_sample,
@@ -135,6 +138,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kanban-pressure", action="store_true", help="Sample Kanban board pressure transition signals")
     parser.add_argument("--tts-sidecar-pressure", action="store_true", help="Sample Chatterbox TTS timeout/liveness cue signals")
     parser.add_argument("--media-capacity", action="store_true", help="Sample almost-idle local media gift capacity")
+    parser.add_argument("--codex-usage", action="store_true", help="Sample Codex/OpenAI subscription usage pressure")
+    parser.add_argument(
+        "--memory-reflection", action="store_true",
+        help=(
+            "Run due Subconscious-owned Hindsight reflect/recall memory probes "
+            "(hot-loaded from memory_reflection.json) and ingest compact reduced "
+            "signals. Slow/model-backed; NOT part of --all-sensors."
+        ),
+    )
+    parser.add_argument(
+        "--memory-reflection-config", default=None,
+        help="Explicit path to memory_reflection.json (defaults to <state_dir>/memory_reflection.json)",
+    )
     parser.add_argument("--all-sensors", action="store_true", help="Run all currently wired deterministic sensors")
     parser.add_argument(
         "--subconscious-advisory", action="store_true",
@@ -213,6 +229,60 @@ def main(argv: list[str] | None = None) -> int:
                 steps[name] = step
                 if err:
                     errors.append(err)
+
+        if args.codex_usage:
+            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+            step, err = _run_transition_sensor(
+                name="codex_usage",
+                store=store,
+                dry_run=args.dry_run,
+                kw=kw,
+                config=instance_config,
+                sample_fn=codex_usage_sample,
+                classify_fn=classify_codex_usage_pressure,
+            )
+            steps["codex_usage"] = step
+            if err:
+                errors.append(err)
+
+        if args.memory_reflection:
+            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+            store.ensure_dirs()
+            mr_state_dir = str(store.root)
+
+            def _memory_reflection_ingest(signal: dict) -> dict:
+                return json.loads(handle_sensorium_ingest_signal(
+                    signal=signal, config=instance_config, **kw
+                ))
+
+            mr_result = memory_reflection_mod.run_due_probes(
+                state_dir=mr_state_dir,
+                config_path=args.memory_reflection_config,
+                client=None,
+                dry_run=args.dry_run,
+                ingest_fn=None if args.dry_run else _memory_reflection_ingest,
+            )
+            steps["memory_reflection"] = {
+                "enabled": mr_result.get("enabled", False),
+                "config_source": mr_result.get("config_source"),
+                "due": [d.get("probe_id") for d in mr_result.get("due", [])],
+                "skipped": [s.get("probe_id") for s in mr_result.get("skipped", [])],
+                "runs": [
+                    {
+                        "probe_id": r.get("probe_id"),
+                        "status": r.get("status"),
+                        "emit_reason": r.get("emit_reason"),
+                        "emitted_count": r.get("emitted_count"),
+                        "delta": r.get("delta"),
+                    }
+                    for r in mr_result.get("runs", [])
+                ],
+            }
+            if mr_result.get("config_errors"):
+                steps["memory_reflection"]["config_errors"] = mr_result["config_errors"]
+            for run in mr_result.get("runs", []):
+                if run.get("status") == "error":
+                    errors.append(f"memory_reflection[{run.get('probe_id')}]: {run.get('error', 'unknown')}")
 
         if not args.dry_run:
             raw = json.loads(handle_sensorium_compact(**kw))

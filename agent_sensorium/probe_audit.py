@@ -7,6 +7,7 @@ state without mutating the real default Sensorium.
 
 import json
 
+from .memory_reflection import MEMORY_REFLECTION_PROBE_FAMILY
 from .schemas import VALID_SOURCES
 from .sensors import (
     artifact_signal,
@@ -55,6 +56,10 @@ def probe_inventory() -> dict:
         "configured_sources": sorted(VALID_SOURCES),
         "silent_sources": sorted(VALID_SOURCES - {"feedback"}),
         "blind_spots": list(BLIND_SPOTS),
+        # Subconscious-owned, hot-loadable internal probe families. These are NOT
+        # cheap deterministic sensors and NOT model-visible tools; they call
+        # Hindsight reflect/recall and emit compact reduced signals only.
+        "internal_probe_families": [dict(MEMORY_REFLECTION_PROBE_FAMILY)],
     }
 
 
