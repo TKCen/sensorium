@@ -55,6 +55,14 @@ class TestSalienceContextForLl:
         assert "sensorium(action='ingest')" in ctx
         assert "sensorium_ingest_signal" not in ctx
 
+    def test_uses_generic_user_language(self):
+        """The reusable hook should not hard-code Sera/operator wording."""
+        ctx = salience_context_for_llm()
+        assert "your user" in ctx
+        assert "you or your user" in ctx
+        assert "operator" not in ctx.lower()
+        assert "Sera" not in ctx
+
     def test_context_is_small(self):
         ctx = salience_context_for_llm()
         assert len(ctx) < 1000, f"Context too large: {len(ctx)} chars"
