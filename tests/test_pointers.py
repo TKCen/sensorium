@@ -78,9 +78,9 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
     assert "[Sensorium Pointer]" in first["context"]
     assert "Pending thread: sth_testpointer" in first["context"]
     assert "If the user says" in first["context"]
-    assert "sensorium_thread_open" in first["context"]
+    assert "sensorium(action=\"open\"" in first["context"]
     assert "surface=\"discord\"" in first["context"]
-    assert "thread_id=\"sth_testpointer\"" in first["context"]
+    assert "id=\"sth_testpointer\"" in first["context"]
     assert "Do not reveal capsule content unless opened" in first["context"]
 
     receipts = store.read_jsonl("decisions")
@@ -111,7 +111,7 @@ def test_pointer_context_is_door_handle_not_capsule():
     assert "continuity_summary" not in context
     assert "decision_log" not in context
     assert "take it up" in context
-    assert "sensorium_thread_open" in context
+    assert "sensorium(action=\"open\"" in context
     assert "sth_x" in context
 
 

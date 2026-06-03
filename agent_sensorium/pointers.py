@@ -167,7 +167,7 @@ def pointer_context_for_llm(pointer: dict) -> str:
         f"Human-facing doorway: {pointer.get('invitation')}\n"
         "Internal instruction: If the user says “open it”, “take it up”, "
         "“what’s pending”, or similar, call "
-        f"sensorium_thread_open(surface=\"{surface}\", thread_id=\"{thread_id}\").\n"
+        f"sensorium(action=\"open\", surface=\"{surface}\", id=\"{thread_id}\").\n"
         "Do not reveal capsule content unless opened. Do not include private capsule fields "
         "in the pointer itself."
     )

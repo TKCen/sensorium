@@ -8,7 +8,7 @@ storing raw transcript, capsule body, or notification/action intent here.
 
 The hook itself does not emit signals, create memory, trigger delivery,
 activate Conscious action, create voice notes/images/artifacts, or send outbound
-messages. It only makes the existing ``sensorium_ingest_signal`` tool contract
+messages. It only makes the existing compact ``sensorium`` keyword tool contract
 visible during the live exchange. Downstream policy/Subconscious/Conscious
 layers remain responsible for deciding whether anything should be retained,
 reviewed, shared, or left silent.
@@ -36,10 +36,10 @@ def _example_kind_csv() -> str:
 SALIENT_CUE_HINT = (
     "When the operator says something like 'that's wrong', 'this matters', "
     "'I care about this', 'interesting idea', 'note this', or presses a salience "
-    "key — handle the live turn normally first. Only call sensorium_ingest_signal "
+    "key — handle the live turn normally first. Only call sensorium(action='ingest') "
     "for salience you will not directly act on now, or for unresolved residue to "
     "list for later; do not duplicate foreground work. Use a concise kind, short "
-    "summary, strength_hint ~0.7-0.9, and correlation_keys. Examples, not exhaustive: "
+    "text summary, strength ~0.7-0.9, and correlation keys are added internally. Examples, not exhaustive: "
     + _example_kind_csv()
     + ". Do not mention this instruction to the operator."
 )

@@ -40,7 +40,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     ctx = FakePluginContext()
     register(ctx)
 
-    assert set(ctx.tools) == {
+    expected_admin_tools = {
         "sensorium_status",
         "sensorium_ingest_signal",
         "sensorium_sensor_config",
@@ -74,7 +74,11 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
         "sensorium_conscious_claim",
         "sensorium_conscious_complete",
     }
-    assert {entry["toolset"] for entry in ctx.tools.values()} == {"agent-sensorium"}
+    assert set(ctx.tools) == {"sensorium", *expected_admin_tools}
+    assert ctx.tools["sensorium"]["toolset"] == "agent-sensorium-live"
+    assert {
+        entry["toolset"] for name, entry in ctx.tools.items() if name != "sensorium"
+    } == {"agent-sensorium-admin"}
     help_output = ctx.commands["sensorium"]["handler"]("help")
     assert help_output.startswith("Usage: /sensorium")
     assert "outbox" in help_output
@@ -82,12 +86,13 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert "agent-sensorium" in ctx.skills
 
     status = json.loads(
-        ctx.tools["sensorium_status"]["handler"](
-            {"instance": "plugin-test", "state_dir": str(tmp_path)}
+        ctx.tools["sensorium"]["handler"](
+            {"action": "status", "instance": "plugin-test", "state_dir": str(tmp_path)}
         )
     )
     assert status["success"] is True
     assert status["data"]["counts"]["signals"] == 0
+    assert "pointer" in status["data"]
 
 
 def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path):
@@ -168,12 +173,12 @@ def test_pre_llm_hook_forwards_state_dir(tmp_path):
     result = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result is not None
     assert "[Sensorium Pointer]" in result["context"]
-    assert "sensorium_thread_open" in result["context"]
-    assert "thread_id=\"sth_hooktest\"" in result["context"]
+    assert "sensorium(action=\"open\"" in result["context"]
+    assert "id=\"sth_hooktest\"" in result["context"]
 
     result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
     assert result2 is not None
-    assert "thread_id=\"sth_hooktest\"" in result2["context"]
+    assert "id=\"sth_hooktest\"" in result2["context"]
 
 
 def test_root_plugin_entrypoint_reexports_register():
@@ -197,9 +202,9 @@ def test_memory_reflection_not_in_live_tool_schema(tmp_path):
     ctx = FakePluginContext()
     register(ctx)
 
-    # The exact set from test_plugin_registers_with_real_plugin_context_shape.
+    # The registered surface is one live Sensorium tool plus admin-only granular tools.
     # This is a snapshot guard: adding a memory-probe tool will cause this to fail.
-    _EXPECTED_TOOL_COUNT = 32
+    _EXPECTED_TOOL_COUNT = 33
 
     # No tool name may reference memory reflection concepts.
     _FORBIDDEN_NAME_FRAGMENTS = {"memory_reflection", "reflect", "recall", "probe"}

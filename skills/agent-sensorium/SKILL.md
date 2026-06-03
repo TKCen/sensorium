@@ -195,6 +195,18 @@ proposed -> expired (outcome: expired)
 
 ## Tools
 
+### Live foreground surface
+
+Normal Discord/CLI sessions should enable only `agent-sensorium-live`, which exposes exactly one compact tool:
+
+| Tool | Description |
+|------|-------------|
+| `sensorium` | Keyword aperture with `action=status|ingest|open|update`; status returns compact counts/pointer, ingest records deferred salience from short text, open opens a thread capsule, update applies lifecycle keywords. |
+
+The 32 granular tools below are registered under `agent-sensorium-admin` for CLI/admin/debug/tests and should not be enabled in ordinary foreground sessions.
+
+### Admin/debug surface
+
 | Tool | Description |
 |------|-------------|
 | `sensorium_status` | Read-only state snapshot: counts, top candidates, visible threads, and instance config diagnostics |
@@ -263,16 +275,16 @@ The active-session pointer is a doorway, not awareness itself. It may reveal onl
 - the thread id and short title;
 - the operator phrase for opening it, such as “take it up”.
 
-The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium_thread_open` after the requested surface passes the unified visibility gate (`config.visible_on_surface`), which checks BOTH the item’s `allowed_surfaces` AND the instance config `allowed_surfaces`, plus sensitivity. This same gate is enforced by the attention inbox, pointer selection, `pre_llm_call` pointer injection, and `sensorium_thread_open`. Missing config fails closed to local-only.
+The pointer must not include capsule internals such as continuity notes, decision logs, open questions, or private operational memory. Those are returned only by `sensorium(action="open", id="...")` / the admin `sensorium_thread_open` handler after the requested surface passes the unified visibility gate (`config.visible_on_surface`), which checks BOTH the item’s `allowed_surfaces` AND the instance config `allowed_surfaces`, plus sensitivity. This same gate is enforced by the attention inbox, pointer selection, `pre_llm_call` pointer injection, and thread opening. Missing config fails closed to local-only.
 
 There are two pointer paths:
 
 - `sensorium_attention_pointer` is a **preview tool**. It does not mutate state or write cooldown receipts.
 - The `pre_llm_call` hook is the **presentation path**. When it injects a pointer into the active turn, it writes a `pointer.presented` receipt so cooldown can suppress repeats.
 
-The injected pointer context is model-facing validation scaffolding. It can include explicit instructions such as “if the user says take it up, call `sensorium_thread_open`.” Final user-facing UX should stay smaller and more natural.
+The injected pointer context is model-facing validation scaffolding. It can include explicit instructions such as “if the user says take it up, call `sensorium(action="open", id="...")`.” Final user-facing UX should stay smaller and more natural.
 
-Separate from pending-thread pointers, the pre-LLM hook may eventually inject a tiny **live salience-capture rule** for the active session. That rule should not dump thread capsules or raw messages. Its job is to remind the conscious agent that if the current exchange contains explicit operator correction, operational design insight, relational salience, longing, creative pull, or a durable “this matters” cue, the agent should record a compact Sensorium signal via `sensorium_ingest_signal` / `session_event_signal` / `operator_signal` with summary, kind, strength, correlation keys, sensitivity, surfaces, and causal refs. Example: if Sebastian says “I miss you” in a live relational context, that is not just text to answer; it can become a private relational salience signal that Subconscious later correlates with Hindsight recall and may promote into a Conscious choice such as silence, memory update, a voice note, or an image artifact under policy.
+Separate from pending-thread pointers, the pre-LLM hook injects a tiny **live salience-capture rule** for the active session. That rule should not dump thread capsules or raw messages. Its job is to remind the conscious agent that if the current exchange contains explicit operator correction, operational design insight, relational salience, longing, creative pull, or a durable “this matters” cue, the agent should record only deferred/unresolved salience through `sensorium(action="ingest", text="...", kind="...", strength=0.7)`; the compact tool fills correlation keys and other signal metadata internally. Example: if Sebastian says “I miss you” in a live relational context, that is not just text to answer; if some private residue remains after the foreground answer, it can become a private relational salience signal that Subconscious later correlates with Hindsight recall and may promote into a Conscious choice such as silence, memory update, a voice note, or an image artifact under policy.
 
 Do not confuse this with Hindsight `reflect`. Hindsight `recall` fetches memory facts; Hindsight `reflect` creates a Hindsight-side reasoning agent. Sensorium already owns the Subconscious layer, so the default runtime shape should be: active-session capture or memory echo → compact signal/event → Sensorium Subconscious uses bounded recall/context to consolidate → Conscious decides. Direct Hindsight reflect is optional later infrastructure, not the Sensorium Subconscious itself.
 

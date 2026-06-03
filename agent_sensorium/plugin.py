@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-_TOOLSET = "agent-sensorium"
+_LIVE_TOOLSET = "agent-sensorium-live"
+_ADMIN_TOOLSET = "agent-sensorium-admin"
 
 
 def _default_instance() -> str:
@@ -85,9 +87,120 @@ def register(ctx) -> None:
         },
     }
 
+    def _live_result(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _loads_result(raw: str) -> dict[str, Any]:
+        try:
+            return json.loads(raw or "{}")
+        except Exception:
+            return {"success": False, "error": "invalid_sensorium_result", "raw": raw}
+
+    def _handle_live_sensorium(args: dict[str, Any], **kw) -> str:
+        """Compact foreground Sensorium aperture.
+
+        The live model surface stays intentionally tiny. Granular operations are
+        still registered below, but only under the admin toolset.
+        """
+        action = str(args.get("action") or "status").strip().lower()
+        instance = _arg_instance(args)
+        state_dir = args.get("state_dir")
+        surface = str(args.get("surface") or "local").strip() or "local"
+        text = str(args.get("text") or "").strip()
+        target_id = str(args.get("id") or "latest").strip() or "latest"
+
+        if action == "status":
+            status = _loads_result(handle_sensorium_status(instance=instance, state_dir=state_dir))
+            pointer = _loads_result(handle_sensorium_attention_pointer(
+                instance=instance, state_dir=state_dir, surface=surface,
+            ))
+            data = status.get("data") or {}
+            return _live_result({
+                "success": bool(status.get("success", True)),
+                "instance": instance,
+                "data": {
+                    "counts": data.get("counts", {}),
+                    "top_candidates": data.get("top_candidates", [])[:3],
+                    "top_threads": data.get("top_threads", [])[:3],
+                    "pointer": (pointer.get("data") or {}),
+                    "ts": data.get("ts"),
+                },
+                "error": status.get("error"),
+            })
+
+        if action == "ingest":
+            kind = str(args.get("kind") or "operator_salience").strip() or "operator_salience"
+            if not text:
+                return _live_result({"success": False, "instance": instance, "error": "text_required"})
+            try:
+                strength = float(args.get("strength") or 0.75)
+            except (TypeError, ValueError):
+                strength = 0.75
+            strength = max(0.0, min(1.0, strength))
+            signal = {
+                "sensor": "active_session",
+                "source": "foreground_tool",
+                "kind": kind,
+                "summary": text[:500],
+                "strength_hint": strength,
+                "sensitivity": "private",
+                "allowed_surfaces": [surface],
+                "correlation_keys": ["active-session", f"surface:{surface}", kind],
+            }
+            return handle_sensorium_ingest_signal(signal=signal, instance=instance, state_dir=state_dir)
+
+        if action == "open":
+            return handle_sensorium_thread_open(
+                thread_id=target_id, surface=surface, instance=instance, state_dir=state_dir,
+            )
+
+        if action == "update":
+            keyword = str(args.get("keyword") or "mark_reviewed").strip().lower()
+            return handle_sensorium_thread_update(
+                thread_id=target_id,
+                action=keyword,
+                reason=text,
+                instance=instance,
+                state_dir=state_dir,
+            )
+
+        return _live_result({
+            "success": False,
+            "instance": instance,
+            "error": "invalid_action",
+            "allowed_actions": ["status", "ingest", "open", "update"],
+        })
+
+    ctx.register_tool(
+        name="sensorium",
+        toolset=_LIVE_TOOLSET,
+        schema=_schema(
+            "sensorium",
+            "Compact live Sensorium aperture: status, ingest deferred salience, open a pointer/thread, or update by keyword.",
+            {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "ingest", "open", "update"],
+                    "description": "status|ingest|open|update",
+                },
+                "text": {"type": "string", "description": "Short salience summary or update reason."},
+                "kind": {"type": "string", "description": "Optional salience kind for ingest."},
+                "strength": {"type": "number", "description": "Optional ingest strength 0-1."},
+                "id": {"type": "string", "description": "Thread id, or latest."},
+                "keyword": {
+                    "type": "string",
+                    "description": "Update keyword: close, hold, resume, archive, mark_reviewed, pin, or unpin.",
+                },
+                "surface": {"type": "string", "description": "local or discord; defaults local."},
+            },
+        ),
+        handler=_handle_live_sensorium,
+        description="Compact foreground Sensorium keyword tool.",
+    )
+
     ctx.register_tool(
         name="sensorium_status",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_status",
             "Read-only snapshot of Agent Sensorium state: counts, top candidates, visible threads, and instance config diagnostics.",
@@ -108,7 +221,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_ingest_signal",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_ingest_signal",
             "Ingest a low-level signal and promote it if deterministic thresholds are met.",
@@ -129,7 +242,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_sensor_config",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_sensor_config",
             "Register, modify, pause, deprecate, or list deterministic Sensorium sensor kinds. Config-only; no sensor execution or task spawning.",
@@ -167,7 +280,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_ingest_event",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_ingest_event",
             "Ingest an already-promoted trusted event and create a candidate.",
@@ -193,7 +306,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_dispatch_once",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_dispatch_once",
             "Deprecated compatibility advisory for the old Sensorium dispatcher. Default is read-only; mutating thread dispatch requires config.legacy_thread_dispatch_enabled=True and should be replaced by the Kanban bridge.",
@@ -219,7 +332,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_candidate_update",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_candidate_update",
             "Update a candidate status: suppress, hold, cancel, or mark_reviewed.",
@@ -251,7 +364,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_attention_pointer",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_attention_pointer",
             "Preview the small active-session Sensorium pointer for a surface without dumping thread capsules.",
@@ -277,7 +390,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_thread_open",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_thread_open",
             "Open a compact conscious-thread capsule when the requested surface is allowed.",
@@ -303,7 +416,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_thread_update",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_thread_update",
             "Update a conscious thread status or pin state with a decision receipt.",
@@ -345,7 +458,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_compact",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_compact",
             "Archive expired candidates and threads with decision receipts.",
@@ -359,7 +472,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_service_threads",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_service_threads",
             "Deterministic thread service pass: TTL archival, starvation/dirty/expiring reports.",
@@ -386,7 +499,7 @@ def register(ctx) -> None:
 
     ctx.register_tool(
         name="sensorium_subconscious_advisory",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_subconscious_advisory",
             "Run a bounded Subconscious advisory pass over Events/Candidates. Disabled by default; cheap model use requires config.model_enabled=true and never creates external side effects.",
@@ -423,7 +536,7 @@ def register(ctx) -> None:
 
     ctx.register_tool(
         name="sensorium_improvement_collect",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_improvement_collect",
             "Run deterministic Sensorium self-improvement evidence collection. It may create at most one internal attention_policy_review candidate and never mutates wake behavior directly.",
@@ -459,7 +572,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_attention_policy_decide",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_attention_policy_decide",
             "Record a Conscious attention-policy-review decision receipt with future_tendency_delta, verification_condition, and rollback_condition. Does not apply policy mutations directly.",
@@ -518,7 +631,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_attention_policy_manage",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_attention_policy_manage",
             "Apply a narrow declarative Sensorium attention-policy config mutation. This is not generic file access and cannot broaden privacy surfaces or edit code.",
@@ -567,7 +680,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_improvement_status",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_improvement_status",
             "Read Sensorium self-improvement harness status and recent attention-policy-review receipts.",
@@ -582,7 +695,7 @@ def register(ctx) -> None:
 
     ctx.register_tool(
         name="sensorium_attention_inbox",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_attention_inbox",
             "Read-only attention inbox: active candidates and visible conscious threads filtered by surface and sensitivity policy, with allowed decisions per item.",
@@ -613,7 +726,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_outbox_prepare",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_outbox_prepare",
             "Deprecated compatibility: prepare a Sensorium-local outbox receipt for old thread state. Prefer Kanban-reviewed action/artifact/outbox work with Sensorium refs.",
@@ -676,7 +789,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_outbox_dispatch",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_outbox_dispatch",
             "Deprecated compatibility: dispatch a Sensorium-local outbox receipt. Live delivery should be routed through Kanban-reviewed work; direct modes remain fail-closed.",
@@ -707,7 +820,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_worker_prepare",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_worker_prepare",
             "Deprecated compatibility: prepare a Sensorium-local worker receipt. Prefer Kanban child tasks/comments/artifact refs for live worker ticketing.",
@@ -759,7 +872,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_worker_dispatch",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_worker_dispatch",
             "Deprecated compatibility: dispatch a Sensorium-local worker request. Live worker dispatch belongs to Kanban; direct dispatch remains opt-in/fail-closed.",
@@ -790,7 +903,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_worker_result",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_worker_result",
             "Record a worker result: update request status, write receipt, and emit feedback signal with causal refs.",
@@ -837,7 +950,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_worker_status",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_worker_status",
             "List worker requests with optional thread/status filters.",
@@ -868,7 +981,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_media_gift_decide",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_media_gift_decide",
             "Apply Sera mediated-presence gift conscious-choice policy and write receipts. Subconscious may only propose; no automatic outbound delivery or scheduler spam.",
@@ -938,7 +1051,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_artifact_store",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_artifact_store",
             "Store a mediated-presence artifact ref (text/audio/image/video) for conscious thread/action review. Private-by-default; does not generate media or deliver outbound messages.",
@@ -1029,7 +1142,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_artifact_status",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_artifact_status",
             "List mediated-presence artifact records with optional thread/action/kind filters.",
@@ -1065,7 +1178,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_action_prepare",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_action_prepare",
             "Deprecated compatibility: prepare a Sensorium-local action receipt. Prefer Kanban task comments/children/artifact refs for live action ticketing.",
@@ -1121,7 +1234,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_action_attach",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_action_attach",
             "Attach a worker/outbox/artifact/external ref to a prepared thread action.",
@@ -1163,7 +1276,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_action_result",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_action_result",
             "Record outcome for a prepared thread action, emit feedback signal, and close the action.",
@@ -1205,7 +1318,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_action_status",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_action_status",
             "List thread actions with optional thread/status filters.",
@@ -1236,7 +1349,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_conscious_claim",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_conscious_claim",
             "Deprecated compatibility lease for old internal Sensorium threads. Disabled by default; create conscious:review Kanban tasks for live activation.",
@@ -1272,7 +1385,7 @@ def register(ctx) -> None:
     )
     ctx.register_tool(
         name="sensorium_conscious_complete",
-        toolset=_TOOLSET,
+        toolset=_ADMIN_TOOLSET,
         schema=_schema(
             "sensorium_conscious_complete",
             "Complete a background-conscious lease for a claimed thread. Clears active_lease and writes a decision receipt.",

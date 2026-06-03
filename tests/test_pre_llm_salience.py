@@ -50,9 +50,10 @@ class TestSalienceContextForLl:
         assert "appropriate kind (" not in ctx
         assert "supported kinds" not in lower
 
-    def test_mentions_sensorium_ingest_signal(self):
+    def test_mentions_compact_sensorium_ingest(self):
         ctx = salience_context_for_llm()
-        assert "sensorium_ingest_signal" in ctx
+        assert "sensorium(action='ingest')" in ctx
+        assert "sensorium_ingest_signal" not in ctx
 
     def test_context_is_small(self):
         ctx = salience_context_for_llm()
@@ -77,7 +78,8 @@ class TestHandleSaliencePreLl:
         )
         assert result is not None
         assert "context" in result
-        assert "sensorium_ingest_signal" in result["context"]
+        assert "sensorium(action='ingest')" in result["context"]
+        assert "sensorium_ingest_signal" not in result["context"]
 
     def test_returns_context_with_salience_policy_disabled(self, tmp_state_dir):
         """Policy gates downstream processing, not live salience awareness."""
@@ -92,7 +94,8 @@ class TestHandleSaliencePreLl:
             platform="local",
         )
         assert result is not None
-        assert "sensorium_ingest_signal" in result["context"]
+        assert "sensorium(action='ingest')" in result["context"]
+        assert "sensorium_ingest_signal" not in result["context"]
 
     def test_does_not_crash_on_missing_config(self, tmp_state_dir):
         """Missing config should not crash; hook is always-on and resilient."""
