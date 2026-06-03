@@ -1,0 +1,9 @@
+name: agent-sensorium
+version: 0.1.0
+kind: standalone
+description: "Bounded autonomous inner lifecycle for Hermes agents: signals, events, candidates, and conscious thread capsules."
+author: Agent Sensorium
+platforms:
+  - linux
+  - macos
+  - windows

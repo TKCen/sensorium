@@ -1,0 +1,7 @@
+# Docs
+
+- `extending-sensors-and-subconscious-jobs.md`: how to add new deterministic sensors and bounded Subconscious jobs without breaking the awareness/action boundary.
+- `profiles-and-config.md`: the profile model, active-profile resolution, and the code/config boundary — what deployers configure vs what the plugin provides as generic defaults.
+- `examples/demo-instance-config.json`: sample `instance.config.json` for a profile named `demo`.
+- `examples/demo-policy-card.md`: sample policy card showing the boundary between reusable core and deployment-specific policy.
+- `demo-sensors-and-tick.md`: fresh-install walkthrough — seed the demo profile, inspect sensors, run the heartbeat tick, and read status via the live tool.
