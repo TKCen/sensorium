@@ -614,6 +614,189 @@ def _decision_item(decision: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PERCEPTION_TRACE_LIMIT = 8
+SETTLEMENT_RECEIPT_TYPES = {
+    "kanban.settlement.applied",
+    "kanban.settlement.unresolved",
+    "kanban.settlement.no_candidate_match",
+}
+DISPATCH_PRESSURE_THRESHOLD = 0.5
+DROP_CANDIDATE_STATUSES = {"suppressed", "dropped"}
+
+
+def _trace_event_item(event: dict[str, Any]) -> dict[str, Any]:
+    signal_ids = [str(s) for s in (event.get("source_signal_ids") or []) if s][:6]
+    return {
+        "id": event.get("id"),
+        "kind": event.get("kind"),
+        "summary": _truncate(event.get("summary"), 160),
+        "strength": event.get("strength"),
+        "signal_ids": signal_ids,
+        "ts": event.get("ts") or event.get("created_at"),
+    }
+
+
+def _trace_signal_item(signal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": signal.get("id"),
+        "kind": signal.get("kind"),
+        "sensor": signal.get("sensor"),
+        "summary": _truncate(signal.get("summary"), 160),
+        "strength_hint": signal.get("strength_hint"),
+        "pressure_level": signal.get("pressure_level"),
+        "transition": signal.get("transition"),
+        "ts": signal.get("ts") or signal.get("created_at"),
+    }
+
+
+def _trace_settlement(candidate: dict[str, Any], receipts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Compact Kanban settlement view from candidate truth plus decision receipts.
+
+    The candidate's own ``kanban_settlement`` is authoritative; settlement
+    receipts from ``decisions.jsonl`` backfill any fields missing on the
+    candidate and surface unresolved/no-match attempts (the literal
+    "interpretation went wrong" case). Reasons are already compact summaries
+    written by the bridge, but they are truncated again here defensively.
+    """
+    raw_meta = candidate.get("kanban_settlement")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    applied = [r for r in receipts if r.get("type") == "kanban.settlement.applied"]
+    unresolved = [
+        r for r in receipts
+        if r.get("type") in {"kanban.settlement.unresolved", "kanban.settlement.no_candidate_match"}
+    ]
+    latest_applied = applied[-1] if applied else {}
+    if not meta and not applied and not unresolved:
+        return None
+    raw_ref = meta.get("conscious_task_ref")
+    ref: dict[str, Any] = raw_ref if isinstance(raw_ref, dict) else {}
+    return {
+        "decision": meta.get("decision") or latest_applied.get("decision"),
+        "reason": _truncate(meta.get("reason") or latest_applied.get("reason"), 200),
+        "intake_task_id": meta.get("intake_task_id") or latest_applied.get("intake_task_id") or "",
+        "review_task_id": meta.get("review_task_id") or latest_applied.get("review_task_id") or "",
+        "settled_at": meta.get("settled_at") or latest_applied.get("ts"),
+        "conscious_task_id": ref.get("task_id") or ref.get("kanban_task_id") or "",
+        "conscious_thread_id": ref.get("thread_id") or "",
+        "unresolved": bool(unresolved) and not applied,
+    }
+
+
+def _trace_lifecycle(
+    candidate: dict[str, Any],
+    events: list[dict[str, Any]],
+    signals: list[dict[str, Any]],
+    settlement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Lifecycle-stage flags plus a compact wrong-turn band for one candidate.
+
+    Stages mirror the inner movement the dashboard exists to expose:
+    signal -> event -> candidate -> kanban -> decision -> settled.
+    """
+    settlement = settlement or {}
+    status = str(candidate.get("status") or "")
+    pressure = float(candidate.get("pressure") or 0)
+    decision = settlement.get("decision")
+    intake = bool(settlement.get("intake_task_id") or settlement.get("review_task_id"))
+    settled = bool(settlement.get("settled_at") and decision)
+
+    stages = [
+        {"key": "signal", "label": "Signal", "reached": bool(signals), "detail": str(len(signals))},
+        {"key": "event", "label": "Event", "reached": bool(events), "detail": str(len(events))},
+        {"key": "candidate", "label": "Candidate", "reached": True, "detail": status or "candidate"},
+        {"key": "kanban", "label": "Kanban", "reached": intake, "detail": "intake/review" if intake else ""},
+        {"key": "decision", "label": "Decision", "reached": bool(decision), "detail": decision or ""},
+        {"key": "settled", "label": "Settled", "reached": settled, "detail": status if settled else ""},
+    ]
+
+    flags: list[str] = []
+    if not events:
+        flags.append("no_source_events")
+    if not signals and events:
+        flags.append("no_source_signals")
+    if settlement.get("unresolved"):
+        flags.append("settlement_unresolved")
+    if status in DROP_CANDIDATE_STATUSES:
+        flags.append("dropped")
+    pending = status == ACTIVE_CANDIDATE_STATUS and pressure >= DISPATCH_PRESSURE_THRESHOLD and not intake
+    if pending:
+        flags.append("pending_unsettled")
+
+    if settlement.get("unresolved") or "no_source_events" in flags:
+        band = "red"
+    elif status in DROP_CANDIDATE_STATUSES or pending:
+        band = "yellow"
+    elif decision in {"SAVE", "PROMOTE_CONSCIOUS"}:
+        band = "green"
+    else:
+        band = "neutral"
+
+    return {"stages": stages, "flags": flags, "band": band}
+
+
+def _perception_traces(
+    candidates: list[dict[str, Any]],
+    *,
+    event_by_id: dict[str, dict[str, Any]],
+    signal_by_id: dict[str, dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    limit: int = PERCEPTION_TRACE_LIMIT,
+) -> list[dict[str, Any]]:
+    """Assemble bounded, read-only candidate lifecycle traces.
+
+    Each trace stitches the inner movement back together so a wrong turn is
+    legible: what Sera noticed (signals/events), what became a candidate, what
+    Subconscious decided in Kanban, the compact evidence/reason, and where it
+    settled. Pure: it only reads already-loaded rows and never mutates state.
+    """
+    receipts_by_candidate: dict[str, list[dict[str, Any]]] = {}
+    for row in decisions:
+        if not isinstance(row, dict) or row.get("type") not in SETTLEMENT_RECEIPT_TYPES:
+            continue
+        cand_id = str(row.get("candidate_id") or "")
+        if cand_id:
+            receipts_by_candidate.setdefault(cand_id, []).append(row)
+
+    ordered = sorted(candidates, key=_sort_key, reverse=True)[:limit]
+    traces: list[dict[str, Any]] = []
+    for candidate in ordered:
+        cand_id = str(candidate.get("id") or "")
+        event_ids = [str(e) for e in (candidate.get("event_ids") or []) if e]
+        events = [event_by_id[eid] for eid in event_ids if eid in event_by_id][:4]
+        signal_ids: list[str] = []
+        for event in events:
+            for sid in event.get("source_signal_ids") or []:
+                sid = str(sid)
+                if sid and sid not in signal_ids:
+                    signal_ids.append(sid)
+        signals = [signal_by_id[sid] for sid in signal_ids if sid in signal_by_id][:6]
+
+        receipts = sorted(receipts_by_candidate.get(cand_id, []), key=lambda r: str(r.get("ts") or ""))
+        settlement = _trace_settlement(candidate, receipts)
+        lifecycle = _trace_lifecycle(candidate, events, signals, settlement)
+
+        traces.append(
+            {
+                "candidate_id": cand_id,
+                "kind": candidate.get("kind"),
+                "status": candidate.get("status"),
+                "pressure": candidate.get("pressure"),
+                "summary": _truncate(candidate.get("summary"), 200),
+                "correlation_keys": (candidate.get("correlation_keys") or [])[:4],
+                "created_at": candidate.get("created_at"),
+                "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
+                "events": [_trace_event_item(e) for e in events],
+                "signals": [_trace_signal_item(s) for s in signals],
+                "missing_event_ids": [eid for eid in event_ids if eid not in event_by_id][:4],
+                "settlement": settlement,
+                "stages": lifecycle["stages"],
+                "flags": lifecycle["flags"],
+                "band": lifecycle["band"],
+            }
+        )
+    return traces
+
+
 def _lifecycle_warnings(
     *,
     outbox: list[dict[str, Any]],
@@ -784,6 +967,8 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     candidate_by_id = _index_by_id(candidates)
     action_by_id = _index_by_id(actions)
     artifact_by_id = _index_by_id(artifacts)
+    event_by_id = _index_by_id(rows["events"])
+    signal_by_id = _index_by_id(rows["signals"])
     action_for_outbox = _find_action_for_outbox(actions)
 
     active_candidates = [c for c in candidates if c.get("status") == ACTIVE_CANDIDATE_STATUS]
@@ -805,6 +990,12 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     )
     open_outbox = [r for r in outbox if r.get("status") in OPEN_OUTBOX_STATUSES]
     open_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
+    perception_traces = _perception_traces(
+        candidates,
+        event_by_id=event_by_id,
+        signal_by_id=signal_by_id,
+        decisions=decisions,
+    )
 
     outbox_items = [
         _outbox_item(
@@ -846,6 +1037,8 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "actionable_outbox": actionable_outbox,
         "lifecycle_warnings": len(warnings),
         "decisions": len(decisions),
+        "perception_traces": len(perception_traces),
+        "perception_wrong_turns": sum(1 for t in perception_traces if t.get("band") in {"red", "yellow"}),
         "corrupt_lines": corrupt,
     }
 
@@ -882,6 +1075,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             "artifacts": dict(Counter(str(a.get("delivery_state") or "unknown") for a in artifacts)),
             "outbox": dict(Counter(str(o.get("status") or "unknown") for o in outbox)),
         },
+        "perception_traces": perception_traces,
         "top_candidates": [_candidate_item(c) for c in active_candidates[:6]],
         "recent_signals": [_signal_item(s) for s in recent_signals[:12]],
         "threads": [_thread_item(t) for t in visible_threads[:8]],

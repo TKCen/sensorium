@@ -294,6 +294,70 @@
     ));
   }
 
+  function StageChip(props) {
+    const s = props.stage;
+    return h("span", {
+      className: "sx-stage-chip" + (s.reached ? " sx-stage-reached" : " sx-stage-dim"),
+      title: s.detail || s.label,
+    }, s.label);
+  }
+
+  function PerceptionTraceCard(props) {
+    const t = props.trace;
+    const pressure = t.pressure === null || t.pressure === undefined ? "—" : Number(t.pressure).toFixed(2);
+    const stages = t.stages || [];
+    const settlement = t.settlement || null;
+    const flags = t.flags || [];
+    const signals = t.signals || [];
+    const events = t.events || [];
+    const missingIds = t.missing_event_ids || [];
+    const topSignal = signals[0] || null;
+    const decisionBand = settlement && settlement.decision === "PROMOTE_CONSCIOUS" ? "violet"
+      : settlement && settlement.decision === "SAVE" ? "green"
+      : settlement && settlement.decision === "DROP" ? "neutral"
+      : "neutral";
+
+    return h(Card, { className: "sx-card sx-trace-card", style: { borderColor: bandColor(t.band) } },
+      h(CardContent, { className: "sx-card-content" },
+        h("div", { className: "sx-row sx-between" },
+          h("div", null,
+            h("div", { className: "sx-title" }, (t.kind || "candidate") + " " + (t.candidate_id ? t.candidate_id.slice(0, 16) : "—")),
+            h("div", { className: "sx-id" }, t.candidate_id || "—"),
+          ),
+          h("div", { className: "sx-row", style: { gap: "0.4rem", flexWrap: "wrap" } },
+            h(Badge, { variant: "outline", className: "sx-badge sx-pressure" }, pressure),
+            t.status ? h(Badge, { variant: "outline", className: "sx-badge" }, t.status) : null,
+          ),
+        ),
+        h("div", { className: "sx-stage-strip" },
+          stages.map(function (s, i) { return h(StageChip, { key: s.key || String(i), stage: s }); }),
+        ),
+        t.summary ? h("p", { className: "sx-summary" }, t.summary) : null,
+        settlement ? h("div", { className: "sx-trace-settlement" },
+          h("span", { className: "sx-trace-decision", style: { color: bandColor(decisionBand) } }, settlement.decision || "unresolved"),
+          settlement.reason ? h("span", { className: "sx-muted" }, settlement.reason) : null,
+        ) : null,
+        (settlement && (settlement.intake_task_id || settlement.review_task_id || settlement.conscious_task_id)) ? h("div", { className: "sx-meta" },
+          settlement.intake_task_id ? h("span", null, "intake: ", settlement.intake_task_id.slice(0, 20)) : null,
+          settlement.review_task_id ? h("span", null, "review: ", settlement.review_task_id.slice(0, 20)) : null,
+          settlement.conscious_task_id ? h("span", null, "conscious: ", settlement.conscious_task_id.slice(0, 20)) : null,
+        ) : null,
+        h("div", { className: "sx-meta" },
+          h("span", null, "signals: ", signals.length),
+          h("span", null, "events: ", events.length),
+          t.updated_at ? h("span", null, "updated: ", timeText(t.updated_at)) : null,
+        ),
+        topSignal ? h("p", { className: "sx-summary sx-muted", style: { fontSize: "0.8rem" } }, "signal: ", topSignal.summary || topSignal.kind || "—") : null,
+        missingIds.length ? h("p", { className: "sx-muted", style: { fontSize: "0.78rem" } }, "missing events: ", missingIds.join(", ")) : null,
+        flags.length ? h("div", { className: "sx-ref-row" },
+          flags.map(function (f) {
+            return h(Pill, { key: f, band: (t.band === "red" || t.band === "yellow") ? t.band : undefined }, f);
+          }),
+        ) : null,
+      ),
+    );
+  }
+
   function WarningCard(props) {
     const w = props.warning;
     return h(Card, { className: "sx-card sx-warning-card", style: { borderColor: bandColor(w.band) } }, h(CardContent, { className: "sx-card-content" },
@@ -343,6 +407,8 @@
     const warnings = data && data.lifecycle_warnings ? data.lifecycle_warnings : [];
     const topCandidates = data && data.top_candidates ? data.top_candidates : [];
     const recentSignals = data && data.recent_signals ? data.recent_signals : [];
+    const perceptionTraces = data && data.perception_traces ? data.perception_traces : [];
+    const wrongTurns = counts.perception_wrong_turns || 0;
     const importantCount = (counts.lifecycle_warnings || 0) + (counts.active_candidates || 0) + openConscious + openSubconscious + openIntake;
     const quiet = importantCount === 0;
 
@@ -356,6 +422,7 @@
             h(Pill, { band: quiet ? "green" : "yellow", strong: true }, quiet ? "quiet" : plural(importantCount, "item") + (importantCount === 1 ? " needs attention" : " need attention")),
             h(Pill, { band: "violet" }, "metrics samples " + (metrics.series_count || 0)),
             h(Pill, null, "fresh " + timeText(data && data.state_mtime)),
+            wrongTurns > 0 ? h(Pill, { band: "yellow" }, plural(wrongTurns, "wrong turn")) : null,
           ),
         ),
         h("div", { className: "sx-actions" },
@@ -391,6 +458,15 @@
               h(MiniTrend, { title: "Durable / review", subtitle: "higher is better", series: series, path: "derived.durable_decisions_per_conscious_review_24h", lowerIsBetter: false, color: "#eab308" }),
             ),
           ),
+        ),
+        h(Section, { title: "Perception trace", subtitle: "Recent candidate lifecycle: what was noticed, what Subconscious decided, and where it landed." },
+          perceptionTraces.length ? h("div", { className: "sx-trace-grid" },
+            perceptionTraces.slice().sort(function (a, b) {
+              const aBad = a.band === "red" ? 0 : a.band === "yellow" ? 1 : 2;
+              const bBad = b.band === "red" ? 0 : b.band === "yellow" ? 1 : 2;
+              return aBad - bBad;
+            }).map(function (t) { return h(PerceptionTraceCard, { key: t.candidate_id || String(Math.random()), trace: t }); }),
+          ) : h(Empty, { text: "No perception traces yet." }),
         ),
         h("div", { className: "sx-drill-stack" },
           h(DrillDown, { title: "Lifecycle warnings", badge: String(counts.lifecycle_warnings ?? 0), band: counts.lifecycle_warnings ? "yellow" : "green" },
