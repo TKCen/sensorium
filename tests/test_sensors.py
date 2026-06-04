@@ -484,7 +484,14 @@ class TestKanbanPressure:
         con.execute("CREATE TABLE tasks (id TEXT, status TEXT, priority INTEGER, consecutive_failures INTEGER, last_heartbeat_at INTEGER)")
         con.executemany(
             "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
-            [("t1", "ready", 100, 0, None), ("t2", "running", 50, 0, int(time.time()) - 9999), ("t3", "failed", 10, 3, None)],
+            [
+                ("t1", "ready", 100, 0, None),
+                ("t2", "running", 50, 0, int(time.time()) - 9999),
+                ("t3", "failed", 10, 3, None),
+                ("t4", "archived", 0, 3, None),
+                ("t5", "done", 0, 2, None),
+                ("t6", "blocked", 0, 1, None),
+            ],
         )
         con.commit()
         con.close()
@@ -494,7 +501,8 @@ class TestKanbanPressure:
         assert sample["board_count"] == 1
         assert sample["status_counts"]["ready"] == 1
         assert sample["status_counts"]["running"] == 1
-        assert sample["failed_tasks"] == 1
+        assert sample["failed_tasks"] == 2
+        assert sample["blocked_tasks"] == 1
         assert sample["stale_running_tasks"] == 1
         assert "title" not in sample
         assert "body" not in sample
