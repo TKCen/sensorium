@@ -165,6 +165,12 @@ class TestApplyKanbanSettlement:
     def test_constants_consistent(self):
         assert set(DECISION_TO_CANDIDATE_STATUS) == VALID_SETTLEMENT_DECISIONS
 
+    def test_suppressed_reviewer_wording_infers_drop(self):
+        task = {
+            "result": "Decision: SUPPRESSED\nreason: duplicate candidate already handled",
+        }
+        assert infer_kanban_settlement_decision(task) == "DROP"
+
     def test_invalid_decision_rejected(self, store):
         result = apply_kanban_settlement(store, decision="MAYBE", candidate_id="cand_1")
         assert result["action"] == "invalid_decision"
@@ -505,6 +511,21 @@ class TestCompletedIntakeSettlementRecovery:
 
     def test_unreviewed_open_intake_does_not_become_gap(self):
         task = self._intake_task(status="ready", comment="", summary="")
+        plan = plan_reviewed_open_intake_settlements(
+            [task],
+            decisions=[],
+            active_candidate_ids={"cand_dash1"},
+        )
+        assert plan["records"] == []
+        assert plan["gaps"] == []
+        assert plan["cleanup_task_ids"] == []
+
+    def test_sticky_block_comment_alone_does_not_make_open_intake_a_gap(self):
+        task = self._intake_task(
+            status="ready",
+            comment="BLOCKED: Sensorium substrate intake: sticky-blocked so only Subconscious review may settle it.",
+            summary="",
+        )
         plan = plan_reviewed_open_intake_settlements(
             [task],
             decisions=[],

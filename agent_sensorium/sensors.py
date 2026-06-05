@@ -1838,7 +1838,15 @@ def kanban_pressure_sample(*, board_paths: list[str] | None = None, now_epoch: i
                 status = str(row["status"] or "unknown")
                 status_counts[status] = status_counts.get(status, 0) + 1
                 total += 1
-                if status in {"failed", "crashed", "timed_out"} or int(row["consecutive_failures"] or 0) > 0:
+                # Consecutive failures are historical on terminal rows.  A task
+                # that is already done/archived should not keep paging kanban
+                # pressure forever just because it crashed before eventual
+                # settlement or archival.  Keep active blocked/ready/running
+                # rows with failures visible, because those are live wedges.
+                if status not in {"done", "archived"} and (
+                    status in {"failed", "crashed", "timed_out"}
+                    or int(row["consecutive_failures"] or 0) > 0
+                ):
                     failed += 1
                 if status in {"blocked", "stuck"}:
                     blocked += 1
