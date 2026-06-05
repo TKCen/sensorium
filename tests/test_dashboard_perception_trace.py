@@ -196,6 +196,38 @@ def test_dropped_candidate_yields_yellow_band_dropped_flag(tmp_path, monkeypatch
     assert trace["settlement"]["decision"] == "DROP"
 
 
+def test_reviewed_candidate_without_settlement_is_visible_gap(tmp_path, monkeypatch):
+    """A reviewed candidate with no settlement receipt is not active, but still a yellow trace gap."""
+    root = tmp_path / "sensorium" / "demo"
+
+    _append_jsonl(root / "events.jsonl", {
+        "id": "evt_reviewed_gap",
+        "kind": "relational_salience",
+        "summary": "Review happened but no settlement was propagated",
+        "strength": 0.7,
+        "source_signal_ids": [],
+        "ts": "2026-06-01T08:00:00Z",
+    })
+    _append_jsonl(root / "candidates.jsonl", {
+        "id": "cand_reviewed_gap",
+        "kind": "relational_salience",
+        "status": "reviewed",
+        "pressure": 0.7,
+        "summary": "Reviewed candidate missing canonical settlement metadata",
+        "event_ids": ["evt_reviewed_gap"],
+        "created_at": "2026-06-01T08:00:00Z",
+        "updated_at": "2026-06-01T08:30:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.snapshot(instance="demo"))
+
+    trace = data["perception_traces"][0]
+    assert "reviewed_without_settlement" in trace["flags"]
+    assert trace["band"] == "yellow"
+    assert trace["settlement"] is None
+
+
 def test_bound_ordering_more_than_8_candidates_returns_8_newest_first(tmp_path, monkeypatch):
     """Create 10 candidates with distinct updated_at; assert max 8 returned newest-first."""
     root = tmp_path / "sensorium" / "demo"

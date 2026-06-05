@@ -721,10 +721,13 @@ def _trace_lifecycle(
     pending = status == ACTIVE_CANDIDATE_STATUS and pressure >= DISPATCH_PRESSURE_THRESHOLD and not intake
     if pending:
         flags.append("pending_unsettled")
+    reviewed_without_settlement = status == "reviewed" and not settled
+    if reviewed_without_settlement:
+        flags.append("reviewed_without_settlement")
 
     if settlement.get("unresolved") or "no_source_events" in flags:
         band = "red"
-    elif status in DROP_CANDIDATE_STATUSES or pending:
+    elif status in DROP_CANDIDATE_STATUSES or pending or reviewed_without_settlement:
         band = "yellow"
     elif decision in {"SAVE", "PROMOTE_CONSCIOUS"}:
         band = "green"
