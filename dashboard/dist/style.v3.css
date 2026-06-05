@@ -418,6 +418,67 @@
   font-size: 0.76rem;
 }
 
+.sx-trace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(26rem, 100%), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.sx-trace-card {
+  border-left-width: 2px !important;
+}
+
+.sx-stage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.sx-stage-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 510;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.sx-stage-reached {
+  background: rgba(113, 112, 255, 0.18);
+  border-color: rgba(113, 112, 255, 0.45);
+  color: #a8a7ff;
+}
+
+.sx-stage-dim {
+  background: rgba(255, 255, 255, 0.025);
+  border-color: var(--sx-border-soft);
+  color: var(--sx-muted);
+  opacity: 0.55;
+}
+
+.sx-trace-settlement {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.65rem;
+  align-items: baseline;
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.45rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--sx-border-soft);
+}
+
+.sx-trace-decision {
+  font-weight: 510;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 @media (max-width: 1020px) {
   .sx-focus-grid {
     grid-template-columns: 1fr;

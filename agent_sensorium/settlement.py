@@ -307,7 +307,7 @@ def apply_settlement_record(store: SensoriumStore, record: dict) -> dict:
 
 CLOSED_INTAKE_STATUSES = {"done", "archived", "completed"}
 _SETTLEMENT_DECISION_RE = re.compile(
-    r"(?:\bdecision\s*:\s*|\bsettled\s+as\s+)?\b(DROP|SAVE|PROMOTE_CONSCIOUS|PROMOTE)\b",
+    r"(?:\bdecision\s*:\s*|\bsettled\s+as\s+)?\b(DROP|SAVE|PROMOTE_CONSCIOUS|PROMOTE|SUPPRESSED|SUPPRESS)\b",
     re.IGNORECASE,
 )
 
@@ -316,6 +316,8 @@ def _normalise_decision_token(token: str) -> str:
     upper = (token or "").upper()
     if upper == "PROMOTE":
         return "PROMOTE_CONSCIOUS"
+    if upper in {"SUPPRESSED", "SUPPRESS"}:
+        return "DROP"
     return upper
 
 
@@ -356,6 +358,8 @@ def _task_texts_for_decision(task: dict) -> list[str]:
         if isinstance(comment, dict):
             body = comment.get("body")
             if isinstance(body, str) and body.strip():
+                if body.startswith("BLOCKED: Sensorium substrate intake:"):
+                    continue
                 texts.append(body)
     for run in task.get("runs") or []:
         if isinstance(run, dict):
