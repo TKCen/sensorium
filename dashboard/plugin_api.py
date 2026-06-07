@@ -748,7 +748,7 @@ def _perception_traces(
     """Assemble bounded, read-only candidate lifecycle traces.
 
     Each trace stitches the inner movement back together so a wrong turn is
-    legible: what Sera noticed (signals/events), what became a candidate, what
+    legible: what the system noticed (signals/events), what became a candidate, what
     Subconscious decided in Kanban, the compact evidence/reason, and where it
     settled. Pure: it only reads already-loaded rows and never mutates state.
     """
@@ -908,6 +908,71 @@ def _health(
         "last_dispatch_action": last_dispatch.get("action"),
         "last_dispatch_reason": _truncate(last_dispatch.get("reason"), 120),
     }
+
+
+def _view_card(view_id: str, label: str, summary: str, count: int, band: str) -> dict[str, Any]:
+    """Compact dashboard view metadata; read-only navigation, not control."""
+    return {
+        "id": view_id,
+        "label": label,
+        "summary": summary,
+        "count": int(count or 0),
+        "band": band,
+    }
+
+
+def _dashboard_views(counts: dict[str, int], *, recent_signals: int) -> list[dict[str, Any]]:
+    """Create posture-aligned dashboard views from already-computed counts.
+
+    The views reflect the active-session salience policy: immediate work stays in
+    Overview, retained compact residue and interpretation traces live in
+    Perception, substrate state lives in Substrate, and possible motor/output
+    material is isolated in Actuators. This keeps the cockpit from becoming one
+    flat JSONL pile while preserving the no-mutation safety boundary.
+    """
+    overview_count = (
+        counts.get("lifecycle_warnings", 0)
+        + counts.get("active_candidates", 0)
+        + counts.get("open_actions", 0)
+        + counts.get("actionable_outbox", 0)
+    )
+    overview_band = "red" if counts.get("corrupt_lines", 0) else ("yellow" if overview_count else "green")
+    perception_count = counts.get("perception_wrong_turns", 0) + recent_signals
+    perception_band = "yellow" if counts.get("perception_wrong_turns", 0) else ("green" if recent_signals else "neutral")
+    substrate_count = counts.get("active_candidates", 0) + counts.get("active_threads", 0) + counts.get("decisions", 0)
+    substrate_band = "yellow" if counts.get("active_candidates", 0) else ("green" if counts.get("active_threads", 0) else "neutral")
+    actuator_count = counts.get("open_actions", 0) + counts.get("prepared_outbox", 0) + counts.get("held_artifacts", 0)
+    actuator_band = "yellow" if counts.get("open_actions", 0) or counts.get("actionable_outbox", 0) else ("green" if actuator_count else "neutral")
+    return [
+        _view_card(
+            "overview",
+            "Overview",
+            "Immediate attention pressure, footprint, and efficiency trend.",
+            overview_count,
+            overview_band,
+        ),
+        _view_card(
+            "perception",
+            "Perception",
+            "Compact residue plus signal → event → candidate interpretation trace.",
+            perception_count,
+            perception_band,
+        ),
+        _view_card(
+            "substrate",
+            "Substrate",
+            "Candidates, threads, receipts, and lifecycle state breakdowns.",
+            substrate_count,
+            substrate_band,
+        ),
+        _view_card(
+            "actuators",
+            "Actuators",
+            "Thread actions, outbox pointers, and artifact groups without raw bodies.",
+            actuator_count,
+            actuator_band,
+        ),
+    ]
 
 
 @router.get("/attention")
@@ -1078,6 +1143,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             "artifacts": dict(Counter(str(a.get("delivery_state") or "unknown") for a in artifacts)),
             "outbox": dict(Counter(str(o.get("status") or "unknown") for o in outbox)),
         },
+        "views": _dashboard_views(counts, recent_signals=len(recent_signals[:12])),
         "perception_traces": perception_traces,
         "top_candidates": [_candidate_item(c) for c in active_candidates[:6]],
         "recent_signals": [_signal_item(s) for s in recent_signals[:12]],

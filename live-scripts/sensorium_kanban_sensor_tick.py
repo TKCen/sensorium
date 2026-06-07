@@ -584,9 +584,8 @@ def _compact_event_body(event: dict[str, Any]) -> str:
         )
     if artifact_contract:
         contract_note_parts.append(
-            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
-            "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
-            "do not promote as generic THINK-only review."
+            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the internal conscious_task "
+            "requires a concrete media/artifact choice or explicit HOLD/no-artifact receipt."
         )
     contract_note = ("\n\n" + " ".join(contract_note_parts)) if contract_note_parts else ""
     return (
@@ -701,9 +700,8 @@ def _candidate_intake_body(candidate: dict[str, Any]) -> str:
         )
     if artifact_contract:
         contract_note_parts.append(
-            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the conscious:review task "
-            "must require a concrete media/artifact choice or explicit HOLD/no-artifact receipt; "
-            "do not promote as generic THINK-only review."
+            "Mediated-artifact contract: if PROMOTE_CONSCIOUS, the internal conscious_task "
+            "requires a concrete media/artifact choice or explicit HOLD/no-artifact receipt."
         )
     contract_note = ("\n\n" + " ".join(contract_note_parts)) if contract_note_parts else ""
     return (
@@ -888,11 +886,13 @@ def _review_body(open_intakes: list[dict[str, Any]]) -> str:
         + "\n\nRules:\n"
         "- Inspect cited intake tasks with `hermes kanban --board sensorium show <id>` if needed.\n"
         "- Also inspect the board list for newer open intakes before deciding.\n"
-        "- Do not send messages, schedule crons, start gateways, or create external workers.\n"
+        "- Scope: review/settle Sensorium intakes and create internal conscious_task candidates when warranted.\n"
         "- For DROP/SAVE: comment concise evidence on intake tasks, archive or complete settled intakes.\n"
-        "- For PROMOTE_CONSCIOUS: create exactly one `conscious:review:` task assigned to `default`, preferably with this review as parent, include cited intake IDs and stop condition.\n"
-        "- For intakes whose compact payload includes `conscious_review_contract.type == mediated_presence_artifact_decision`: PROMOTE_CONSCIOUS must create a `conscious:review:` task whose body explicitly requires one of prepare_thread_artifact, offer_choice, choose_silence, decline/block delivery, or HOLD with no-artifact reason. Conscious must use `sensorium_media_gift_decide` when a thread/artifact context exists, or record an explicit review receipt; do not settle the intake as generic SAVE if the artifact/action lane has not been consciously addressed.\n"
-        "- For `attention_policy_review` intakes: this is Sensorium self-improvement evidence, not ordinary noise. Unless an equivalent conscious review is already active, PROMOTE_CONSCIOUS to `default`; Conscious must decide NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, and must record future_tendency_delta, verification_condition, and rollback_condition. Subconscious must not mutate wake behavior directly.\n"
+        "- For PROMOTE_CONSCIOUS: create one internal conscious_task candidate for the bounded Conscious aperture:\n"
+        f"  `python {PLUGIN}/scripts/sensorium_create_conscious_task.py --instance {INSTANCE} --file /tmp/sensorium_conscious_task_<review>.json --json`\n"
+        "  The JSON file contains rationale, event_ids/candidate_ids, optional pressure, and conscious_task {request_type,title,why,expected_decision}. Put the returned data.candidate_id and conscious_task.id in settlement conscious_task_ref as {kind: internal_conscious_task_candidate, candidate_id, conscious_task_id, promoted_at}.\n"
+        "- For intakes whose compact payload includes `conscious_review_contract.type == mediated_presence_artifact_decision`: expected_decision must require prepare_thread_artifact, offer_choice, choose_silence, decline/block delivery, or HOLD with no-artifact reason.\n"
+        "- For `attention_policy_review` intakes: expected_decision must require NO_CHANGE, threshold/coalescing tweak proposal, sensor addition task, priority-map change, memory/skill patch, or HOLD, plus future_tendency_delta, verification_condition, and rollback_condition.\n"
         "- CRITICAL: after deciding, propagate every consumed intake decision back into Sensorium truth by running the settlement CLI once with a JSON list of settlement records:\n"
         f"  `python {PLUGIN}/scripts/sensorium_kanban_settle.py --instance {INSTANCE} --file /tmp/sensorium_settlements_<review>.json --json`\n"
         "  Record shape: {decision: DROP|SAVE|PROMOTE_CONSCIOUS, candidate_id?, event_id?, fingerprint?, correlation_keys?, intake_task_id, review_task_id, conscious_task_ref?, reason}. For Compact candidate payloads, candidate_id is mandatory and should be the primary resolver. For Compact event payloads, use event_id first. Treat settlement_cli_result.no_candidate_match > 0 as unresolved, not settled.\n"
@@ -949,9 +949,9 @@ def _force_canary_event(label: str | None = None, *, conscious: bool = False) ->
         kind = "operator_attention_canary"
         summary = (
             "Operator-requested canary: validate full Sensorium-on-Kanban "
-            "Subconscious promotion into a Conscious review task. This is "
-            "explicit test salience; promote exactly one conscious:review task, "
-            "then the Conscious worker should close it as validation-only."
+            "Subconscious promotion into an internal Conscious task. This is "
+            "explicit test salience; create one internal conscious_task candidate, "
+            "then the bounded aperture should settle it as validation-only."
         )
         keys = ["sensorium-kanban", "architecture-canary", "subconscious-gate", "conscious-promotion"]
     else:

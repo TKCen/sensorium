@@ -234,7 +234,7 @@ def test_generate_advisory_output_uses_cheap_openai_compatible_model():
         config={
             "model_enabled": True,
             "model_provider": "minimax",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M3",
             "model_base_url": "https://api.minimax.io/v1",
             "model_api_key": "test-key",
             "model_timeout_seconds": 7,
@@ -244,7 +244,7 @@ def test_generate_advisory_output_uses_cheap_openai_compatible_model():
 
     assert output["action"] == "SAVE"
     assert requests[0]["url"] == "https://api.minimax.io/v1/chat/completions"
-    assert requests[0]["payload"]["model"] == "MiniMax-M2.5"
+    assert requests[0]["payload"]["model"] == "MiniMax-M3"
     assert requests[0]["payload"]["response_format"] == {"type": "json_object"}
     assert requests[0]["headers"]["Authorization"] == "Bearer test-key"
     assert requests[0]["timeout"] == 7
