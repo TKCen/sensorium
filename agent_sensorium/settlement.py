@@ -138,7 +138,21 @@ def _normalize_conscious_task_ref(ref: Any) -> dict:
     if not isinstance(ref, dict):
         return {}
     out: dict[str, str] = {}
-    for key in ("task_id", "thread_id", "board", "kanban_task_id", "promoted_at"):
+    # Preserve both legacy Kanban task refs and the newer internal
+    # conscious_task candidate refs. Conscious promotion is no longer required
+    # to mean "spawn a conscious:review Kanban worker"; a settlement may point
+    # at an internal candidate/thread that the bounded Conscious aperture will
+    # inspect later.
+    for key in (
+        "task_id",
+        "thread_id",
+        "board",
+        "kanban_task_id",
+        "candidate_id",
+        "conscious_task_id",
+        "kind",
+        "promoted_at",
+    ):
         value = ref.get(key)
         if isinstance(value, str) and value.strip():
             out[key] = truncate_text(value, 200)

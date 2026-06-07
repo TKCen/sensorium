@@ -73,7 +73,7 @@ def test_subconscious_model_flag_enables_model_lane_without_external_side_effect
     out = json.loads(proc.stdout)
     assert out["success"] is True
     assert out["subconscious_advisory"]["action"] == "model_unavailable"
-    assert out["subconscious_advisory"]["model"] == "MiniMax-M2.5"
+    assert out["subconscious_advisory"]["model"] == "MiniMax-M3"
     assert store.read_jsonl("candidates") == []
     assert store.read_jsonl("threads") == []
 

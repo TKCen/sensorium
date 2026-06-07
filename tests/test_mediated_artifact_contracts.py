@@ -108,7 +108,7 @@ def test_kanban_event_and_candidate_bodies_embed_artifact_contract():
     for body in (candidate_body, event_body):
         assert "Mediated-artifact contract" in body
         assert "conscious_review_contract" in body
-        assert "do not promote as generic THINK-only review" in body
+        assert "requires a concrete media/artifact choice or explicit HOLD/no-artifact receipt" in body
         marker = "Compact candidate payload:" if "Compact candidate payload:" in body else "Compact event payload:"
         payload_text = body.split(marker, 1)[1]
         payload, _ = json.JSONDecoder().raw_decode(payload_text[payload_text.index("{"):])

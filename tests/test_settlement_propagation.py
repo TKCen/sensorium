@@ -256,6 +256,34 @@ class TestApplyKanbanSettlement:
         assert meta["conscious_task_ref"]["task_id"] == "kt_conscious_1"
         assert meta["conscious_task_ref"]["thread_id"] == "kt_thread_1"
 
+    def test_promote_conscious_preserves_internal_candidate_ref(self, store):
+        cand = _make_candidate()
+        store.append_jsonl("candidates", cand)
+        conscious_ref = {
+            "candidate_id": "cand_internal_conscious",
+            "conscious_task_id": "ctask_internal_1",
+            "kind": "internal_conscious_task_candidate",
+            "promoted_at": "2026-06-07T14:15:00Z",
+            "ignored_extra": "not persisted",
+        }
+        result = apply_kanban_settlement(
+            store,
+            decision="PROMOTE_CONSCIOUS",
+            candidate_id="cand_dash1",
+            intake_task_id="kt_intake_internal",
+            review_task_id="kt_review_internal",
+            conscious_task_ref=conscious_ref,
+            reason="promote into bounded Conscious aperture",
+        )
+        assert result["action"] == "settled"
+        candidates = store.read_jsonl("candidates")
+        meta = candidates[0]["kanban_settlement"]
+        ref = meta["conscious_task_ref"]
+        assert ref["candidate_id"] == "cand_internal_conscious"
+        assert ref["conscious_task_id"] == "ctask_internal_1"
+        assert ref["kind"] == "internal_conscious_task_candidate"
+        assert "ignored_extra" not in ref
+
     def test_promote_conscious_is_idempotent(self, store):
         cand = _make_candidate()
         store.append_jsonl("candidates", cand)

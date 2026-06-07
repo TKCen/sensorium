@@ -63,7 +63,7 @@ DEFAULT_ADVISORY_CONFIG: dict[str, Any] = {
     "default_pressure": 0.66,
     "model_enabled": False,
     "model_provider": "minimax",
-    "model": "MiniMax-M2.5",
+    "model": "MiniMax-M3",
     "model_base_url": "https://api.minimax.io/v1",
     "model_api_key_env": "MINIMAX_API_KEY",
     "model_api_key": None,

@@ -100,3 +100,42 @@ def test_snapshot_separates_canonical_freshness_from_legacy_state_latest(tmp_pat
     assert freshness["canonical_latest_mtime"] != freshness["legacy_state_latest"]["mtime"]
     reset_at = data["budgets"]["dispatch"]["reset_at"]
     assert reset_at != "2026-05-28T20:27:09Z"
+
+
+def test_snapshot_exposes_posture_aligned_dashboard_views(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    _append_jsonl(root / "signals" / "inbox.jsonl", {
+        "id": "sig_residue",
+        "kind": "design_insight",
+        "summary": "Compact unresolved posture residue",
+        "ts": "2026-06-05T07:30:00Z",
+    })
+    _append_jsonl(root / "candidates.jsonl", {
+        "id": "cand_residue",
+        "kind": "design_insight",
+        "status": "candidate",
+        "pressure": 0.8,
+        "summary": "Needs later review",
+        "event_ids": [],
+        "created_at": "2026-06-05T07:31:00Z",
+    })
+    _append_jsonl(root / "thread_actions.jsonl", {
+        "id": "act_open",
+        "status": "prepared",
+        "title": "Review retained residue",
+        "updated_at": "2026-06-05T07:32:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+
+    data = asyncio.run(mod.snapshot(instance="demo"))
+
+    views = {view["id"]: view for view in data["views"]}
+    assert list(views) == ["overview", "perception", "substrate", "actuators"]
+    assert views["overview"]["band"] == "yellow"
+    assert views["overview"]["count"] >= 2
+    assert views["perception"]["label"] == "Perception"
+    assert views["perception"]["count"] >= 1
+    assert "Compact residue" in views["perception"]["summary"]
+    assert views["substrate"]["count"] >= 1
+    assert views["actuators"]["band"] == "yellow"
