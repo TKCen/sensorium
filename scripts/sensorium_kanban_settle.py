@@ -21,9 +21,14 @@ Input shape (single record or list-of-records, JSON):
         "intake_task_id": "kanban_task_id",
         "review_task_id": "kanban_task_id",
         "conscious_task_ref": {            # required only on PROMOTE_CONSCIOUS
+            # Legacy Kanban-worker promotion shape:
             "task_id":   "kanban_task_id",
             "thread_id": "sth_...",
-            "board":     "sensorium"
+            "board":     "sensorium",
+            # Internal Conscious-aperture promotion shape:
+            "candidate_id": "cand_internal_conscious",
+            "conscious_task_id": "ctask_...",
+            "kind": "internal_conscious_task_candidate"
         },
         "reason": "short evidence string"
     }
