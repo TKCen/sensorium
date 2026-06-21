@@ -96,6 +96,7 @@ class SensoriumStore:
         (self._root / "archive").mkdir(exist_ok=True)
         (self._root / "locks").mkdir(exist_ok=True)
         (self._root / "sensors").mkdir(exist_ok=True)
+        (self._root / "inner_life").mkdir(exist_ok=True)
 
     def read_sensor_registry(self) -> dict:
         path = self._root / "sensors" / "registry.json"
@@ -111,6 +112,97 @@ class SensoriumStore:
     def write_sensor_registry(self, registry: dict) -> None:
         self.ensure_dirs()
         atomic_write_json(self._root / "sensors" / "registry.json", registry)
+
+    def read_sensor_edges(self) -> dict:
+        path = self._root / "sensors" / "edges.json"
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def write_sensor_edges(self, edges: dict) -> None:
+        self.ensure_dirs()
+        atomic_write_json(self._root / "sensors" / "edges.json", edges)
+
+    def read_block_run_state(self, block_id: str) -> dict:
+        path = self._root / "sensors" / "run_state" / f"{block_id}.json"
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def write_block_run_state(self, block_id: str, state: dict) -> None:
+        path = self._root / "sensors" / "run_state" / f"{block_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, state)
+
+    def append_dampener_effect(self, effect: dict) -> None:
+        """Append-only audit trace of a dampener_effect record (inner_life/dampeners.jsonl).
+
+        Reversible/derived telemetry only -- never the durable signal/event/
+        candidate/decision spine.
+        """
+        self.ensure_dirs()
+        path = self._root / "inner_life" / "dampeners.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(effect, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_parent(path)
+
+    def read_dampener_effects(self, limit: int | None = None) -> list[dict]:
+        path = self._root / "inner_life" / "dampeners.jsonl"
+        if not path.exists():
+            return []
+        results: list[dict] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if limit is not None:
+            results = results[-limit:]
+        return results
+
+    def append_blocker_effect(self, effect: dict) -> None:
+        """Append-only audit trace of a blocker_effect record (inner_life/blockers.jsonl)."""
+        self.ensure_dirs()
+        path = self._root / "inner_life" / "blockers.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(effect, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_parent(path)
+
+    def read_blocker_effects(self, limit: int | None = None) -> list[dict]:
+        path = self._root / "inner_life" / "blockers.jsonl"
+        if not path.exists():
+            return []
+        results: list[dict] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if limit is not None:
+            results = results[-limit:]
+        return results
 
     def read_sensor_policy(self) -> dict:
         path = self._root / "sensors" / "policy.json"

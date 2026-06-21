@@ -93,7 +93,7 @@ def register(ctx) -> None:
         action = str(args.get("action") or "status").strip().lower()
         instance = _arg_instance(args)
         state_dir = args.get("state_dir")
-        surface = str(args.get("surface") or "local").strip() or "local"
+        surface = str(args.get("surface") or kw.get("platform") or "local").strip() or "local"
         text = str(args.get("text") or "").strip()
         target_id = str(args.get("id") or "latest").strip() or "latest"
 
@@ -125,6 +125,7 @@ def register(ctx) -> None:
             except (TypeError, ValueError):
                 strength = 0.75
             strength = max(0.0, min(1.0, strength))
+            allowed_surfaces = ["local"] if surface == "local" else ["local", surface]
             signal = {
                 "sensor": "active_session",
                 "source": "foreground_tool",
@@ -132,7 +133,7 @@ def register(ctx) -> None:
                 "summary": text[:500],
                 "strength_hint": strength,
                 "sensitivity": "private",
-                "allowed_surfaces": [surface],
+                "allowed_surfaces": allowed_surfaces,
                 "correlation_keys": ["active-session", f"surface:{surface}", kind],
             }
             return handle_sensorium_ingest_signal(signal=signal, instance=instance, state_dir=state_dir)

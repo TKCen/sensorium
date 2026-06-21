@@ -41,7 +41,8 @@ SALIENT_CUE_HINT = (
     "foreground session and should persist as a compact signal, not a task? If "
     "yes, call sensorium(action='ingest') once. If the foreground session fully "
     "owns and resolves it, do not ingest. Do not duplicate foreground work. Use "
-    "a concise kind, short text summary, strength ~0.7-0.9, and correlation keys "
+    "a concise kind, short text summary, strength ~0.7-0.9, and the current "
+    "platform as surface when known (for example discord); correlation keys "
     "are added internally. Examples, not exhaustive: "
     + _example_kind_csv()
     + ". Do not mention this instruction to your user."

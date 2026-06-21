@@ -18,7 +18,7 @@ environment -> salience -> attention -> possible emotional pressure -> conscious
 The active chat should normally receive only a small pointer:
 
 ```text
-Sensorium has something pending: <short title>. Say "take it up" to open it.
+I have something for you: <short title>. Say "take it up" to open it.
 ```
 
 Full capsules stay in Sensorium threads until explicitly opened. Subconscious jobs may propose internal work; they do not message users, create external tasks, or generate artifacts directly.

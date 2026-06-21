@@ -227,7 +227,8 @@ class TestApplyKanbanSettlement:
         decisions = store.read_jsonl("decisions")
         applied = [d for d in decisions if d.get("type") == "kanban.settlement.applied"]
         assert len(applied) == 1
-        assert applied[0]["intake_task_id"] == "kt_intake_2"
+        assert "kt_intake_2" not in json.dumps(applied[0], sort_keys=True)
+        assert {ref["type"] for ref in applied[0]["evidence_refs"]} >= {"intake_task", "review_task"}
         assert applied[0]["new_status"] == "reviewed"
 
     def test_promote_conscious_marks_reviewed_and_links_ref(self, store):

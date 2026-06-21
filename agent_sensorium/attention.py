@@ -7,6 +7,8 @@ review surface filtered by surface and sensitivity policy. Never mutates state.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import re
 
 from .config import load_instance_config, visible_on_surface
 from .schemas import truncate_text, utc_now_iso
@@ -17,6 +19,46 @@ THREAD_DECISIONS: dict[str, list[str]] = {
     "dormant": ["open", "hold", "close", "archive", "mark_reviewed"],
     "held": ["open", "resume", "close", "archive", "mark_reviewed"],
 }
+
+_SAFE_HASH_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*#[0-9a-f]{16}$")
+_SAFE_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_PRIVATE_MARKER_RE = re.compile(
+    r"sk-|api[_-]?key|private[_-]?key|password|passwd|oauth|bearer|secret|token|raw[_ -]?transcript|raw[_ -]?log|do[_ -]?not[_ -]?leak",
+    re.I,
+)
+
+
+def _opaque_label(prefix: str, value: object) -> str:
+    digest = hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{prefix}#{digest}"
+
+
+def _safe_text(prefix: str, value: object, *, limit: int = 160, atom_only: bool = False) -> str:
+    text = truncate_text(str(value or "").replace("\n", " ").strip(), limit)
+    if not text:
+        return ""
+    if _SAFE_HASH_LABEL_RE.fullmatch(text):
+        return text
+    if _PRIVATE_MARKER_RE.search(text) or (atom_only and not _SAFE_ATOM_RE.fullmatch(text)):
+        return _opaque_label(prefix, value)
+    return text
+
+
+def _safe_atom(prefix: str, value: object, *, limit: int = 96) -> str:
+    return _safe_text(prefix, value, limit=limit, atom_only=True)
+
+
+def _safe_atom_list(prefix: str, values: object, *, limit: int = 8) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        label = _safe_atom(prefix, value)
+        if label:
+            out.append(label)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _parse_ts(ts: str | None) -> datetime | None:
@@ -49,17 +91,17 @@ def _freshness(updated_at: str | None, now: datetime) -> str:
 
 def _candidate_item(candidate: dict, now: datetime) -> dict:
     return {
-        "id": candidate.get("id", ""),
+        "id": _safe_atom("candidate", candidate.get("id", "")),
         "type": "candidate",
-        "status": candidate.get("status", "candidate"),
-        "kind": candidate.get("kind", ""),
-        "title": truncate_text(candidate.get("summary", ""), 100),
-        "summary": truncate_text(candidate.get("summary", ""), 200),
+        "status": _safe_atom("candidate_status", candidate.get("status", "candidate")),
+        "kind": _safe_atom("candidate_kind", candidate.get("kind", "")),
+        "title": _safe_text("candidate_title", candidate.get("summary", ""), limit=100),
+        "summary": _safe_text("candidate_summary", candidate.get("summary", ""), limit=200),
         "pressure": candidate.get("pressure", 0),
         "age_hours": _age_hours(candidate.get("created_at"), now),
         "freshness": _freshness(candidate.get("updated_at") or candidate.get("created_at"), now),
-        "sensitivity": candidate.get("sensitivity", "private"),
-        "allowed_surfaces": candidate.get("allowed_surfaces", []),
+        "sensitivity": _safe_atom("sensitivity", candidate.get("sensitivity", "private")),
+        "allowed_surfaces": _safe_atom_list("surface", candidate.get("allowed_surfaces", [])),
         "source_refs": [],
         "allowed_decisions": list(CANDIDATE_DECISIONS),
         "created_at": candidate.get("created_at", ""),
@@ -69,25 +111,26 @@ def _candidate_item(candidate: dict, now: datetime) -> dict:
 
 def _thread_item(thread: dict, now: datetime) -> dict:
     task = thread.get("conscious_task") or {}
-    status = thread.get("status", "dormant")
+    status = str(thread.get("status", "dormant") or "dormant")
+    safe_status = status if status in THREAD_DECISIONS else _safe_atom("thread_status", status)
     continuity = thread.get("continuity_summary") or []
     summary = task.get("why", "") or (continuity[0] if continuity else "")
     return {
-        "id": thread.get("id", ""),
+        "id": _safe_atom("thread", thread.get("id", "")),
         "type": "thread",
-        "status": status,
-        "kind": task.get("request_type", ""),
-        "title": truncate_text(task.get("title", ""), 100),
-        "summary": truncate_text(summary, 200),
+        "status": safe_status,
+        "kind": _safe_atom("request_type", task.get("request_type", "")),
+        "title": _safe_text("thread_title", task.get("title", ""), limit=100),
+        "summary": _safe_text("thread_summary", summary, limit=200),
         "pressure": None,
         "age_hours": _age_hours(thread.get("created_at"), now),
         "freshness": _freshness(thread.get("updated_at") or thread.get("created_at"), now),
-        "sensitivity": thread.get("sensitivity", "private"),
-        "allowed_surfaces": thread.get("allowed_surfaces", []),
-        "source_refs": thread.get("source_refs", []),
-        "origin_candidate_id": thread.get("origin_candidate_id", ""),
-        "hold_reason": thread.get("hold_reason", ""),
-        "resume_trigger": thread.get("resume_trigger", ""),
+        "sensitivity": _safe_atom("sensitivity", thread.get("sensitivity", "private")),
+        "allowed_surfaces": _safe_atom_list("surface", thread.get("allowed_surfaces", [])),
+        "source_refs": _safe_atom_list("source_ref", thread.get("source_refs", [])),
+        "origin_candidate_id": _safe_atom("candidate", thread.get("origin_candidate_id", "")),
+        "hold_reason": _safe_text("hold_reason", thread.get("hold_reason", ""), limit=160),
+        "resume_trigger": _safe_text("resume_trigger", thread.get("resume_trigger", ""), limit=160),
         "allowed_decisions": list(THREAD_DECISIONS.get(status, [])),
         "created_at": thread.get("created_at", ""),
         "updated_at": thread.get("updated_at", ""),

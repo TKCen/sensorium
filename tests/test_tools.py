@@ -285,6 +285,43 @@ class TestSensoriumIngestEvent:
         assert decisions[0]["type"] == "candidate.coalesced"
         assert decisions[0]["candidate_id"] == first["data"]["candidate_id"]
 
+    def test_generic_active_session_keys_do_not_coalesce_distinct_corrections(self, state_dir):
+        first_event = {
+            "id": "evt_generic_1",
+            "ts": "2026-06-10T05:00:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "explicit_correction",
+            "summary": "Codex weekly budget near reset should not be treated as yellow",
+            "strength": 0.82,
+            "correlation_keys": ["active-session", "surface:discord", "explicit_correction"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local", "discord"],
+        }
+        second_event = {
+            "id": "evt_generic_2",
+            "ts": "2026-06-10T05:05:00Z",
+            "type": "sensor.event.promoted",
+            "kind": "explicit_correction",
+            "summary": "Sensorium should leave meaningful salience open for later",
+            "strength": 0.86,
+            "correlation_keys": ["active-session", "surface:discord", "explicit_correction"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local", "discord"],
+        }
+
+        first = json.loads(handle_sensorium_ingest_event(event=first_event, instance="test", state_dir=state_dir))
+        second = json.loads(handle_sensorium_ingest_event(event=second_event, instance="test", state_dir=state_dir))
+
+        assert first["success"] is True
+        assert second["success"] is True
+        assert second["data"]["coalesced"] is False
+        assert second["data"]["candidate_id"] != first["data"]["candidate_id"]
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        candidates = store.read_jsonl("candidates")
+        assert len(candidates) == 2
+        assert {c["summary"] for c in candidates} == {first_event["summary"], second_event["summary"]}
+
 
 class TestSensoriumDispatchOnce:
     def test_dispatch_dry_run_via_tool(self, state_dir):

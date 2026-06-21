@@ -22,6 +22,10 @@ DEFAULT_POINTER_CONFIG: dict = {
     # visible thread was recently injected, still return one door handle so
     # the operator can pick it up instead of blacking out attention for hours.
     "fallback_when_all_visible_on_cooldown": True,
+    # Threads are the preferred doorway, but active candidates must not vanish
+    # from the live context just because no thread has been minted yet. This is
+    # deliberately a shallow pointer to the attention inbox, not a capsule leak.
+    "candidate_fallback_enabled": True,
 }
 
 
@@ -34,15 +38,31 @@ def _parse_utc(ts: str | None) -> datetime | None:
         return None
 
 
-def _recent_pointer_receipts(store: SensoriumStore, thread_id: str) -> list[dict]:
-    return [
-        d for d in store.read_jsonl("decisions")
-        if d.get("type") == "pointer.presented" and d.get("thread_id") == thread_id
-    ]
+def _recent_pointer_receipts(
+    store: SensoriumStore,
+    *,
+    thread_id: str = "",
+    candidate_id: str = "",
+) -> list[dict]:
+    rows = [d for d in store.read_jsonl("decisions") if d.get("type") == "pointer.presented"]
+    if thread_id:
+        return [d for d in rows if d.get("thread_id") == thread_id]
+    if candidate_id:
+        return [d for d in rows if d.get("candidate_id") == candidate_id]
+    return []
 
 
-def _cooldown_open(store: SensoriumStore, thread_id: str, cooldown_minutes: int) -> tuple[bool, str]:
-    receipts = _recent_pointer_receipts(store, thread_id)
+def _cooldown_open(
+    store: SensoriumStore,
+    item_id: str,
+    cooldown_minutes: int,
+    *,
+    id_field: str = "thread_id",
+) -> tuple[bool, str]:
+    if id_field == "candidate_id":
+        receipts = _recent_pointer_receipts(store, candidate_id=item_id)
+    else:
+        receipts = _recent_pointer_receipts(store, thread_id=item_id)
     if not receipts:
         return True, "never_presented"
     last = max(receipts, key=lambda r: r.get("ts", ""))
@@ -64,7 +84,8 @@ def select_attention_pointer(
     instance_config: dict | None = None,
 ) -> dict:
     """Return a candidate pointer without mutating state."""
-    cfg = {**DEFAULT_POINTER_CONFIG, **(config or {})}
+    pointer_cfg = dict(instance_config.get("pointer") or {}) if isinstance(instance_config, dict) else {}
+    cfg = {**DEFAULT_POINTER_CONFIG, **pointer_cfg, **(config or {})}
     if not cfg.get("enabled", True):
         return {"action": "no_pointer", "reason": "disabled"}
 
@@ -82,12 +103,13 @@ def select_attention_pointer(
         title = thread.get("conscious_task", {}).get("title") or thread.get("next_prompt_to_operator") or "Sensorium thread"
         title = truncate_text(title, int(cfg.get("max_title_chars", 96)))
         action_count = count_active_actions_for_thread(store, thread.get("id", ""))
-        invitation = f"Sensorium has a pending thread: {title}."
+        invitation = f"I have something for you: {title}."
         if action_count:
             invitation += f" ({action_count} prepared action{'s' if action_count != 1 else ''}.)"
         invitation += " Say ‘take it up’ if you want me to open it."
         pointer = {
             "action": "pointer_available",
+            "pointer_type": "thread",
             "thread_id": thread.get("id"),
             "task_id": thread.get("conscious_task", {}).get("id"),
             "origin_candidate_id": thread.get("origin_candidate_id"),
@@ -104,6 +126,34 @@ def select_attention_pointer(
         if cooldown_bypassed:
             pointer["cooldown_bypassed"] = True
         return pointer
+
+    def _candidate_sort_key(candidate: dict) -> tuple:
+        try:
+            pressure = float(candidate.get("pressure") or 0.0)
+        except (TypeError, ValueError):
+            pressure = 0.0
+        return (-pressure, str(candidate.get("created_at") or ""), str(candidate.get("id") or ""))
+
+    def _build_candidate_pointer(candidate: dict, reason: str) -> dict:
+        title = truncate_text(candidate.get("summary", "") or "Sensorium salience", int(cfg.get("max_title_chars", 96)))
+        invitation = (
+            f"I have something for you: {title}. "
+            "Say ‘open it’ or ‘take it up’ if you want me to inspect the attention inbox."
+        )
+        return {
+            "action": "pointer_available",
+            "pointer_type": "candidate",
+            "candidate_id": candidate.get("id"),
+            "status": candidate.get("status"),
+            "kind": candidate.get("kind", ""),
+            "pressure": candidate.get("pressure"),
+            "title": title,
+            "surface": surface or "local",
+            "sensitivity": candidate.get("sensitivity", "private"),
+            "allowed_surfaces": candidate.get("allowed_surfaces", []),
+            "reason": reason,
+            "invitation": invitation,
+        }
 
     cooldown_blocked: list[tuple[dict, str]] = []
     for thread in threads:
@@ -132,6 +182,21 @@ def select_attention_pointer(
             "origin_candidate_id": thread.get("origin_candidate_id"),
             "surface": surface or "local",
         }
+    if cfg.get("candidate_fallback_enabled", True):
+        candidates = [
+            c for c in store.read_jsonl("candidates")
+            if c.get("status") == "candidate" and visible_on_surface(c, surface, inst_cfg)
+        ]
+        for candidate in sorted(candidates, key=_candidate_sort_key):
+            open_, reason = _cooldown_open(
+                store,
+                candidate.get("id", ""),
+                int(cfg.get("cooldown_minutes", 120)),
+                id_field="candidate_id",
+            )
+            if open_:
+                return _build_candidate_pointer(candidate, reason)
+
     return {"action": "no_pointer", "reason": "no_visible_thread_for_surface", "surface": surface or "local"}
 
 
@@ -147,6 +212,7 @@ def record_pointer_presented(
         "ts": utc_now_iso(),
         "type": "pointer.presented",
         "thread_id": pointer.get("thread_id"),
+        "candidate_id": pointer.get("candidate_id"),
         "task_id": pointer.get("task_id"),
         "origin_candidate_id": pointer.get("origin_candidate_id"),
         "surface": surface or pointer.get("surface") or "local",
@@ -158,15 +224,28 @@ def record_pointer_presented(
 
 def pointer_context_for_llm(pointer: dict) -> str:
     """Render the minimal injected context for the active turn."""
-    thread_id = pointer.get("thread_id")
     surface = pointer.get("surface") or "local"
     title = pointer.get("title") or "Sensorium thread"
+    if pointer.get("pointer_type") == "candidate":
+        candidate_id = pointer.get("candidate_id")
+        return (
+            "[Sensorium Pointer]\n"
+            f"Candidate salience: {candidate_id} — {title}\n"
+            f"Human-facing doorway: {pointer.get('invitation')}\n"
+            "Internal instruction: If the user says “open it”, “take it up”, "
+            "or similar, call "
+            f"sensorium(action=\"status\", surface=\"{surface}\").\n"
+            "Do not mark it reviewed merely because it was shown. Leave meaningful salience open "
+            "until it is answered, held with a trigger, or deliberately settled."
+        )
+
+    thread_id = pointer.get("thread_id")
     return (
         "[Sensorium Pointer]\n"
-        f"Pending thread: {thread_id} — {title}\n"
+        f"Conscious thread: {thread_id} — {title}\n"
         f"Human-facing doorway: {pointer.get('invitation')}\n"
         "Internal instruction: If the user says “open it”, “take it up”, "
-        "“what’s pending”, or similar, call "
+        "or similar, call "
         f"sensorium(action=\"open\", surface=\"{surface}\", id=\"{thread_id}\").\n"
         "Do not reveal capsule content unless opened. Do not include private capsule fields "
         "in the pointer itself."

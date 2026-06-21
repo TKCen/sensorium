@@ -78,6 +78,21 @@ python scripts/sensorium_tick.py --instance demo --heartbeat --all-sensors --dry
 
 Note: `--heartbeat` is opt-in and separate from `--all-sensors`.
 
+All sensors — built-in and trusted local script sensors declared in
+`sensors/registry.json` — also run through one unified path:
+
+```bash
+python scripts/sensorium_tick.py --instance demo --list-sensors
+python scripts/sensorium_tick.py --instance demo --sensor heartbeat --sensor body_pressure --dry-run --json
+python scripts/sensorium_tick.py --instance demo --sensor all --dry-run --json
+```
+
+`--list-sensors` prints the runnable builtin and script sensor names and
+exits. `--sensor NAME` is repeatable; `--sensor all` runs every builtin
+sensor plus every enabled script sensor. The original per-sensor flags
+(`--heartbeat`, `--body-pressure`, `--all-sensors`, etc.) remain compatible
+aliases that resolve to the same sensor names through the same runner path.
+
 ---
 
 ## Step 5 — Read status via the live tool
@@ -88,7 +103,7 @@ In a Hermes agent session (live surface only):
 sensorium(action="status")
 ```
 
-Returns current attention state: pending thread count, top candidate, inbox summary, dispatcher lock status. No profile argument needed — operates on the active default.
+Returns current attention state: open thread count, top candidate, inbox summary, dispatcher lock status. No profile argument needed — operates on the active default.
 
 ---
 

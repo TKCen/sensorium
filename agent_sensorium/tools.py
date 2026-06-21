@@ -302,8 +302,26 @@ def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
     return None
 
 
+GENERIC_CORRELATION_KEYS = {"active-session"}
+
+
+def _specific_correlation_keys(keys: list[str] | set[str] | tuple[str, ...]) -> set[str]:
+    """Return keys that are specific enough to justify candidate coalescing."""
+    specific: set[str] = set()
+    for key in keys or []:
+        value = str(key or "").strip()
+        if not value or value in GENERIC_CORRELATION_KEYS or value.startswith("surface:"):
+            continue
+        specific.add(value)
+    return specific
+
+
 def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
-    incoming_keys = set(event.get("correlation_keys") or [])
+    incoming_keys = _specific_correlation_keys(event.get("correlation_keys") or [])
+    # Generic live-session keys such as `active-session`, `surface:discord`, or
+    # the event kind itself are not enough to merge separate corrections. False
+    # coalescing hides distinct salience and prevents later context pointers.
+    incoming_keys.discard(str(event.get("kind") or ""))
     if not incoming_keys:
         return None
     for candidate in candidates:
@@ -311,7 +329,9 @@ def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
             continue
         if candidate.get("kind") != event.get("kind"):
             continue
-        if incoming_keys & set(candidate.get("correlation_keys") or []):
+        candidate_keys = _specific_correlation_keys(candidate.get("correlation_keys") or [])
+        candidate_keys.discard(str(candidate.get("kind") or ""))
+        if incoming_keys & candidate_keys:
             return candidate
     return None
 
