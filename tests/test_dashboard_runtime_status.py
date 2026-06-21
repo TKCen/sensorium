@@ -197,6 +197,27 @@ def test_runtime_status_marks_stale_when_canonical_state_is_old(tmp_path, monkey
     assert data["meta"]["is_stale"] is True
 
 
+def test_runtime_status_thread_action_outbox_truncation_flags(tmp_path, monkeypatch):
+    """sera-ck9.3 polish: truncated_threads/actions/outbox flags are cheap to verify, not just candidates."""
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(root, blocks={})
+    for i in range(25):
+        _append_jsonl(root / "threads.jsonl", {"id": f"thread_many_{i}", "status": "held", "updated_at": f"2026-06-21T10:{i:02d}:00Z"})
+        _append_jsonl(root / "thread_actions.jsonl", {"id": f"action_many_{i}", "status": "prepared", "updated_at": f"2026-06-21T10:{i:02d}:00Z"})
+        _append_jsonl(root / "outbox.jsonl", {"id": f"outbox_many_{i}", "status": "failed", "updated_at": f"2026-06-21T10:{i:02d}:00Z"})
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.runtime_status(instance="demo"))
+
+    limit = data["meta"]["instance_node_limit"]
+    assert len([n for n in data["nodes"] if n["kind"] == "thread"]) == limit
+    assert len([n for n in data["nodes"] if n["kind"] == "action"]) == limit
+    assert len([n for n in data["nodes"] if n["kind"] == "outbox"]) == limit
+    assert data["meta"]["truncated_threads"] is True
+    assert data["meta"]["truncated_actions"] is True
+    assert data["meta"]["truncated_outbox"] is True
+
+
 def test_runtime_status_existing_topology_route_unaffected(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     _write_registry(root, blocks={"runtime_heartbeat": {"type": "sensor", "status": "active"}})

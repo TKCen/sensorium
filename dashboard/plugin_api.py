@@ -1568,12 +1568,35 @@ def _topology_edge_status(raw_status: Any) -> str | None:
     return text if text in _TOPOLOGY_STATUSES else "unknown"
 
 
+_PATH_SHAPED_RE = re.compile(r"[\\/]")
+
+
+def _topology_safe_label(value: Any, *, limit: int = 80) -> str:
+    """Privacy-safe topology display label, stricter than generic surface text.
+
+    sera-ck9.3.2 label policy: `/topology` labels are the primary flow-DAG UI
+    affordance (rendered directly as node text), unlike most compact
+    summaries elsewhere in this module which stay free-form. `_safe_surface_text`
+    alone only catches secret-shaped strings (api keys, tokens, …), not local
+    filesystem paths that could leak into a registry `label`/`name` field by
+    operator mistake. Hash-label anything path-shaped (contains `/` or `\\`)
+    before falling through to the normal secret-shaped guard, so a registry
+    label can never echo a raw path/hostile marker verbatim in the primary UI.
+    """
+    text = _truncate(value, limit)
+    if not text:
+        return ""
+    if _PATH_SHAPED_RE.search(text):
+        return _opaque_join_label("topology_label", value)
+    return _safe_surface_text("topology_label", value, limit=limit)
+
+
 def _sanitize_topology_node(raw_id: str, block: Any) -> tuple[str, dict[str, Any]]:
     data = block if isinstance(block, dict) else {}
     kind = _topology_node_kind(data.get("type") or data.get("kind"))
     node_id = f"{kind}:{_topology_safe_id(raw_id)}"
     enabled = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
-    label = _safe_surface_text("topology_label", data.get("label") or data.get("name") or raw_id, limit=80)
+    label = _topology_safe_label(data.get("label") or data.get("name") or raw_id)
     return node_id, {
         "id": node_id,
         "kind": kind,
@@ -1593,13 +1616,37 @@ def _sanitize_topology_edge(edge: Any, node_lookup: dict[str, str]) -> dict[str,
     enabled = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
     status = _topology_edge_status(data.get("status"))
     return {
-        "id": f"{from_id}->{to_id}",
         "from": from_id,
         "to": to_id,
         "kind": kind,
         "enabled": enabled,
         "status": status,
     }
+
+
+def _sanitize_topology_edges(raw_edge_list: list[Any], node_lookup: dict[str, str]) -> list[dict[str, Any]]:
+    """Sanitize configured topology edges with collision-safe ids.
+
+    Two configured edges can legitimately share the same `from`/`to` pair with
+    a different `kind` (e.g. a primary `configured_flow` plus a `fallback`
+    edge between the same two blocks), or even be exact duplicates in a sloppy
+    config. A bare `from->to` id collides in the first case and silently
+    drops the second occurrence in any id-keyed frontend map. Fold `kind` into
+    the id and append a deterministic occurrence index for any remaining
+    duplicate (from, to, kind) triples so every edge id is unique.
+    """
+    edges: list[dict[str, Any]] = []
+    seen_counts: dict[tuple[str, str, str], int] = {}
+    for raw_edge in raw_edge_list:
+        edge = _sanitize_topology_edge(raw_edge, node_lookup)
+        key = (edge["from"], edge["to"], edge["kind"])
+        occurrence = seen_counts.get(key, 0)
+        seen_counts[key] = occurrence + 1
+        edge_id = f"{edge['from']}->{edge['to']}#{edge['kind']}"
+        if occurrence:
+            edge_id += f":{occurrence}"
+        edges.append({"id": edge_id, **edge})
+    return edges
 
 
 def _topology_config_version(root: Path) -> str:
@@ -1619,6 +1666,20 @@ _RUNTIME_STATUSES = {
     "active", "quiet", "degraded", "error", "processing", "waiting",
     "reviewing", "blocked", "held", "settled", "stale",
 }
+# sera-ck9.3 runtime-status vocabulary polish: not every member is emitted by
+# this slice yet. Documenting why, rather than emitting a guessed value:
+#   - "degraded": reserved for a future honest per-node processor/gate
+#     degradation signal; today only the instance-wide `is_stale` freshness
+#     check exists, surfaced as "stale", not "degraded".
+#   - "blocked": reserved for a future blocker-effect overlay (see
+#     `/blockers`); blocker rows are not yet joined onto runtime-status nodes.
+#   - "settled": reserved for a future receipt/settlement-derived overlay;
+#     settlement state today lives in `/snapshot` perception traces and
+#     `/graph` receipt nodes, not `/runtime-status`.
+# "waiting" for candidates also covers the `candidate -> waiting` semantics
+# noted in sera-ck9.2: an unreviewed `candidate` status row means "awaiting
+# Subconscious review", not literally idle/quiet, which is why it maps to
+# "waiting" instead of falling through to the "quiet" default.
 _RUNTIME_STALE_SECONDS = 24 * 60 * 60
 _RUNTIME_INSTANCE_LIMIT = 20
 
@@ -1854,22 +1915,14 @@ async def registry(instance: str | None = None) -> dict[str, Any]:
     }
 
 
-@router.get("/topology")
-async def topology(instance: str | None = None) -> dict[str, Any]:
-    """Read-only compact-only topology/config projection for the flow DAG.
+def _build_topology(root: Path) -> dict[str, Any]:
+    """Shared compact topology projection used by `/topology` and `/trace`.
 
-    Derived from sensors/registry.json + sensors/edges.json (instance.config.json
-    additionally feeds config_version). Nodes/edges reflect configured topology,
-    not runtime history, so configured-but-quiet sensors appear even with zero
-    JSONL rows. Processor/gate internals have no registry representation yet;
-    this slice covers sensor registry blocks/edges (sera-ck9.1) and leaves
-    richer processor/gate coverage for a follow-up slice.
+    Returns nodes/edges/config_version/meta plus `node_lookup` (raw registry
+    block id -> sanitized node id) and `blocks_obj` (raw registry blocks) so
+    `/trace` can resolve a selected node back to its registry block without
+    re-parsing the registry/edges files itself.
     """
-    resolved = _resolve_instance(instance)
-    if resolved is None:
-        return {"ok": False, "error": "invalid_instance"}
-    effective_instance, root = resolved
-
     raw_registry = _read_json(root / "sensors" / "registry.json", {})
     raw_edges = _read_json(root / "sensors" / "edges.json", {})
     blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
@@ -1889,18 +1942,14 @@ async def topology(instance: str | None = None) -> dict[str, Any]:
     raw_edge_list = raw_edges.get("edges") if isinstance(raw_edges, dict) else []
     if not isinstance(raw_edge_list, list):
         raw_edge_list = []
-    edges = [_sanitize_topology_edge(edge, node_lookup) for edge in raw_edge_list[:edge_limit]]
+    edges = _sanitize_topology_edges(raw_edge_list[:edge_limit], node_lookup)
 
-    ts = _now()
     return {
-        "ok": True,
-        "privacy": "compact_only",
-        "generated_at": ts,
-        "as_of": ts,
-        "instance": effective_instance,
-        "config_version": _topology_config_version(root),
         "nodes": nodes,
         "edges": edges,
+        "config_version": _topology_config_version(root),
+        "node_lookup": node_lookup,
+        "blocks_obj": blocks_obj,
         "meta": {
             "node_count": len(nodes),
             "edge_count": len(edges),
@@ -1910,6 +1959,37 @@ async def topology(instance: str | None = None) -> dict[str, Any]:
             "truncated_nodes": len(blocks_obj) > node_limit,
             "truncated_edges": len(raw_edge_list) > edge_limit,
         },
+    }
+
+
+@router.get("/topology")
+async def topology(instance: str | None = None) -> dict[str, Any]:
+    """Read-only compact-only topology/config projection for the flow DAG.
+
+    Derived from sensors/registry.json + sensors/edges.json (instance.config.json
+    additionally feeds config_version). Nodes/edges reflect configured topology,
+    not runtime history, so configured-but-quiet sensors appear even with zero
+    JSONL rows. Processor/gate internals have no registry representation yet;
+    this slice covers sensor registry blocks/edges (sera-ck9.1) and leaves
+    richer processor/gate coverage for a follow-up slice.
+    """
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+
+    built = _build_topology(root)
+    ts = _now()
+    return {
+        "ok": True,
+        "privacy": "compact_only",
+        "generated_at": ts,
+        "as_of": ts,
+        "instance": effective_instance,
+        "config_version": built["config_version"],
+        "nodes": built["nodes"],
+        "edges": built["edges"],
+        "meta": built["meta"],
     }
 
 
@@ -1994,6 +2074,416 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
             "stale_threshold_seconds": _RUNTIME_STALE_SECONDS,
             "freshness_mtime": freshness_mtime,
         },
+    }
+
+
+_TRACE_TOPOLOGY_NODE_KINDS = _TOPOLOGY_NODE_KINDS | {"unknown"}
+_TRACE_INSTANCE_NODE_KINDS = {"candidate", "thread", "action", "outbox"}
+
+
+def _trace_compact_ref(node_id: str, kind: str, relation: str) -> dict[str, str]:
+    return {"id": node_id, "kind": kind, "relation": relation}
+
+
+def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
+    """Trace for a configured `/topology` node: configured neighbors plus its current runtime overlay status.
+
+    Config refs name the sanitized config source/kind/version (sera-ck9.3
+    honesty requirement), never a raw file path or config blob. There is no
+    honest per-node runtime timestamp source for configured topology nodes
+    yet, so `timestamps` stays empty with a `limitations` note instead of
+    fabricating one.
+    """
+    built = _build_topology(root)
+    nodes_by_id = {n["id"]: n for n in built["nodes"]}
+    node = nodes_by_id.get(node_id)
+    if node is None:
+        return None
+    upstream = [
+        _trace_compact_ref(e["from"], "topology_node", e["kind"]) for e in built["edges"] if e["to"] == node_id
+    ][:24]
+    downstream = [
+        _trace_compact_ref(e["to"], "topology_node", e["kind"]) for e in built["edges"] if e["from"] == node_id
+    ][:24]
+    is_stale, _ = _runtime_is_stale(root)
+    active_sensors = _recent_signal_sensors(root)
+    overlays = _runtime_node_overlays(built["blocks_obj"], active_sensors=active_sensors, is_stale=is_stale)
+    overlay = next((o for o in overlays if o["id"] == node_id), None)
+    return {
+        "subject": {
+            "id": node_id,
+            "type": "node",
+            "kind": node["kind"],
+            "origin": "topology",
+            "status": overlay["status"] if overlay else None,
+        },
+        "upstream": upstream,
+        "downstream": downstream,
+        "influences": [],
+        "config_refs": [{"kind": "sensor_registry", "ref": node_id, "version": built["config_version"]}],
+        "timestamps": {},
+        "evidence_refs": [],
+        "limitations": ["no honest per-node runtime timestamp source yet for configured topology nodes"],
+    }
+
+
+def _trace_topology_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
+    """Trace for a configured `/topology` edge: endpoints plus an honest traversal-evidence note.
+
+    `/runtime-status` edges are always empty in this slice (no honest current-
+    traversal source yet), so an edge trace can describe what is configured
+    but must not claim runtime evidence it does not have.
+    """
+    built = _build_topology(root)
+    edge = next((e for e in built["edges"] if e["id"] == edge_id), None)
+    if edge is None:
+        return None
+    return {
+        "subject": {
+            "id": edge_id,
+            "type": "edge",
+            "kind": edge["kind"],
+            "origin": "topology",
+            "status": edge.get("status"),
+        },
+        "upstream": [_trace_compact_ref(edge["from"], "topology_node", "configured_source")],
+        "downstream": [_trace_compact_ref(edge["to"], "topology_node", "configured_target")],
+        "influences": [],
+        "config_refs": [{"kind": "topology_edges", "ref": edge_id, "version": built["config_version"]}],
+        "timestamps": {},
+        "evidence_refs": [],
+        "limitations": [
+            "no honest current-traversal/runtime evidence for this edge yet; "
+            "/runtime-status edges stay empty until a future slice"
+        ],
+    }
+
+
+def _trace_candidate(root: Path, candidate_node_id: str) -> dict[str, Any] | None:
+    """Trace for a runtime candidate node: upstream perception, downstream effects, settlement evidence.
+
+    Mirrors the candidate_id/receipt join used by `/snapshot`'s perception
+    traces (`_candidate_label_indexes` + `_receipt_subject_label`) so this
+    stays consistent with the existing settlement-evidence contract instead
+    of inventing a second join scheme.
+    """
+    candidates, _ = _read_jsonl(root, "candidates", limit=5000)
+    target = None
+    for candidate in candidates:
+        if f"candidate:{_safe_trace_candidate_id(candidate.get('id'))}" == candidate_node_id:
+            target = candidate
+            break
+    if target is None:
+        return None
+    cand_id = str(target.get("id") or "")
+
+    events, _ = _read_jsonl(root, "events", limit=5000)
+    signals, _ = _read_jsonl(root, "signals", limit=5000)
+    event_by_id = _index_by_id(events)
+    signal_by_id = _index_by_id(signals)
+    event_ids = [str(e) for e in (target.get("event_ids") or []) if e]
+    trace_events = [event_by_id[eid] for eid in event_ids if eid in event_by_id][:6]
+    signal_ids: list[str] = []
+    for event in trace_events:
+        for sid in event.get("source_signal_ids") or []:
+            sid = str(sid)
+            if sid and sid not in signal_ids:
+                signal_ids.append(sid)
+    trace_signals = [signal_by_id[sid] for sid in signal_ids if sid in signal_by_id][:8]
+
+    decisions, _ = _read_jsonl(root, "decisions", limit=5000)
+    _, label_to_candidate_id = _candidate_label_indexes(candidates)
+    receipts = []
+    for row in decisions:
+        if not isinstance(row, dict) or row.get("type") not in SETTLEMENT_RECEIPT_TYPES:
+            continue
+        subject_label = _receipt_subject_label(row)
+        row_cand_id = label_to_candidate_id.get(subject_label, "") or str(row.get("candidate_id") or "")
+        if row_cand_id == cand_id:
+            receipts.append(row)
+    receipts.sort(key=lambda r: str(r.get("ts") or ""))
+    settlement = _trace_settlement(target, receipts)
+
+    actions, _ = _read_jsonl(root, "thread_actions", limit=5000)
+    outbox, _ = _read_jsonl(root, "outbox", limit=5000)
+    downstream_actions = [a for a in actions if str(a.get("origin_candidate_id") or "") == cand_id]
+    downstream_outbox = [o for o in outbox if str(o.get("origin_candidate_id") or "") == cand_id]
+
+    upstream = [
+        _trace_compact_ref(_safe_trace_ref("signal", s.get("id")), "signal", "perceived") for s in trace_signals
+    ] + [
+        _trace_compact_ref(_safe_trace_ref("event", e.get("id")), "event", "raised") for e in trace_events
+    ]
+    downstream = [
+        _trace_compact_ref(f"action:{_safe_surface_atom('action', a.get('id'))}", "action", "downstream_action")
+        for a in downstream_actions[:12]
+    ] + [
+        _trace_compact_ref(f"outbox:{_safe_surface_atom('outbox', o.get('id'))}", "outbox", "downstream_outbox")
+        for o in downstream_outbox[:12]
+    ]
+    if settlement and settlement.get("decision"):
+        downstream.append(
+            _trace_compact_ref(_safe_surface_atom("decision", settlement["decision"]), "receipt", "settled_by")
+        )
+
+    evidence_refs: list[dict[str, str]] = []
+    if settlement:
+        for key in ("intake_task_id", "review_task_id", "conscious_task_id"):
+            ref = settlement.get(key)
+            if ref:
+                evidence_refs.append({"type": key.removesuffix("_id"), "ref": ref})
+
+    limitations = []
+    if not trace_events:
+        limitations.append("no source events recorded for this candidate")
+    if not settlement:
+        limitations.append("no settlement/decision receipt found for this candidate yet")
+
+    return {
+        "subject": {
+            "id": candidate_node_id,
+            "type": "node",
+            "kind": "candidate",
+            "origin": "instance",
+            "status": _safe_surface_atom("candidate_status", target.get("status")),
+        },
+        "upstream": upstream[:24],
+        "downstream": downstream[:24],
+        "influences": _safe_trace_ref_list("correlation", target.get("correlation_keys") or [], limit=8),
+        "config_refs": [],
+        "timestamps": {
+            "created_at": target.get("created_at"),
+            "updated_at": target.get("updated_at") or target.get("created_at"),
+            "settled_at": settlement.get("settled_at") if settlement else None,
+        },
+        "evidence_refs": evidence_refs[:12],
+        "limitations": limitations,
+    }
+
+
+def _trace_thread(root: Path, thread_node_id: str) -> dict[str, Any] | None:
+    threads, _ = _read_jsonl(root, "threads", limit=5000)
+    target = None
+    for thread in threads:
+        if f"thread:{_safe_surface_atom('thread', thread.get('id'))}" == thread_node_id:
+            target = thread
+            break
+    if target is None:
+        return None
+    thread_id = str(target.get("id") or "")
+    actions, _ = _read_jsonl(root, "thread_actions", limit=5000)
+    downstream_actions = [a for a in actions if str(a.get("origin_thread_id") or "") == thread_id]
+
+    upstream = []
+    origin_candidate_id = target.get("origin_candidate_id")
+    if origin_candidate_id:
+        upstream.append(
+            _trace_compact_ref(
+                f"candidate:{_safe_trace_candidate_id(origin_candidate_id)}", "candidate", "origin_candidate"
+            )
+        )
+    downstream = [
+        _trace_compact_ref(f"action:{_safe_surface_atom('action', a.get('id'))}", "action", "downstream_action")
+        for a in downstream_actions[:24]
+    ]
+    return {
+        "subject": {
+            "id": thread_node_id,
+            "type": "node",
+            "kind": "thread",
+            "origin": "instance",
+            "status": _safe_surface_atom("thread_status", target.get("status")),
+        },
+        "upstream": upstream,
+        "downstream": downstream,
+        "influences": [],
+        "config_refs": [],
+        "timestamps": {
+            "created_at": target.get("created_at"),
+            "updated_at": target.get("updated_at"),
+            "expires_at": target.get("expires_at"),
+        },
+        "evidence_refs": [],
+        "limitations": [] if downstream_actions else ["no thread actions recorded yet for this thread"],
+    }
+
+
+def _trace_action(root: Path, action_node_id: str) -> dict[str, Any] | None:
+    actions, _ = _read_jsonl(root, "thread_actions", limit=5000)
+    target = None
+    for action in actions:
+        if f"action:{_safe_surface_atom('action', action.get('id'))}" == action_node_id:
+            target = action
+            break
+    if target is None:
+        return None
+
+    upstream = []
+    if target.get("origin_thread_id"):
+        upstream.append(
+            _trace_compact_ref(
+                f"thread:{_safe_surface_atom('thread', target.get('origin_thread_id'))}", "thread", "origin_thread"
+            )
+        )
+    if target.get("origin_candidate_id"):
+        upstream.append(
+            _trace_compact_ref(
+                f"candidate:{_safe_trace_candidate_id(target.get('origin_candidate_id'))}",
+                "candidate",
+                "origin_candidate",
+            )
+        )
+    outbox_refs = _action_attachment_ids(target, "outbox_request")
+    artifact_refs = _action_attachment_ids(target, "artifact_ref")
+    downstream = [
+        _trace_compact_ref(f"outbox:{_safe_surface_atom('outbox', ref)}", "outbox", "attached_outbox")
+        for ref in outbox_refs[:12]
+    ] + [
+        _trace_compact_ref(_safe_surface_atom("artifact", ref), "artifact", "attached_artifact")
+        for ref in artifact_refs[:12]
+    ]
+    return {
+        "subject": {
+            "id": action_node_id,
+            "type": "node",
+            "kind": "action",
+            "origin": "instance",
+            "status": _safe_surface_atom("action_status", target.get("status")),
+        },
+        "upstream": upstream,
+        "downstream": downstream,
+        "influences": [],
+        "config_refs": [],
+        "timestamps": {"updated_at": target.get("updated_at") or target.get("ts")},
+        "evidence_refs": [],
+        "limitations": [] if downstream else ["no outbox/artifact attachments recorded for this action"],
+    }
+
+
+def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
+    outbox, _ = _read_jsonl(root, "outbox", limit=5000)
+    target = None
+    for req in outbox:
+        if f"outbox:{_safe_surface_atom('outbox', req.get('id'))}" == outbox_node_id:
+            target = req
+            break
+    if target is None:
+        return None
+
+    actions, _ = _read_jsonl(root, "thread_actions", limit=5000)
+    action_for_outbox = _find_action_for_outbox(actions)
+    upstream = []
+    if target.get("origin_thread_id"):
+        upstream.append(
+            _trace_compact_ref(
+                f"thread:{_safe_surface_atom('thread', target.get('origin_thread_id'))}", "thread", "origin_thread"
+            )
+        )
+    if target.get("origin_candidate_id"):
+        upstream.append(
+            _trace_compact_ref(
+                f"candidate:{_safe_trace_candidate_id(target.get('origin_candidate_id'))}",
+                "candidate",
+                "origin_candidate",
+            )
+        )
+    attached_action_id = action_for_outbox.get(str(target.get("id") or ""))
+    if attached_action_id:
+        upstream.append(
+            _trace_compact_ref(f"action:{_safe_surface_atom('action', attached_action_id)}", "action", "attached_action")
+        )
+
+    status = str(target.get("status") or "")
+    limitations = []
+    if status not in {"dispatched", "failed"}:
+        limitations.append("no dispatch receipt yet; outbound delivery has not been observed for this record")
+
+    return {
+        "subject": {
+            "id": outbox_node_id,
+            "type": "node",
+            "kind": "outbox",
+            "origin": "instance",
+            "status": _safe_surface_atom("outbox_status", target.get("status")),
+        },
+        "upstream": upstream,
+        "downstream": [],
+        "influences": [],
+        "config_refs": [],
+        "timestamps": {"created_at": target.get("created_at"), "updated_at": target.get("updated_at")},
+        "evidence_refs": [],
+        "limitations": limitations,
+    }
+
+
+@router.get("/trace")
+async def trace(node_id: str | None = None, edge_id: str | None = None, instance: str | None = None) -> dict[str, Any]:
+    """Read-only compact-only trace/provenance projection for one selected node or edge (sera-ck9.3).
+
+    Answers "where did this come from, what influenced it, what does it lead
+    to" for whatever a user selects in the flow-DAG UI:
+      - a configured `/topology` node or edge (kind/status/config_version,
+        configured neighbors; no fabricated runtime traversal evidence)
+      - a runtime candidate/thread/action/outbox node from `/runtime-status`
+        (upstream perception, downstream effects, settlement evidence already
+        carried by existing compact state)
+    Every id/label passes through the same `_safe_surface_*`/`_safe_trace_*`
+    helpers used elsewhere in this module, so this never echoes raw ids,
+    config blobs, file paths, or free-form hostile text. GET-only; never
+    mutates Sensorium state. If a requested relation cannot be honestly
+    derived from existing compact state, the corresponding list stays empty
+    and `meta.limitations` says so instead of fabricating causality.
+    """
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+
+    built_trace: dict[str, Any] | None = None
+    if edge_id:
+        built_trace = _trace_topology_edge(root, edge_id)
+    elif node_id:
+        prefix = node_id.split(":", 1)[0] if ":" in node_id else ""
+        if prefix in _TRACE_TOPOLOGY_NODE_KINDS:
+            built_trace = _trace_topology_node(root, node_id)
+        elif prefix == "candidate":
+            built_trace = _trace_candidate(root, node_id)
+        elif prefix == "thread":
+            built_trace = _trace_thread(root, node_id)
+        elif prefix == "action":
+            built_trace = _trace_action(root, node_id)
+        elif prefix == "outbox":
+            built_trace = _trace_outbox(root, node_id)
+
+    ts = _now()
+    base = {
+        "ok": True,
+        "privacy": "compact_only",
+        "generated_at": ts,
+        "as_of": ts,
+        "instance": effective_instance,
+    }
+    if built_trace is None:
+        return {
+            **base,
+            "subject": None,
+            "upstream": [],
+            "downstream": [],
+            "influences": [],
+            "config_refs": [],
+            "timestamps": {},
+            "evidence_refs": [],
+            "meta": {
+                "privacy": "compact_only",
+                "limitations": ["no node_id/edge_id given, or subject not found in topology/instance state"],
+            },
+        }
+
+    limitations = built_trace.pop("limitations", [])
+    return {
+        **base,
+        **built_trace,
+        "meta": {"privacy": "compact_only", "limitations": limitations},
     }
 
 

@@ -142,6 +142,62 @@ def test_topology_edge_status_is_closed_vocabulary_not_raw_atom(tmp_path, monkey
     assert statuses[2] is None
 
 
+def test_topology_does_not_leak_path_shaped_label(tmp_path, monkeypatch):
+    """Label policy (sera-ck9.3.2): path-shaped labels must be hash-labeled, not echoed.
+
+    `/topology` labels are the primary flow-DAG UI affordance, so they're held
+    to a stricter bar than generic compact summaries: a registry `label`/`name`
+    that looks like a local filesystem path must not leak verbatim even though
+    it isn't "secret-shaped" by the generic hostile-marker heuristic.
+    """
+    root = tmp_path / "sensorium" / "demo"
+    path_label = "/home/admin/.ssh/id_rsa"
+    _write_registry(
+        root,
+        blocks={"runtime_heartbeat": {"type": "sensor", "label": path_label}},
+        edges=[],
+    )
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.topology(instance="demo"))
+    payload = json.dumps(data, sort_keys=True)
+
+    assert path_label not in payload
+    node = data["nodes"][0]
+    assert node["label"].startswith("topology_label#")
+
+
+def test_topology_edge_ids_distinguish_parallel_edges_by_kind(tmp_path, monkeypatch):
+    """sera-ck9.3.1: parallel edges (same from/to, different kind) must not collide.
+
+    A bare `from->to` edge id, as used before this fix, collapses two
+    legitimately distinct configured edges into one frontend key. Edge ids
+    must fold in `kind` and a deterministic occurrence index for any exact
+    (from, to, kind) duplicate so every edge is independently selectable.
+    """
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(
+        root,
+        blocks={"a": {"type": "sensor"}, "b": {"type": "processor"}},
+        edges=[
+            {"from": "a", "to": "b", "kind": "configured_flow"},
+            {"from": "a", "to": "b", "kind": "fallback"},
+            {"from": "a", "to": "b", "kind": "configured_flow"},
+        ],
+    )
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.topology(instance="demo"))
+
+    edge_ids = [edge["id"] for edge in data["edges"]]
+    assert len(edge_ids) == 3
+    assert len(set(edge_ids)) == 3
+    kinds_by_id = {edge["id"]: edge["kind"] for edge in data["edges"]}
+    assert kinds_by_id[edge_ids[0]] == "configured_flow"
+    assert kinds_by_id[edge_ids[1]] == "fallback"
+    assert kinds_by_id[edge_ids[2]] == "configured_flow"
+
+
 def test_topology_does_not_leak_hostile_marker_verbatim(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     sentinel = "sk-t9-topology...4242"
