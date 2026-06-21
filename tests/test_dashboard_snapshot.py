@@ -601,3 +601,60 @@ def test_snapshot_health_hash_labels_secret_shaped_legacy_dispatch_reason(tmp_pa
     assert sentinel not in payload
     assert data["health"]["last_dispatch_action"].startswith("dispatch_action#")
     assert data["health"]["last_dispatch_reason"].startswith("dispatch_reason#")
+
+
+def test_snapshot_hash_labels_secret_shaped_config_and_decision_fields(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "api_key_config_decision_8899"
+    root.mkdir(parents=True)
+    (root / "instance.config.json").write_text(
+        json.dumps(
+            {
+                "instance_name": "demo",
+                "allowed_surfaces": ["local", sentinel],
+                "max_sensitivity": sentinel,
+                "policy_card_ref": f"policy {sentinel}",
+                "outbox": {"allowed_delivery_modes": ["context_pointer", sentinel], "discord_token": sentinel},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _append_jsonl(
+        root,
+        "decisions.jsonl",
+        {
+            "schema": sentinel,
+            "receipt_kind": sentinel,
+            "ts": "2026-06-21T14:00:00Z",
+            "created_at": "2026-06-21T14:00:00Z",
+            "type": sentinel,
+            "subject_ref": {"type": "candidate", "id": "candidate#1234567890abcdef"},
+            "decision": sentinel,
+            "outcome": sentinel,
+            "action": sentinel,
+            "reason_label": "reason#1234567890abcdef",
+        },
+    )
+
+    data = _snapshot(api)
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    assert data["config"]["allowed_surfaces"][1].startswith("surface#")
+    assert data["config"]["max_sensitivity"].startswith("sensitivity#")
+    assert data["config"]["policy_card_ref"].startswith("policy_card_ref#")
+    assert data["config"]["outbox"]["allowed_delivery_modes"][1].startswith("outbox_config#")
+    secret_outbox_values = [
+        value for key, value in data["config"]["outbox"].items() if key.startswith("outbox_config_key#")
+    ]
+    assert secret_outbox_values and secret_outbox_values[0].startswith("outbox_config#")
+    decision = data["decisions"][0]
+    assert decision["schema"].startswith("schema#")
+    assert decision["receipt_kind"].startswith("receipt_kind#")
+    assert decision["type"].startswith("decision_type#")
+    assert decision["decision"].startswith("decision#")
+    assert decision["outcome"].startswith("outcome#")
+    assert decision["action"].startswith("decision_action#")

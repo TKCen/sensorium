@@ -682,18 +682,18 @@ def _decision_item(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "ts": decision.get("ts"),
         "created_at": decision.get("created_at") or decision.get("ts"),
-        "type": decision.get("type"),
-        "schema": decision.get("schema"),
-        "receipt_kind": decision.get("receipt_kind"),
+        "type": _safe_surface_atom("decision_type", decision.get("type")),
+        "schema": _safe_surface_atom("schema", decision.get("schema")),
+        "receipt_kind": _safe_surface_atom("receipt_kind", decision.get("receipt_kind")),
         "subject_ref": _safe_receipt_subject_ref(decision),
-        "decision": decision.get("decision"),
-        "outcome": decision.get("outcome"),
+        "decision": _safe_surface_atom("decision", decision.get("decision")),
+        "outcome": _safe_surface_atom("outcome", decision.get("outcome")),
         "thread_id": _safe_decision_join_field(decision, "thread_id", "thread"),
         "candidate_id": _safe_decision_candidate_id(decision),
         "outbox_id": _safe_decision_join_field(decision, "outbox_id", "outbox"),
         "action_id": _safe_decision_join_field(decision, "action_id", "action"),
         "artifact_id": _safe_decision_join_field(decision, "artifact_id", "artifact"),
-        "action": decision.get("action"),
+        "action": _safe_surface_atom("decision_action", decision.get("action")),
         "reason": _safe_decision_reason(decision),
     }
 
@@ -1876,11 +1876,14 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "kanban_tick_mtime": freshness.get("last_sensorium_kanban_tick", {}).get("mtime"),
         "freshness": freshness,
         "config": {
-            "instance_name": config.get("instance_name") or effective_instance,
-            "allowed_surfaces": config.get("allowed_surfaces") or ["local"],
-            "max_sensitivity": config.get("max_sensitivity") or "private",
-            "policy_card_ref": config.get("policy_card_ref"),
-            "outbox": config.get("outbox") if isinstance(config.get("outbox"), dict) else {},
+            "instance_name": _safe_surface_atom("instance", config.get("instance_name") or effective_instance),
+            "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (config.get("allowed_surfaces") or ["local"])
+            ][:8],
+            "max_sensitivity": _safe_surface_atom("sensitivity", config.get("max_sensitivity") or "private"),
+            "policy_card_ref": _safe_surface_text("policy_card_ref", config.get("policy_card_ref"), limit=160),
+            "outbox": _safe_surface_projection(
+                "outbox_config", config.get("outbox") if isinstance(config.get("outbox"), dict) else {}, limit=160
+            ),
         },
         "counts": counts,
         "attention_footprint": attention_footprint,
