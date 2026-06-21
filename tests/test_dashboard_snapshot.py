@@ -484,3 +484,100 @@ def test_snapshot_hash_labels_secret_shaped_artifact_projection_fields(tmp_path,
     group = data["artifact_groups"][0]
     assert group["title"].startswith("artifact_group_title#")
     assert group["items"][0]["ref_path"].startswith("artifact_ref_path#")
+
+
+def test_snapshot_hash_labels_secret_shaped_thread_action_outbox_projection_fields(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "api_key_actuator_8899"
+
+    _append_jsonl(
+        root,
+        "threads.jsonl",
+        {
+            "id": sentinel,
+            "status": "held",
+            "title": f"thread title {sentinel}",
+            "origin_candidate_id": sentinel,
+            "sensitivity": sentinel,
+            "allowed_surfaces": [sentinel],
+            "updated_at": "2026-06-21T13:00:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "thread_actions.jsonl",
+        {
+            "id": sentinel,
+            "status": "proposed",
+            "outcome": sentinel,
+            "intent": sentinel,
+            "title": f"action title {sentinel}",
+            "summary": f"action summary {sentinel}",
+            "result_summary": f"result summary {sentinel}",
+            "origin_thread_id": sentinel,
+            "origin_candidate_id": sentinel,
+            "attachments": [
+                {"kind": "artifact_ref", "ref_id": sentinel},
+                {"kind": "outbox_request", "ref_id": sentinel},
+                {"kind": sentinel, "ref_id": "safe_ref"},
+            ],
+            "updated_at": "2026-06-21T13:01:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "outbox.jsonl",
+        {
+            "id": sentinel,
+            "status": "prepared",
+            "origin_thread_id": sentinel,
+            "origin_candidate_id": sentinel,
+            "request_type": sentinel,
+            "surface": sentinel,
+            "delivery_mode": "context_pointer",
+            "title": f"outbox title {sentinel}",
+            "message_preview": f"message preview {sentinel}",
+            "target": {
+                "channel_id": sentinel,
+                "thread_id": sentinel,
+                "recipient": sentinel,
+            },
+            "media_refs": [sentinel],
+            "platform_refs": {"discord": sentinel, sentinel: "safe_value"},
+            "updated_at": "2026-06-21T13:02:00Z",
+        },
+    )
+
+    data = _snapshot(api)
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    thread = data["threads"][0]
+    assert thread["id"].startswith("thread#")
+    assert thread["title"].startswith("thread_title#")
+    assert thread["origin_candidate_id"].startswith("candidate#")
+    assert thread["allowed_surfaces"][0].startswith("surface#")
+
+    action = data["actions"][0]
+    assert action["id"].startswith("action#")
+    assert action["outcome"].startswith("action_outcome#")
+    assert action["intent"].startswith("action_intent#")
+    assert action["title"].startswith("action_title#")
+    assert action["artifact_refs"][0].startswith("artifact#")
+    assert action["outbox_refs"][0].startswith("outbox#")
+    assert next(iter(action["attachment_kinds"])).startswith("attachment_kind#") or "artifact_ref" in action["attachment_kinds"]
+
+    outbox = data["outbox"][0]
+    assert outbox["id"].startswith("outbox#")
+    assert outbox["request_type"].startswith("request_type#")
+    assert outbox["surface"].startswith("surface#")
+    assert outbox["title"].startswith("outbox_title#")
+    assert outbox["message_preview"].startswith("message_preview#")
+    assert outbox["target"]["channel_id"].startswith("target#")
+    assert outbox["media_refs"][0].startswith("media_ref#")
+    assert outbox["platform_refs"]["discord"].startswith("platform_ref#")
+    assert outbox["safety"]["attached_action_id"].startswith("action#")
+    assert any(warning["id"].startswith("action#") for warning in data["lifecycle_warnings"])

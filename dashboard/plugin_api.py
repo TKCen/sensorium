@@ -126,6 +126,20 @@ def _safe_surface_atom(prefix: str, value: Any, *, limit: int = 96) -> str:
     return _safe_surface_text(prefix, value, limit=limit, atom_only=True)
 
 
+def _safe_surface_projection(prefix: str, value: Any, *, limit: int = 160) -> Any:
+    """Recursively sanitize caller-controlled actuator metadata for GET output."""
+    if isinstance(value, dict):
+        projected: dict[str, Any] = {}
+        for key, child in list(value.items())[:24]:
+            projected[_safe_surface_atom(f"{prefix}_key", key)] = _safe_surface_projection(prefix, child, limit=limit)
+        return projected
+    if isinstance(value, list):
+        return [_safe_surface_projection(prefix, child, limit=limit) for child in value[:24]]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return _safe_surface_text(prefix, value, limit=limit)
+
+
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -334,12 +348,12 @@ def _thread_title(thread: dict[str, Any]) -> str:
 
 def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": thread.get("id"),
-        "status": thread.get("status") or "dormant",
-        "title": _thread_title(thread),
-        "origin_candidate_id": thread.get("origin_candidate_id"),
-        "sensitivity": thread.get("sensitivity"),
-        "allowed_surfaces": thread.get("allowed_surfaces") or [],
+        "id": _safe_surface_atom("thread", thread.get("id")),
+        "status": _safe_surface_atom("thread_status", thread.get("status") or "dormant"),
+        "title": _safe_surface_text("thread_title", _thread_title(thread), limit=140),
+        "origin_candidate_id": _safe_surface_atom("candidate", thread.get("origin_candidate_id")),
+        "sensitivity": _safe_surface_atom("sensitivity", thread.get("sensitivity")),
+        "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (thread.get("allowed_surfaces") or [])][:8],
         "created_at": thread.get("created_at"),
         "updated_at": thread.get("updated_at"),
         "expires_at": thread.get("expires_at"),
@@ -389,21 +403,21 @@ def _action_attachment_ids(action: dict[str, Any], kind: str) -> list[str]:
 
 def _action_item(action: dict[str, Any]) -> dict[str, Any]:
     attachments = [a for a in action.get("attachments") or [] if isinstance(a, dict)]
-    attachment_kinds = Counter(str(a.get("kind") or "unknown") for a in attachments)
+    attachment_kinds = Counter(_safe_surface_atom("attachment_kind", a.get("kind") or "unknown") for a in attachments)
     return {
-        "id": action.get("id"),
-        "status": action.get("status"),
-        "outcome": action.get("outcome"),
-        "intent": action.get("intent"),
-        "title": _truncate(action.get("title") or action.get("intent"), 140),
-        "summary": _truncate(action.get("summary"), 180),
-        "origin_thread_id": action.get("origin_thread_id"),
-        "origin_candidate_id": action.get("origin_candidate_id"),
-        "artifact_refs": _action_attachment_ids(action, "artifact_ref"),
-        "outbox_refs": _action_attachment_ids(action, "outbox_request"),
+        "id": _safe_surface_atom("action", action.get("id")),
+        "status": _safe_surface_atom("action_status", action.get("status")),
+        "outcome": _safe_surface_atom("action_outcome", action.get("outcome")),
+        "intent": _safe_surface_atom("action_intent", action.get("intent")),
+        "title": _safe_surface_text("action_title", action.get("title") or action.get("intent"), limit=140),
+        "summary": _safe_surface_text("action_summary", action.get("summary"), limit=180),
+        "origin_thread_id": _safe_surface_atom("thread", action.get("origin_thread_id")),
+        "origin_candidate_id": _safe_surface_atom("candidate", action.get("origin_candidate_id")),
+        "artifact_refs": [_safe_surface_atom("artifact", ref) for ref in _action_attachment_ids(action, "artifact_ref")],
+        "outbox_refs": [_safe_surface_atom("outbox", ref) for ref in _action_attachment_ids(action, "outbox_request")],
         "attachment_count": len(attachments),
         "attachment_kinds": dict(attachment_kinds),
-        "result_summary": _truncate(action.get("result_summary"), 180),
+        "result_summary": _safe_surface_text("action_result", action.get("result_summary"), limit=180),
         "updated_at": action.get("updated_at") or action.get("ts"),
     }
 
@@ -566,9 +580,9 @@ def _outbox_safety(
         "outbound_delivery": direct_mode,
         "direct_delivery_enabled": direct_enabled,
         "dispatch_requires_execute": status == "prepared",
-        "origin_thread_status": thread_status,
-        "attached_action_id": action_id,
-        "attached_action_status": action_status,
+        "origin_thread_status": _safe_surface_atom("thread_status", thread_status),
+        "attached_action_id": _safe_surface_atom("action", action_id),
+        "attached_action_status": _safe_surface_atom("action_status", action_status),
         "actionable": False,
     }
 
@@ -634,7 +648,7 @@ def _outbox_item(
     raw_target = req.get("target")
     target: dict[str, Any] = raw_target if isinstance(raw_target, dict) else {}
     target_keys = {
-        k: target[k]
+        _safe_surface_atom("target_key", k): _safe_surface_projection("target", target[k], limit=120)
         for k in ("channel_id", "thread_id", "dm_channel_id", "session_ref", "session", "recipient")
         if target.get(k)
     }
@@ -646,18 +660,18 @@ def _outbox_item(
         config=config,
     )
     return {
-        "id": req.get("id"),
-        "status": req.get("status"),
-        "origin_thread_id": req.get("origin_thread_id"),
-        "origin_candidate_id": req.get("origin_candidate_id"),
-        "request_type": req.get("request_type"),
-        "surface": req.get("surface"),
-        "delivery_mode": req.get("delivery_mode"),
-        "title": _truncate(req.get("title"), 120),
-        "message_preview": _truncate(req.get("message_preview"), 180),
+        "id": _safe_surface_atom("outbox", req.get("id")),
+        "status": _safe_surface_atom("outbox_status", req.get("status")),
+        "origin_thread_id": _safe_surface_atom("thread", req.get("origin_thread_id")),
+        "origin_candidate_id": _safe_surface_atom("candidate", req.get("origin_candidate_id")),
+        "request_type": _safe_surface_atom("request_type", req.get("request_type")),
+        "surface": _safe_surface_atom("surface", req.get("surface")),
+        "delivery_mode": _safe_surface_atom("delivery_mode", req.get("delivery_mode")),
+        "title": _safe_surface_text("outbox_title", req.get("title"), limit=120),
+        "message_preview": _safe_surface_text("message_preview", req.get("message_preview"), limit=180),
         "target": target_keys,
-        "media_refs": req.get("media_refs") or [],
-        "platform_refs": req.get("platform_refs") or {},
+        "media_refs": [_safe_surface_atom("media_ref", ref) for ref in (req.get("media_refs") or [])][:12],
+        "platform_refs": _safe_surface_projection("platform_ref", req.get("platform_refs") or {}, limit=160),
         "created_at": req.get("created_at"),
         "updated_at": req.get("updated_at"),
         "safety": safety,
@@ -1287,7 +1301,7 @@ def _lifecycle_warnings(
             warnings.append(
                 {
                     "kind": "outbox",
-                    "id": req_id,
+                    "id": _safe_surface_atom("outbox", req_id),
                     "band": safety.get("band"),
                     "label": safety.get("label"),
                     "detail": safety.get("detail"),
@@ -1297,7 +1311,7 @@ def _lifecycle_warnings(
             warnings.append(
                 {
                     "kind": "outbox",
-                    "id": req_id,
+                    "id": _safe_surface_atom("outbox", req_id),
                     "band": "yellow",
                     "label": "prepared_outbox_unattached",
                     "detail": "Prepared outbox record is not attached to any thread action.",
@@ -1319,7 +1333,7 @@ def _lifecycle_warnings(
             warnings.append(
                 {
                     "kind": "action",
-                    "id": action.get("id"),
+                    "id": _safe_surface_atom("action", action.get("id")),
                     "band": "yellow",
                     "label": "outbox_action_not_completed",
                     "detail": "Action has an outbox attachment but is still open.",
