@@ -1615,6 +1615,136 @@ def _topology_config_version(root: Path) -> str:
     return f"sha256:{digest}"
 
 
+_RUNTIME_STATUSES = {
+    "active", "quiet", "degraded", "error", "processing", "waiting",
+    "reviewing", "blocked", "held", "settled", "stale",
+}
+_RUNTIME_STALE_SECONDS = 24 * 60 * 60
+_RUNTIME_INSTANCE_LIMIT = 20
+
+# Direct mappings from existing lifecycle status enums (candidates.jsonl /
+# threads.jsonl / thread_actions.jsonl / outbox.jsonl `status`) into the closed
+# runtime-status vocabulary above. Anything not listed here falls back to the
+# safe default "quiet" rather than ever passing free-form status text through.
+_RUNTIME_CANDIDATE_STATUS = {
+    "candidate": "waiting",
+    "reviewed": "reviewing",
+    "suppressed": "stale",
+    "dropped": "stale",
+}
+_RUNTIME_THREAD_STATUS = {
+    "held": "held",
+    "dormant": "quiet",
+}
+_RUNTIME_ACTION_STATUS = {
+    "proposed": "waiting",
+    "offered": "waiting",
+    "prepared": "processing",
+}
+_RUNTIME_OUTBOX_STATUS = {
+    "prepared": "waiting",
+    "failed": "error",
+}
+
+
+def _runtime_is_stale(root: Path) -> tuple[bool, str | None]:
+    """Whether the instance's canonical freshness mtime has gone stale.
+
+    This is the only honest per-instance (not per-node) staleness signal
+    available without a runtime trace log; it is applied uniformly to
+    topology nodes lacking a more specific honest source (see
+    `_runtime_node_overlays`).
+    """
+    canonical_mtime = _freshness_snapshot(root).get("canonical_latest_mtime")
+    if not canonical_mtime:
+        return False, canonical_mtime
+    parsed = _parse_dt(canonical_mtime)
+    if parsed is None:
+        return False, canonical_mtime
+    age_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+    return age_seconds > _RUNTIME_STALE_SECONDS, canonical_mtime
+
+
+def _recent_signal_sensors(root: Path, *, limit: int = 200) -> set[str]:
+    """Sensor names with a signal in the most recent window.
+
+    `signals/inbox.jsonl` rows already carry a `sensor` field naming the same
+    registry block id /topology projects, so this is the one honest per-node
+    runtime-activity signal available today (see sera-ck9-2 task guidance on
+    not fabricating processor/gate runtime state).
+    """
+    rows, _ = _read_jsonl(root, "signals", limit=limit)
+    return {str(row.get("sensor")) for row in rows if row.get("sensor")}
+
+
+def _runtime_node_overlays(
+    blocks_obj: dict[str, Any], *, active_sensors: set[str], is_stale: bool
+) -> list[dict[str, Any]]:
+    """Closed-vocabulary runtime status overlay for every configured topology node.
+
+    Mirrors /topology's own node projection (same registry source, same ids)
+    so every topology node gets an explicit overlay entry. Processor/gate
+    nodes have no honest runtime-activity source yet and conservatively
+    default to quiet/stale; sensor nodes additionally get "active" when a
+    recent signal attributes to them.
+    """
+    overlays: list[dict[str, Any]] = []
+    for raw_id, block in sorted(blocks_obj.items(), key=lambda item: str(item[0]))[:250]:
+        node_id, topo_node = _sanitize_topology_node(str(raw_id), block)
+        if topo_node["kind"] == "sensor" and str(raw_id) in active_sensors:
+            status, source = "active", "signal_match"
+        elif is_stale:
+            status, source = "stale", "freshness_stale"
+        else:
+            status, source = "quiet", "configured_default"
+        overlays.append({"id": node_id, "kind": topo_node["kind"], "status": status, "source": source, "origin": "topology"})
+    return overlays
+
+
+def _runtime_candidate_node(candidate: dict[str, Any]) -> dict[str, Any]:
+    status = _RUNTIME_CANDIDATE_STATUS.get(str(candidate.get("status") or "").strip().lower(), "quiet")
+    return {
+        "id": f"candidate:{_safe_trace_candidate_id(candidate.get('id'))}",
+        "kind": "candidate",
+        "status": status,
+        "source": "field_status",
+        "origin": "instance",
+    }
+
+
+def _runtime_thread_node(thread: dict[str, Any]) -> dict[str, Any]:
+    status = _RUNTIME_THREAD_STATUS.get(str(thread.get("status") or "").strip().lower(), "quiet")
+    return {
+        "id": f"thread:{_safe_surface_atom('thread', thread.get('id'))}",
+        "kind": "thread",
+        "status": status,
+        "source": "field_status",
+        "origin": "instance",
+    }
+
+
+def _runtime_action_node(action: dict[str, Any]) -> dict[str, Any]:
+    status = _RUNTIME_ACTION_STATUS.get(str(action.get("status") or "").strip().lower(), "quiet")
+    return {
+        "id": f"action:{_safe_surface_atom('action', action.get('id'))}",
+        "kind": "action",
+        "status": status,
+        "source": "field_status",
+        "origin": "instance",
+    }
+
+
+def _runtime_outbox_node(req: dict[str, Any]) -> dict[str, Any]:
+    status = _RUNTIME_OUTBOX_STATUS.get(str(req.get("status") or "").strip().lower(), "quiet")
+    return {
+        "id": f"outbox:{_safe_surface_atom('outbox', req.get('id'))}",
+        "kind": "outbox",
+        "status": status,
+        "source": "field_status",
+        "origin": "instance",
+    }
+
+
 def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, Any]]:
     path = root / "inner_life" / name
     if not path.exists():
@@ -1779,6 +1909,90 @@ async def topology(instance: str | None = None) -> dict[str, Any]:
             "edge_limit": edge_limit,
             "truncated_nodes": len(blocks_obj) > node_limit,
             "truncated_edges": len(raw_edge_list) > edge_limit,
+        },
+    }
+
+
+@router.get("/runtime-status")
+async def runtime_status(instance: str | None = None) -> dict[str, Any]:
+    """Read-only compact-only runtime status overlay for the flow DAG (sera-ck9.2).
+
+    Overlays a closed-vocabulary runtime status onto every /topology node, plus
+    a bounded set of active runtime instance nodes (candidates/threads/actions/
+    outbox) drawn from the same "active" status filters /snapshot already uses.
+    Per-node runtime activity is only honestly derivable for sensor nodes via
+    signal->sensor attribution; everything else conservatively defaults to
+    quiet/stale rather than fabricating processor/gate runtime state. `edges`
+    is always empty in this slice: there is no honest current-traversal source
+    yet (left for a future /trace slice).
+    """
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+
+    raw_registry = _read_json(root / "sensors" / "registry.json", {})
+    blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
+    if not isinstance(blocks_obj, dict) and isinstance(raw_registry, dict):
+        blocks_obj = raw_registry
+    if not isinstance(blocks_obj, dict):
+        blocks_obj = {}
+
+    is_stale, freshness_mtime = _runtime_is_stale(root)
+    active_sensors = _recent_signal_sensors(root)
+    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=active_sensors, is_stale=is_stale)
+
+    candidates, _ = _read_jsonl(root, "candidates", limit=2000)
+    threads, _ = _read_jsonl(root, "threads", limit=2000)
+    actions, _ = _read_jsonl(root, "thread_actions", limit=2000)
+    outbox, _ = _read_jsonl(root, "outbox", limit=2000)
+
+    eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in _RUNTIME_CANDIDATE_STATUS]
+    eligible_threads = [t for t in threads if t.get("status") in ACTIVE_THREAD_STATUSES]
+    eligible_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
+    eligible_outbox = [o for o in outbox if o.get("status") in OPEN_OUTBOX_STATUSES]
+
+    candidate_nodes = [
+        _runtime_candidate_node(c) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+    ]
+    thread_nodes = [
+        _runtime_thread_node(t) for t in sorted(eligible_threads, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+    ]
+    action_nodes = [
+        _runtime_action_node(a) for a in sorted(eligible_actions, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+    ]
+    outbox_nodes = [
+        _runtime_outbox_node(o) for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+    ]
+    instance_nodes = candidate_nodes + thread_nodes + action_nodes + outbox_nodes
+    nodes = topology_nodes + instance_nodes
+
+    ts = _now()
+    return {
+        "ok": True,
+        "privacy": "compact_only",
+        "generated_at": ts,
+        "as_of": ts,
+        "instance": effective_instance,
+        "topology_config_version": _topology_config_version(root),
+        "status_vocab": sorted(_RUNTIME_STATUSES),
+        "nodes": nodes,
+        "edges": [],
+        "meta": {
+            "privacy": "compact_only",
+            "node_count": len(nodes),
+            "topology_node_count": len(topology_nodes),
+            "instance_node_count": len(instance_nodes),
+            "edge_count": 0,
+            "edges_limitation": "no honest current-traversal source yet; populated by a future /trace slice",
+            "instance_node_limit": _RUNTIME_INSTANCE_LIMIT,
+            "truncated_candidates": len(eligible_candidates) > _RUNTIME_INSTANCE_LIMIT,
+            "truncated_threads": len(eligible_threads) > _RUNTIME_INSTANCE_LIMIT,
+            "truncated_actions": len(eligible_actions) > _RUNTIME_INSTANCE_LIMIT,
+            "truncated_outbox": len(eligible_outbox) > _RUNTIME_INSTANCE_LIMIT,
+            "is_stale": is_stale,
+            "stale_threshold_seconds": _RUNTIME_STALE_SECONDS,
+            "freshness_mtime": freshness_mtime,
         },
     }
 
