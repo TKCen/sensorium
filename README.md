@@ -183,11 +183,16 @@ Dashboard routes are intentionally limited to GET-only compact projections:
 | `/attention` | Current pull-based attention inbox: visible candidates and dormant/held threads |
 | `/snapshot` | Whole-profile overview: counts, health, config summary, freshness, traces, artifacts, actions, outbox |
 | `/graph` | Compact candidate/receipt graph links for settlement and lineage review |
+| `/topology` | Config-derived flow DAG topology: sensors, processors, gates, queues, sinks, and configured edges |
+| `/runtime-status` | Closed-vocabulary runtime overlay for topology nodes plus bounded active instance nodes |
+| `/trace` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
 | `/metrics` | Efficiency and pressure metrics from the metrics sidecar |
 | `/registry` | Compact sensor/inner-life block and edge registry projection |
 | `/probe-audit` | Compact run-state/probe audit projection |
 | `/dampeners` / `/blockers` | Inner-life dampener/blocker sidecar evidence |
 | `/explanation` | Deterministic pressure explanation for one candidate/review subject |
+
+The primary dashboard graph is the **Flow DAG**: `/topology` answers what can happen, `/runtime-status` overlays what is happening now, and `/trace` explains where a selected node/edge came from and what influenced it. The older `/snapshot`/`/graph` lane projection remains available as an explicit debug/fallback view, not the primary model.
 
 All dashboard output is an output boundary: legacy/corrupt row values, raw transcript/log markers, secrets, metric labels, state paths, and free-form refs are sanitized or replaced with deterministic opaque labels before rendering. See `docs/dashboard-and-review-surfaces.md` for the route contract and privacy checklist.
 
@@ -234,7 +239,7 @@ See `docs/profiles-and-config.md` for the full profile model and config/code bou
 - Policy-gated action preparation: local artifacts and handoff records remain inert until an operator or external system acts on them
 - Pull-based review: the agent (and operator) request status; nothing is pushed
 - **Safe admin and debug surfaces:** a separate admin toolset for read/diagnose/manage operations, intentionally hidden from the live agent surface
-- **Read-only dashboard review surfaces:** `/attention`, `/snapshot`, `/graph`, `/metrics`, `/registry`, `/probe-audit`, `/dampeners`, `/blockers`, and `/explanation` expose compact status and traces without mutation routes
+- **Read-only dashboard review surfaces:** `/attention`, `/snapshot`, `/graph`, `/topology`, `/runtime-status`, `/trace`, `/metrics`, `/registry`, `/probe-audit`, `/dampeners`, `/blockers`, and `/explanation` expose compact status and traces without mutation routes
 
 ---
 
