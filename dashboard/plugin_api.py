@@ -172,7 +172,39 @@ def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, An
     return rows
 
 
-def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
+_SNAPSHOT_METRIC_DERIVED_FIELDS = (
+    "footprint_open_items",
+    "conscious_reviews_per_signal_24h",
+    "durable_decisions_per_conscious_review_24h",
+)
+
+
+def _compact_metric_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project only the trend fields the dashboard snapshot renders.
+
+    The full metrics endpoint intentionally exposes richer sanitized rows for
+    diagnostics. Embedding those rows in /snapshot made the initial dashboard
+    payload hundreds of KB larger while the UI only needs three derived trend
+    values plus the sample timestamp.
+    """
+    projected: list[dict[str, Any]] = []
+    for row in rows:
+        derived = row.get("derived") if isinstance(row, dict) else {}
+        if not isinstance(derived, dict):
+            derived = {}
+        compact: dict[str, Any] = {
+            "ts": row.get("ts") if isinstance(row, dict) else None,
+            "derived": {
+                key: derived.get(key)
+                for key in _SNAPSHOT_METRIC_DERIVED_FIELDS
+                if key in derived
+            },
+        }
+        projected.append(_safe_surface_projection("metric", compact))
+    return projected
+
+
+def _metrics_snapshot(limit: int = 144, *, compact_series: bool = False) -> dict[str, Any]:
     latest = _read_json(METRICS_DIR / "latest.json", {})
     series = _read_plain_jsonl(METRICS_DIR / "timeseries.jsonl", limit=limit)
     return {
@@ -182,7 +214,7 @@ def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
         "timeseries_path": _safe_surface_text("metrics_path", str(METRICS_DIR / "timeseries.jsonl"), limit=240),
         "series_count": len(series),
         "latest": _safe_surface_projection("metric", latest),
-        "series": _safe_surface_projection("metric", series),
+        "series": _compact_metric_series(series) if compact_series else _safe_surface_projection("metric", series),
     }
 
 
@@ -1866,7 +1898,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "corrupt_lines": corrupt,
     }
 
-    metrics_data = _metrics_snapshot()
+    metrics_data = _metrics_snapshot(compact_series=True)
     attention_footprint = _attention_footprint(counts, metrics=metrics_data)
 
     return {

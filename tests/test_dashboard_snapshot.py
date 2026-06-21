@@ -801,6 +801,51 @@ def test_metrics_and_snapshot_metrics_hash_label_hostile_metrics_payloads(tmp_pa
     assert marker not in serialized
     assert metrics_payload["metrics"]["latest"]["queue"]["depth"] == 1
     assert metrics_payload["metrics"]["series"][0]["value"] == 1
+    assert "value" not in snapshot_payload["metrics"]["series"][0]
+
+
+def test_snapshot_metrics_series_is_compact_but_metrics_endpoint_stays_full(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    metrics_root = tmp_path / "metrics"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    monkeypatch.setattr(api, "METRICS_DIR", metrics_root)
+    root.mkdir(parents=True)
+    metrics_root.mkdir(parents=True)
+    (metrics_root / "latest.json").write_text(json.dumps({"derived": {"footprint_open_items": 5}}), encoding="utf-8")
+    (metrics_root / "timeseries.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-06-21T10:00:00Z",
+                "state_dir": "/tmp/verbose-state-dir",
+                "open": {"large_unused_bucket": {str(i): i for i in range(30)}},
+                "derived": {
+                    "footprint_open_items": 5,
+                    "conscious_reviews_per_signal_24h": 0.25,
+                    "durable_decisions_per_conscious_review_24h": 0.5,
+                    "unused_large_derived": "x" * 1000,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    metrics_payload = asyncio.run(api.metrics())
+    snapshot_payload = _snapshot(api)
+
+    assert metrics_payload["metrics"]["series"][0]["state_dir"]
+    assert snapshot_payload["metrics"]["series"] == [
+        {
+            "ts": "2026-06-21T10:00:00Z",
+            "derived": {
+                "footprint_open_items": 5,
+                "conscious_reviews_per_signal_24h": 0.25,
+                "durable_decisions_per_conscious_review_24h": 0.5,
+            },
+        }
+    ]
 
 
 def test_attention_and_snapshot_state_dir_hash_label_hostile_attention_payloads(tmp_path, monkeypatch):
