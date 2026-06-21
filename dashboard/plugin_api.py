@@ -5,6 +5,7 @@ This deliberately reads compact JSONL state only and never mutates Sensorium sta
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1526,6 +1527,87 @@ def _sanitize_edge(edge: Any) -> dict[str, Any]:
     }
 
 
+_TOPOLOGY_NODE_KINDS = {"sensor", "emitter", "processor", "gate", "queue", "sink"}
+_TOPOLOGY_STATUSES = {"active", "disabled", "degraded"}
+_TOPOLOGY_EDGE_KINDS = {"configured_flow", "dependency", "fallback"}
+
+
+def _topology_node_kind(raw: Any) -> str:
+    """Closed-vocabulary node kind; missing type defaults to sensor (registry.json is sensor-scoped)."""
+    if raw is None or raw == "":
+        return "sensor"
+    text = str(raw).strip().lower()
+    return text if text in _TOPOLOGY_NODE_KINDS else "unknown"
+
+
+def _topology_edge_kind(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    return text if text in _TOPOLOGY_EDGE_KINDS else "configured_flow"
+
+
+def _topology_status(enabled: Any, raw_status: Any) -> str:
+    status = str(raw_status or "").strip().lower()
+    if status in _TOPOLOGY_STATUSES:
+        return status
+    if enabled is False:
+        return "disabled"
+    if enabled is True:
+        return "active"
+    return "unknown"
+
+
+def _topology_safe_id(value: Any) -> str:
+    return _safe_surface_atom("topology_node", value)
+
+
+def _sanitize_topology_node(raw_id: str, block: Any) -> tuple[str, dict[str, Any]]:
+    data = block if isinstance(block, dict) else {}
+    kind = _topology_node_kind(data.get("type") or data.get("kind"))
+    node_id = f"{kind}:{_topology_safe_id(raw_id)}"
+    enabled = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
+    label = _safe_surface_text("topology_label", data.get("label") or data.get("name") or raw_id, limit=80)
+    return node_id, {
+        "id": node_id,
+        "kind": kind,
+        "label": label,
+        "enabled": enabled,
+        "configured_status": _topology_status(enabled, data.get("status")),
+    }
+
+
+def _sanitize_topology_edge(edge: Any, node_lookup: dict[str, str]) -> dict[str, Any]:
+    data = edge if isinstance(edge, dict) else {}
+    raw_from = data.get("from") or data.get("source")
+    raw_to = data.get("to") or data.get("target")
+    from_id = node_lookup.get(str(raw_from)) or f"unknown:{_topology_safe_id(raw_from)}"
+    to_id = node_lookup.get(str(raw_to)) or f"unknown:{_topology_safe_id(raw_to)}"
+    kind = _topology_edge_kind(data.get("kind") or data.get("type"))
+    enabled = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
+    raw_status = data.get("status")
+    status = _safe_surface_atom("topology_edge_status", raw_status) if raw_status else None
+    return {
+        "id": f"{from_id}->{to_id}",
+        "from": from_id,
+        "to": to_id,
+        "kind": kind,
+        "enabled": enabled,
+        "status": status,
+    }
+
+
+def _topology_config_version(root: Path) -> str:
+    """Hash of effective topology/config/registry sources; changes when any source's content changes."""
+    parts: list[bytes] = []
+    for rel in ("sensors/registry.json", "sensors/edges.json", "instance.config.json"):
+        path = root / rel
+        try:
+            parts.append(path.read_bytes() if path.exists() else b"")
+        except Exception:
+            parts.append(b"")
+    digest = hashlib.sha256(b"\x00".join(parts)).hexdigest()
+    return f"sha256:{digest}"
+
+
 def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, Any]]:
     path = root / "inner_life" / name
     if not path.exists():
@@ -1632,6 +1714,65 @@ async def registry(instance: str | None = None) -> dict[str, Any]:
         "meta": {"block_count": len(blocks), "edge_count": len(edges), "privacy": "compact_only"},
         "blocks": blocks,
         "edges": edges,
+    }
+
+
+@router.get("/topology")
+async def topology(instance: str | None = None) -> dict[str, Any]:
+    """Read-only compact-only topology/config projection for the flow DAG.
+
+    Derived from sensors/registry.json + sensors/edges.json (instance.config.json
+    additionally feeds config_version). Nodes/edges reflect configured topology,
+    not runtime history, so configured-but-quiet sensors appear even with zero
+    JSONL rows. Processor/gate internals have no registry representation yet;
+    this slice covers sensor registry blocks/edges (sera-ck9.1) and leaves
+    richer processor/gate coverage for a follow-up slice.
+    """
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+
+    raw_registry = _read_json(root / "sensors" / "registry.json", {})
+    raw_edges = _read_json(root / "sensors" / "edges.json", {})
+    blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
+    if not isinstance(blocks_obj, dict) and isinstance(raw_registry, dict):
+        blocks_obj = raw_registry
+    if not isinstance(blocks_obj, dict):
+        blocks_obj = {}
+
+    node_limit, edge_limit = 250, 300
+    node_lookup: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for raw_id, block in sorted(blocks_obj.items(), key=lambda item: str(item[0]))[:node_limit]:
+        node_id, node = _sanitize_topology_node(str(raw_id), block)
+        node_lookup[str(raw_id)] = node_id
+        nodes.append(node)
+
+    raw_edge_list = raw_edges.get("edges") if isinstance(raw_edges, dict) else []
+    if not isinstance(raw_edge_list, list):
+        raw_edge_list = []
+    edges = [_sanitize_topology_edge(edge, node_lookup) for edge in raw_edge_list[:edge_limit]]
+
+    ts = _now()
+    return {
+        "ok": True,
+        "privacy": "compact_only",
+        "generated_at": ts,
+        "as_of": ts,
+        "instance": effective_instance,
+        "config_version": _topology_config_version(root),
+        "nodes": nodes,
+        "edges": edges,
+        "meta": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "privacy": "compact_only",
+            "node_limit": node_limit,
+            "edge_limit": edge_limit,
+            "truncated_nodes": len(blocks_obj) > node_limit,
+            "truncated_edges": len(raw_edge_list) > edge_limit,
+        },
     }
 
 
