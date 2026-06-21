@@ -770,11 +770,9 @@
     const open = latest.open || {};
     const derived = latest.derived || {};
     const series = metrics.series || [];
-    const viewCards = ((data && data.views) ? data.views : []).concat([{ id: "inner_life", label: "Inner-life", summary: "Lane graph, compact refs, and read-only causality.", count: ((graphState.data && graphState.data.meta && graphState.data.meta.node_count) || 0) + (perceptionTraces.length || 0), band: wrongTurns ? "yellow" : "violet" }]);
     const [activeView, setActiveView] = useState("overview");
     const [innerFilters, setInnerFilters] = useState({ wrongOnly: false, trendOnly: false, blockedOnly: false, openReview: false, includeLoops: false });
     const [selectedInnerItem, setSelectedInnerItem] = useState(null);
-    const innerGraph = buildInnerLifeGraph(data, graphState.data, innerFilters);
     const openConscious = open.open_conscious_review_tasks ?? 0;
     const openSubconscious = open.open_subconscious_review_tasks ?? 0;
     const openIntake = open.open_intake_tasks ?? 0;
@@ -784,6 +782,8 @@
     const recentSignals = data && data.recent_signals ? data.recent_signals : [];
     const perceptionTraces = data && data.perception_traces ? data.perception_traces : [];
     const wrongTurns = counts.perception_wrong_turns || 0;
+    const viewCards = ((data && data.views) ? data.views : []).concat([{ id: "inner_life", label: "Inner-life", summary: "Lane graph, compact refs, and read-only causality.", count: ((graphState.data && graphState.data.meta && graphState.data.meta.node_count) || 0) + (perceptionTraces.length || 0), band: wrongTurns ? "yellow" : "violet" }]);
+    const innerGraph = buildInnerLifeGraph(data, graphState.data, innerFilters);
     const liveItems = footprint.live_items ?? ((counts.lifecycle_warnings || 0) + (counts.active_candidates || 0) + openConscious + openSubconscious + openIntake);
     const residueItems = footprint.residue_items ?? ((counts.held_artifacts || 0) + (counts.historical_outbox || 0) + (counts.closed_actions || 0));
     const quiet = liveItems === 0;
