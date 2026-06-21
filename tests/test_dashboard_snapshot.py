@@ -433,3 +433,54 @@ def test_snapshot_separates_live_pressure_from_historical_residue(tmp_path, monk
     assert views["overview"]["band"] == "yellow"
     assert views["actuators"]["count"] == 0
     assert views["actuators"]["band"] == "neutral"
+
+
+def test_snapshot_hash_labels_secret_shaped_artifact_projection_fields(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "api_key_artifact_8899"
+
+    _append_jsonl(
+        root,
+        "candidates.jsonl",
+        {
+            "id": "cand_artifact",
+            "kind": "media_gift",
+            "status": "candidate",
+            "summary": f"candidate summary {sentinel}",
+            "updated_at": "2026-06-21T12:00:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "artifacts.jsonl",
+        {
+            "id": "art_secret",
+            "kind": sentinel,
+            "status": "recorded",
+            "delivery_state": sentinel,
+            "ref_path": f"/tmp/{sentinel}.mp4",
+            "why_created": f"artifact reason {sentinel}",
+            "source_refs": {"candidate_id": "cand_artifact", "thread_id": sentinel, "action_id": sentinel},
+            "sensitivity": sentinel,
+            "allowed_surfaces": [sentinel],
+            "updated_at": "2026-06-21T12:01:00Z",
+        },
+    )
+
+    data = _snapshot(api)
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    artifact = data["artifacts"][0]
+    assert artifact["kind"].startswith("artifact_kind#")
+    assert artifact["delivery_state"].startswith("delivery_state#")
+    assert artifact["ref_name"].startswith("artifact_ref_name#")
+    assert artifact["ref_path"].startswith("artifact_ref_path#")
+    assert artifact["why_created"].startswith("artifact_why#")
+    assert artifact["thread_id"].startswith("thread#")
+    group = data["artifact_groups"][0]
+    assert group["title"].startswith("artifact_group_title#")
+    assert group["items"][0]["ref_path"].startswith("artifact_ref_path#")

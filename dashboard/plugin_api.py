@@ -413,19 +413,19 @@ def _artifact_item(artifact: dict[str, Any]) -> dict[str, Any]:
     source_refs: dict[str, Any] = raw_source_refs if isinstance(raw_source_refs, dict) else {}
     ref_path = str(artifact.get("ref_path") or "")
     return {
-        "id": artifact.get("id"),
-        "kind": artifact.get("kind"),
-        "status": artifact.get("status"),
-        "delivery_state": artifact.get("delivery_state"),
-        "handoff_mode": artifact.get("intended_handoff_mode"),
-        "ref_name": Path(ref_path).name if ref_path else "",
-        "ref_path": ref_path,
-        "why_created": _truncate(artifact.get("why_created"), 180),
-        "thread_id": source_refs.get("thread_id"),
-        "candidate_id": source_refs.get("candidate_id"),
-        "action_id": source_refs.get("action_id"),
-        "sensitivity": artifact.get("sensitivity") or artifact.get("privacy"),
-        "allowed_surfaces": artifact.get("allowed_surfaces") or [],
+        "id": _safe_surface_atom("artifact", artifact.get("id")),
+        "kind": _safe_surface_atom("artifact_kind", artifact.get("kind")),
+        "status": _safe_surface_atom("artifact_status", artifact.get("status")),
+        "delivery_state": _safe_surface_atom("delivery_state", artifact.get("delivery_state")),
+        "handoff_mode": _safe_surface_atom("handoff_mode", artifact.get("intended_handoff_mode")),
+        "ref_name": _safe_surface_text("artifact_ref_name", Path(ref_path).name if ref_path else "", limit=120),
+        "ref_path": _safe_surface_text("artifact_ref_path", ref_path, limit=180),
+        "why_created": _safe_surface_text("artifact_why", artifact.get("why_created"), limit=180),
+        "thread_id": _safe_surface_atom("thread", source_refs.get("thread_id")),
+        "candidate_id": _safe_surface_atom("candidate", source_refs.get("candidate_id")),
+        "action_id": _safe_surface_atom("action", source_refs.get("action_id")),
+        "sensitivity": _safe_surface_atom("sensitivity", artifact.get("sensitivity") or artifact.get("privacy")),
+        "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (artifact.get("allowed_surfaces") or [])][:8],
         "updated_at": artifact.get("updated_at") or artifact.get("ts"),
     }
 
@@ -464,21 +464,21 @@ def _artifact_group_title(
 ) -> str:
     if group_type == "action":
         action = action_by_id.get(group_id, {})
-        return _truncate(action.get("title") or action.get("intent") or f"Action {group_id}", 120)
+        return _safe_surface_text("artifact_group_title", action.get("title") or action.get("intent") or f"Action {group_id}", limit=120)
     if group_type == "thread":
         thread = thread_by_id.get(group_id, {})
-        return _truncate(_thread_title(thread) if thread else f"Thread {group_id}", 120)
+        return _safe_surface_text("artifact_group_title", _thread_title(thread) if thread else f"Thread {group_id}", limit=120)
     if group_type == "candidate":
         candidate = candidate_by_id.get(group_id, {})
-        return _truncate(candidate.get("summary") or f"Candidate {group_id}", 120)
+        return _safe_surface_text("artifact_group_title", candidate.get("summary") or f"Candidate {group_id}", limit=120)
     if group_type == "task":
-        return f"Kanban task {group_id}"
+        return _safe_surface_text("artifact_group_title", f"Kanban task {group_id}", limit=120)
     if group_type == "fingerprint":
-        return f"Signal lineage {group_id}"
+        return _safe_surface_text("artifact_group_title", f"Signal lineage {group_id}", limit=120)
     if group_type == "ref":
-        return Path(group_id).name
+        return _safe_surface_text("artifact_group_title", Path(group_id).name, limit=120)
     first = items[0] if items else {}
-    return _truncate(first.get("why_created") or first.get("id") or "Artifact group", 120)
+    return _safe_surface_text("artifact_group_title", first.get("why_created") or first.get("id") or "Artifact group", limit=120)
 
 
 def _artifact_groups(
@@ -497,14 +497,15 @@ def _artifact_groups(
     for (group_type, group_id), rows in grouped.items():
         rows.sort(key=_sort_key, reverse=True)
         item_cards = [_artifact_item(row) for row in rows]
-        delivery_states = Counter(str(row.get("delivery_state") or "unknown") for row in rows)
-        kinds = Counter(str(row.get("kind") or "unknown") for row in rows)
+        delivery_states = Counter(_safe_surface_atom("delivery_state", row.get("delivery_state") or "unknown") for row in rows)
+        kinds = Counter(_safe_surface_atom("artifact_kind", row.get("kind") or "unknown") for row in rows)
         latest = rows[0] if rows else {}
+        safe_group_id = _safe_surface_atom(group_type, group_id)
         groups.append(
             {
-                "id": f"{group_type}:{group_id}",
-                "group_type": group_type,
-                "group_id": group_id,
+                "id": f"{group_type}:{safe_group_id}",
+                "group_type": _safe_surface_atom("artifact_group_type", group_type),
+                "group_id": safe_group_id,
                 "title": _artifact_group_title(
                     group_type,
                     group_id,
@@ -1307,10 +1308,10 @@ def _lifecycle_warnings(
                 warnings.append(
                     {
                         "kind": "artifact",
-                        "id": str(media_ref),
+                        "id": _safe_surface_atom("artifact", media_ref),
                         "band": "yellow",
                         "label": "missing_media_ref",
-                        "detail": f"Outbox {req_id} references a missing artifact.",
+                        "detail": _safe_surface_text("warning_detail", f"Outbox {req_id} references a missing artifact.", limit=160),
                     }
                 )
     for action in actions:
@@ -1332,10 +1333,10 @@ def _lifecycle_warnings(
             warnings.append(
                 {
                     "kind": "artifact",
-                    "id": artifact.get("id"),
+                    "id": _safe_surface_atom("artifact", artifact.get("id")),
                     "band": "yellow",
                     "label": "artifact_action_missing",
-                    "detail": f"Artifact references missing action {action_id}.",
+                    "detail": _safe_surface_text("warning_detail", f"Artifact references missing action {action_id}.", limit=160),
                 }
             )
     return warnings[:12]
@@ -1871,11 +1872,11 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             state,
         ),
         "status_breakdown": {
-            "threads": dict(Counter(str(t.get("status") or "unknown") for t in threads)),
-            "candidates": dict(Counter(str(c.get("status") or "unknown") for c in candidates)),
-            "actions": dict(Counter(str(a.get("status") or "unknown") for a in actions)),
-            "artifacts": dict(Counter(str(a.get("delivery_state") or "unknown") for a in artifacts)),
-            "outbox": dict(Counter(str(o.get("status") or "unknown") for o in outbox)),
+            "threads": dict(Counter(_safe_surface_atom("thread_status", t.get("status") or "unknown") for t in threads)),
+            "candidates": dict(Counter(_safe_surface_atom("candidate_status", c.get("status") or "unknown") for c in candidates)),
+            "actions": dict(Counter(_safe_surface_atom("action_status", a.get("status") or "unknown") for a in actions)),
+            "artifacts": dict(Counter(_safe_surface_atom("delivery_state", a.get("delivery_state") or "unknown") for a in artifacts)),
+            "outbox": dict(Counter(_safe_surface_atom("outbox_status", o.get("status") or "unknown") for o in outbox)),
         },
         "views": _dashboard_views(counts, recent_signals=len(recent_signals[:12]), footprint=attention_footprint),
         "perception_traces": perception_traces,
