@@ -767,3 +767,37 @@ def test_compact_get_surfaces_hash_label_raw_transcript_markers(tmp_path, monkey
     }
 
     assert marker not in json.dumps(payloads, sort_keys=True)
+
+
+def test_metrics_and_snapshot_metrics_hash_label_hostile_metrics_payloads(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    metrics_root = tmp_path / "metrics"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    monkeypatch.setattr(api, "METRICS_DIR", metrics_root)
+    marker = "RAW_LOG_BODY_DO_NOT_LEAK_8899"
+    root.mkdir(parents=True)
+    metrics_root.mkdir(parents=True)
+    (metrics_root / "latest.json").write_text(
+        json.dumps(
+            {
+                "queue": {"reason": marker, "depth": 1},
+                "series_label": marker,
+                marker: {"nested": marker},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (metrics_root / "timeseries.jsonl").write_text(
+        json.dumps({"metric": marker, "value": 1, marker: marker}) + "\n",
+        encoding="utf-8",
+    )
+
+    metrics_payload = asyncio.run(api.metrics())
+    snapshot_payload = _snapshot(api)
+    serialized = json.dumps({"metrics": metrics_payload, "snapshot_metrics": snapshot_payload["metrics"]}, sort_keys=True)
+
+    assert marker not in serialized
+    assert metrics_payload["metrics"]["latest"]["queue"]["depth"] == 1
+    assert metrics_payload["metrics"]["series"][0]["value"] == 1

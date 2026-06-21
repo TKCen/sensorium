@@ -177,12 +177,12 @@ def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
     series = _read_plain_jsonl(METRICS_DIR / "timeseries.jsonl", limit=limit)
     return {
         "ok": bool(latest),
-        "dir": str(METRICS_DIR),
+        "dir": _safe_surface_text("metrics_dir", str(METRICS_DIR), limit=240),
         "latest_mtime": _mtime(METRICS_DIR / "latest.json"),
-        "timeseries_path": str(METRICS_DIR / "timeseries.jsonl"),
+        "timeseries_path": _safe_surface_text("metrics_path", str(METRICS_DIR / "timeseries.jsonl"), limit=240),
         "series_count": len(series),
-        "latest": latest,
-        "series": series,
+        "latest": _safe_surface_projection("metric", latest),
+        "series": _safe_surface_projection("metric", series),
     }
 
 
