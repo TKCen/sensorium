@@ -64,6 +64,12 @@ _RECEIPT_EVIDENCE_REF_TYPES = {
     "correlation",
     "conscious_task",
 }
+_SAFE_HASH_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*#[0-9a-f]{16}$")
+_SAFE_SURFACE_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_SECRET_SHAPED_RE = re.compile(
+    r"sk-|api[_-]?key|private[_-]?key|password|passwd|oauth|bearer|secret|token",
+    re.I,
+)
 
 
 def _resolve_instance(instance: str | None) -> tuple[str, Path] | None:
@@ -91,6 +97,33 @@ def _truncate(value: Any, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _looks_secret_shaped(value: Any) -> bool:
+    """Heuristic guard for hostile legacy/corrupt GET-projected strings."""
+    return bool(_SECRET_SHAPED_RE.search(str(value or "")))
+
+
+def _safe_surface_text(prefix: str, value: Any, *, limit: int = 160, atom_only: bool = False) -> str:
+    """Project a scalar for dashboard GET output without echoing secret-shaped text.
+
+    Existing compact dashboard rows legitimately carry short free-form summaries.
+    Those remain visible unless a legacy/corrupt value looks like key/password
+    material. Atom/classification fields additionally must be compact atoms; if
+    not, they are replaced with deterministic opaque labels.
+    """
+    text = _truncate(value, limit)
+    if not text:
+        return ""
+    if _SAFE_HASH_LABEL_RE.fullmatch(text):
+        return text
+    if _looks_secret_shaped(text) or (atom_only and not _SAFE_SURFACE_ATOM_RE.fullmatch(text)):
+        return _opaque_join_label(prefix, value)
+    return text
+
+
+def _safe_surface_atom(prefix: str, value: Any, *, limit: int = 96) -> str:
+    return _safe_surface_text(prefix, value, limit=limit, atom_only=True)
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -319,12 +352,12 @@ def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
 def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_trace_candidate_id(candidate.get("id")),
-        "status": candidate.get("status"),
-        "kind": candidate.get("kind"),
+        "status": _safe_surface_atom("candidate_status", candidate.get("status")),
+        "kind": _safe_surface_atom("candidate_kind", candidate.get("kind")),
         "pressure": candidate.get("pressure"),
-        "summary": _truncate(candidate.get("summary"), 180),
-        "sensitivity": candidate.get("sensitivity"),
-        "allowed_surfaces": candidate.get("allowed_surfaces") or [],
+        "summary": _safe_surface_text("candidate_summary", candidate.get("summary"), limit=180),
+        "sensitivity": _safe_surface_atom("sensitivity", candidate.get("sensitivity")),
+        "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (candidate.get("allowed_surfaces") or [])][:8],
         "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
     }
 
@@ -332,16 +365,16 @@ def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
 def _signal_item(signal: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_trace_ref("signal", signal.get("id")),
-        "sensor": signal.get("sensor"),
-        "source": signal.get("source"),
-        "kind": signal.get("kind"),
-        "summary": _truncate(signal.get("summary"), 180),
+        "sensor": _safe_surface_atom("sensor", signal.get("sensor")),
+        "source": _safe_surface_atom("source", signal.get("source")),
+        "kind": _safe_surface_atom("signal_kind", signal.get("kind")),
+        "summary": _safe_surface_text("signal_summary", signal.get("summary"), limit=180),
         "strength_hint": signal.get("strength_hint"),
-        "pressure_level": signal.get("pressure_level"),
-        "transition": signal.get("transition"),
+        "pressure_level": _safe_surface_atom("pressure_level", signal.get("pressure_level")),
+        "transition": _safe_surface_atom("transition", signal.get("transition")),
         "correlation_keys": _safe_trace_ref_list("correlation", signal.get("correlation_keys") or [], limit=8),
-        "sensitivity": signal.get("sensitivity"),
-        "allowed_surfaces": signal.get("allowed_surfaces") or [],
+        "sensitivity": _safe_surface_atom("sensitivity", signal.get("sensitivity")),
+        "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (signal.get("allowed_surfaces") or [])][:8],
         "ts": signal.get("ts") or signal.get("created_at") or signal.get("updated_at"),
     }
 
@@ -726,7 +759,10 @@ def _safe_decision_reason(decision: dict[str, Any]) -> str:
     for key in ("reason_label", "detail_label", "error_label"):
         label = decision.get(key)
         if label:
-            return _truncate(label, 140)
+            prefix = key.removesuffix("_label")
+            if _is_receipt_evidence_label(prefix, label) or _SAFE_HASH_LABEL_RE.fullmatch(str(label)):
+                return _truncate(label, 140)
+            return _truncate(_opaque_join_label(prefix, label), 140)
     for key in ("reason", "detail", "error"):
         raw = decision.get(key)
         if raw:
@@ -781,7 +817,9 @@ def _safe_trace_reason(meta: dict[str, Any], latest_applied: dict[str, Any]) -> 
     """
     reason_label = meta.get("reason_label") or latest_applied.get("reason_label")
     if reason_label:
-        return _truncate(reason_label, 200)
+        if _is_receipt_evidence_label("reason", reason_label) or _SAFE_HASH_LABEL_RE.fullmatch(str(reason_label)):
+            return _truncate(reason_label, 200)
+        return _truncate(_opaque_join_label("reason", reason_label), 200)
     raw_reason = meta.get("reason") or latest_applied.get("reason")
     if not raw_reason:
         return ""
@@ -1027,8 +1065,8 @@ def _trace_event_item(event: dict[str, Any]) -> dict[str, Any]:
     signal_ids = _safe_trace_ref_list("signal", event.get("source_signal_ids") or [], limit=6)
     return {
         "id": _safe_trace_ref("event", event.get("id")),
-        "kind": event.get("kind"),
-        "summary": _truncate(event.get("summary"), 160),
+        "kind": _safe_surface_atom("event_kind", event.get("kind")),
+        "summary": _safe_surface_text("event_summary", event.get("summary"), limit=160),
         "strength": event.get("strength"),
         "signal_ids": signal_ids,
         "ts": event.get("ts") or event.get("created_at"),
@@ -1038,12 +1076,12 @@ def _trace_event_item(event: dict[str, Any]) -> dict[str, Any]:
 def _trace_signal_item(signal: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_trace_ref("signal", signal.get("id")),
-        "kind": signal.get("kind"),
-        "sensor": signal.get("sensor"),
-        "summary": _truncate(signal.get("summary"), 160),
+        "kind": _safe_surface_atom("signal_kind", signal.get("kind")),
+        "sensor": _safe_surface_atom("sensor", signal.get("sensor")),
+        "summary": _safe_surface_text("signal_summary", signal.get("summary"), limit=160),
         "strength_hint": signal.get("strength_hint"),
-        "pressure_level": signal.get("pressure_level"),
-        "transition": signal.get("transition"),
+        "pressure_level": _safe_surface_atom("pressure_level", signal.get("pressure_level")),
+        "transition": _safe_surface_atom("transition", signal.get("transition")),
         "ts": signal.get("ts") or signal.get("created_at"),
     }
 
@@ -1200,10 +1238,10 @@ def _perception_traces(
         traces.append(
             {
                 "candidate_id": _safe_trace_candidate_id(cand_id),
-                "kind": candidate.get("kind"),
-                "status": candidate.get("status"),
+                "kind": _safe_surface_atom("candidate_kind", candidate.get("kind")),
+                "status": _safe_surface_atom("candidate_status", candidate.get("status")),
                 "pressure": candidate.get("pressure"),
-                "summary": _truncate(candidate.get("summary"), 200),
+                "summary": _safe_surface_text("candidate_summary", candidate.get("summary"), limit=200),
                 "correlation_keys": _safe_trace_ref_list(
                     "correlation", candidate.get("correlation_keys") or [], limit=4
                 ),
@@ -1415,7 +1453,7 @@ def _dashboard_views(counts: dict[str, int], *, recent_signals: int, footprint: 
         _view_card(
             "overview",
             "Overview",
-            "Immediate attention pressure, footprint, and efficiency trend.",
+            "Live pressure, freshness, and efficiency before any detailed drilldown.",
             overview_count,
             overview_band,
         ),
@@ -1441,6 +1479,77 @@ def _dashboard_views(counts: dict[str, int], *, recent_signals: int, footprint: 
             actuator_band,
         ),
     ]
+
+
+def _sanitize_registry_block(block_id: str, block: Any) -> dict[str, Any]:
+    data = block if isinstance(block, dict) else {}
+    return {
+        "id": _safe_surface_atom("block", block_id),
+        "type": _safe_surface_atom("block_type", data.get("type") or data.get("kind")),
+        "status": _safe_surface_atom("block_status", data.get("status") or "active"),
+        "enabled": data.get("enabled") if isinstance(data.get("enabled"), bool) else None,
+    }
+
+
+def _sanitize_edge(edge: Any) -> dict[str, Any]:
+    data = edge if isinstance(edge, dict) else {}
+    return {
+        "from": _safe_surface_atom("block", data.get("from") or data.get("source")),
+        "to": _safe_surface_atom("block", data.get("to") or data.get("target")),
+        "kind": _safe_surface_atom("edge_kind", data.get("kind") or data.get("type")),
+    }
+
+
+def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, Any]]:
+    path = root / "inner_life" / name
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(errors="ignore").splitlines()[-limit:]:
+            try:
+                value = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+    except Exception:
+        return []
+    return rows
+
+
+def _sanitize_dampener(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": _safe_surface_atom("record_type", row.get("type")),
+        "source_node": _safe_surface_atom("node", row.get("source_node")),
+        "target_node": _safe_surface_atom("node", row.get("target_node")),
+        "mode": _safe_surface_atom("mode", row.get("mode")),
+        "reason": _safe_surface_text("reason", row.get("reason"), limit=140),
+        "before_pressure": row.get("before_pressure"),
+        "after_pressure": row.get("after_pressure"),
+        "precedence": _safe_surface_atom("precedence", row.get("precedence")),
+        "ts": row.get("ts") or row.get("created_at"),
+    }
+
+
+def _sanitize_blocker(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": _safe_surface_atom("record_type", row.get("type")),
+        "source_node": _safe_surface_atom("node", row.get("source_node")),
+        "target_node": _safe_surface_atom("node", row.get("target_node")),
+        "policy_id": _safe_surface_atom("policy", row.get("policy_id")),
+        "schema_ref": _safe_surface_atom("schema", row.get("schema_ref")),
+        "authority_ref": _safe_surface_atom("authority", row.get("authority_ref")),
+        "reason_kind": _safe_surface_atom("reason_kind", row.get("reason_kind")),
+        "reason_label": (
+            _truncate(row.get("reason_label"), 140)
+            if _is_receipt_evidence_label("reason", row.get("reason_label"))
+            else _opaque_join_label("reason", row.get("reason_label"))
+        ) if row.get("reason_label") else "",
+        "precedence": _safe_surface_atom("precedence", row.get("precedence")),
+        "blocked": bool(row.get("blocked")) if "blocked" in row else None,
+        "ts": row.get("ts") or row.get("created_at"),
+    }
 
 
 @router.get("/attention")
@@ -1469,6 +1578,82 @@ async def attention(instance: str | None = None, surface: str = "local", limit: 
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "generated_at": _now(), "instance": effective_instance, **inbox}
+
+
+@router.get("/registry")
+async def registry(instance: str | None = None) -> dict[str, Any]:
+    """Read-only compact sensor/inner-life registry projection."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    raw_registry = _read_json(root / "sensors" / "registry.json", {})
+    raw_edges = _read_json(root / "sensors" / "edges.json", {})
+    blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
+    if not isinstance(blocks_obj, dict) and isinstance(raw_registry, dict):
+        blocks_obj = raw_registry
+    blocks = [
+        _sanitize_registry_block(str(block_id), block)
+        for block_id, block in sorted((blocks_obj or {}).items(), key=lambda item: str(item[0]))[:250]
+    ] if isinstance(blocks_obj, dict) else []
+    raw_edge_list = raw_edges.get("edges") if isinstance(raw_edges, dict) else []
+    edges = [_sanitize_edge(edge) for edge in (raw_edge_list if isinstance(raw_edge_list, list) else [])[:300]]
+    return {
+        "ok": True,
+        "generated_at": _now(),
+        "instance": effective_instance,
+        "version": raw_registry.get("version") if isinstance(raw_registry, dict) else None,
+        "meta": {"block_count": len(blocks), "edge_count": len(edges), "privacy": "compact_only"},
+        "blocks": blocks,
+        "edges": edges,
+    }
+
+
+@router.get("/probe-audit")
+async def probe_audit(instance: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Read-only compact run-state/probe audit projection."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    run_state_dir = root / "sensors" / "run_state"
+    files = sorted(run_state_dir.glob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:limit] if run_state_dir.exists() else []
+    items: list[dict[str, Any]] = []
+    for path in files:
+        row = _read_json(path, {})
+        data = row if isinstance(row, dict) else {}
+        items.append({
+            "id": _safe_surface_atom("run_state", path.stem),
+            "status": _safe_surface_atom("run_state_status", data.get("status")),
+            "reason": _safe_surface_text("reason", data.get("reason") or data.get("last_reason"), limit=140),
+            "last_run_at": data.get("last_run_at") or data.get("updated_at") or data.get("ts"),
+            "mtime": _mtime(path),
+        })
+    return {"ok": True, "generated_at": _now(), "instance": effective_instance, "items": items, "meta": {"count": len(items), "privacy": "compact_only"}}
+
+
+@router.get("/dampeners")
+async def dampeners(instance: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Read-only compact dampener audit projection."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    rows = _read_inner_life_rows(root, "dampeners.jsonl", limit)
+    items = [_sanitize_dampener(row) for row in rows]
+    return {"ok": True, "generated_at": _now(), "instance": effective_instance, "items": items, "meta": {"count": len(items), "privacy": "compact_only"}}
+
+
+@router.get("/blockers")
+async def blockers(instance: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Read-only compact blocker audit projection."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    rows = _read_inner_life_rows(root, "blockers.jsonl", limit)
+    items = [_sanitize_blocker(row) for row in rows]
+    return {"ok": True, "generated_at": _now(), "instance": effective_instance, "items": items, "meta": {"count": len(items), "privacy": "compact_only"}}
 
 
 @router.get("/metrics")

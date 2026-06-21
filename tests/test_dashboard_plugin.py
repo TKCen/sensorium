@@ -208,3 +208,106 @@ def test_snapshot_hash_labels_password_key_like_compact_refs(tmp_path, monkeypat
     assert trace["missing_event_ids"][0].startswith("event#")
     assert trace["correlation_keys"][0].startswith("correlation#")
     assert data["recent_signals"][0]["correlation_keys"][0].startswith("correlation#")
+
+
+def test_snapshot_hash_labels_secret_shaped_text_and_corrupt_labels(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    sentinel = "sk-t9-final...4242"
+    _append_jsonl(root / "signals" / "inbox.jsonl", {
+        "id": "sig_t9",
+        "sensor": sentinel,
+        "source": sentinel,
+        "kind": sentinel,
+        "summary": f"raw transcript {sentinel}",
+        "strength_hint": 0.95,
+        "pressure_level": sentinel,
+        "transition": sentinel,
+        "ts": "2026-06-21T12:00:00Z",
+    })
+    _append_jsonl(root / "events.jsonl", {
+        "id": "evt_t9",
+        "kind": sentinel,
+        "summary": f"event summary {sentinel}",
+        "source_signal_ids": ["sig_t9"],
+        "ts": "2026-06-21T12:01:00Z",
+    })
+    _append_jsonl(root / "candidates.jsonl", {
+        "id": "cand_t9",
+        "kind": sentinel,
+        "status": "candidate",
+        "pressure": 0.8,
+        "summary": f"candidate summary {sentinel}",
+        "event_ids": ["evt_t9"],
+        "kanban_settlement": {"decision": "SAVE", "reason_label": sentinel},
+        "updated_at": "2026-06-21T12:02:00Z",
+    })
+    _append_jsonl(root / "decisions.jsonl", {
+        "type": "kanban.settlement.applied",
+        "candidate_id": "cand_t9",
+        "reason_label": sentinel,
+        "ts": "2026-06-21T12:03:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.snapshot(instance="demo"))
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    assert data["top_candidates"][0]["kind"].startswith("candidate_kind#")
+    assert data["top_candidates"][0]["summary"].startswith("candidate_summary#")
+    trace = data["perception_traces"][0]
+    assert trace["kind"].startswith("candidate_kind#")
+    assert trace["summary"].startswith("candidate_summary#")
+    assert trace["events"][0]["kind"].startswith("event_kind#")
+    assert trace["events"][0]["summary"].startswith("event_summary#")
+    assert trace["signals"][0]["kind"].startswith("signal_kind#")
+    assert trace["signals"][0]["sensor"].startswith("sensor#")
+    assert trace["settlement"]["reason"].startswith("reason#")
+    assert data["decisions"][0]["reason"].startswith("reason#")
+
+
+def test_dashboard_inner_life_routes_are_read_only_and_privacy_safe(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    sentinel = "sk-t9-route...4242"
+    registry_dir = root / "sensors"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "registry.json").write_text(json.dumps({
+        "version": 2,
+        "blocks": {sentinel: {"type": sentinel, "status": sentinel, "enabled": True}},
+    }))
+    (registry_dir / "edges.json").write_text(json.dumps({"edges": [{"from": sentinel, "to": sentinel, "kind": sentinel}]}))
+    run_state_dir = registry_dir / "run_state"
+    run_state_dir.mkdir()
+    (run_state_dir / f"{sentinel}.json").write_text(json.dumps({"status": sentinel, "reason": sentinel}))
+    _append_jsonl(root / "inner_life" / "dampeners.jsonl", {
+        "type": "dampener_effect",
+        "source_node": sentinel,
+        "target_node": sentinel,
+        "mode": sentinel,
+        "reason": sentinel,
+    })
+    _append_jsonl(root / "inner_life" / "blockers.jsonl", {
+        "type": "blocker_effect",
+        "source_node": sentinel,
+        "target_node": sentinel,
+        "policy_id": sentinel,
+        "reason_label": sentinel,
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    routes = {route.path: sorted(route.methods) for route in mod.router.routes if hasattr(route, "methods")}
+
+    for path in ["/registry", "/probe-audit", "/dampeners", "/blockers"]:
+        assert routes[path] == ["GET"]
+    assert all(set(methods) <= {"GET", "HEAD"} for methods in routes.values())
+
+    payloads = [
+        asyncio.run(mod.registry(instance="demo")),
+        asyncio.run(mod.probe_audit(instance="demo")),
+        asyncio.run(mod.dampeners(instance="demo")),
+        asyncio.run(mod.blockers(instance="demo")),
+    ]
+    serialized = json.dumps(payloads, sort_keys=True)
+    assert sentinel not in serialized
+    assert "block#" in serialized
+    assert "reason#" in serialized
