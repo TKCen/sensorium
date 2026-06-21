@@ -658,3 +658,38 @@ def test_snapshot_hash_labels_secret_shaped_config_and_decision_fields(tmp_path,
     assert decision["decision"].startswith("decision#")
     assert decision["outcome"].startswith("outcome#")
     assert decision["action"].startswith("decision_action#")
+
+
+def test_snapshot_hash_labels_secret_shaped_trace_settlement_decision(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "api_key_trace_decision_8899"
+    _append_jsonl(
+        root,
+        "candidates.jsonl",
+        {
+            "id": "cand_trace_decision",
+            "status": "reviewed",
+            "kind": "subconscious_advisory",
+            "summary": "compact candidate summary",
+            "updated_at": "2026-06-21T14:30:00Z",
+            "kanban_settlement": {
+                "decision": sentinel,
+                "settled_at": "2026-06-21T14:31:00Z",
+                "intake_task_id": "intake_safe",
+                "review_task_id": "review_safe",
+                "reason_label": "reason#1234567890abcdef",
+            },
+        },
+    )
+
+    data = _snapshot(api)
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    trace = data["perception_traces"][0]
+    assert trace["settlement"]["decision"].startswith("decision#")
+    decision_stage = next(stage for stage in trace["stages"] if stage["key"] == "decision")
+    assert decision_stage["detail"].startswith("decision#")

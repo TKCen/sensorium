@@ -1141,8 +1141,9 @@ def _trace_settlement(candidate: dict[str, Any], receipts: list[dict[str, Any]])
     review_task_id = meta.get("review_task_id") or latest_applied.get("review_task_id") or ""
     conscious_task_id = ref.get("task_id") or ref.get("kanban_task_id") or ""
     conscious_thread_id = ref.get("thread_id") or ""
+    raw_decision = meta.get("decision") or latest_applied.get("decision")
     return {
-        "decision": meta.get("decision") or latest_applied.get("decision"),
+        "decision": _safe_surface_atom("decision", raw_decision),
         "reason": _safe_trace_reason(meta, latest_applied),
         "intake_task_id": _opaque_join_label("intake_task", intake_task_id),
         "review_task_id": _opaque_join_label("review_task", review_task_id),
@@ -1165,7 +1166,8 @@ def _trace_lifecycle(
     signal -> event -> candidate -> kanban -> decision -> settled.
     """
     settlement = settlement or {}
-    status = str(candidate.get("status") or "")
+    raw_status = str(candidate.get("status") or "")
+    status = _safe_surface_atom("candidate_status", raw_status)
     pressure = float(candidate.get("pressure") or 0)
     decision = settlement.get("decision")
     intake = bool(settlement.get("intake_task_id") or settlement.get("review_task_id"))
