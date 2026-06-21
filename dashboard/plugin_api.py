@@ -67,7 +67,7 @@ _RECEIPT_EVIDENCE_REF_TYPES = {
 _SAFE_HASH_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*#[0-9a-f]{16}$")
 _SAFE_SURFACE_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _SECRET_SHAPED_RE = re.compile(
-    r"sk-|api[_-]?key|private[_-]?key|password|passwd|oauth|bearer|secret|token",
+    r"sk-|api[_-]?key|private[_-]?key|password|passwd|oauth|bearer|secret|token|raw[_ -]?transcript|raw[_ -]?log|do[_ -]?not[_ -]?leak",
     re.I,
 )
 
@@ -229,7 +229,7 @@ def _mtime_ts(path: Path) -> float | None:
 
 def _source_info(path: Path, *, deprecated: bool = False, excluded_from_canonical: bool = False) -> dict[str, Any]:
     info: dict[str, Any] = {
-        "path": str(path),
+        "path": _safe_surface_text("source_path", str(path), limit=240),
         "exists": path.exists(),
         "mtime": _mtime(path),
     }
@@ -954,6 +954,8 @@ def _safe_trace_ref(prefix: str, value: Any) -> str:
     text = str(value or "")
     if not text:
         return ""
+    if _looks_secret_shaped(text):
+        return _opaque_join_label(prefix, text)
     if _is_safe_trace_ref(prefix, text):
         return text
     return _opaque_join_label(prefix, text)
@@ -1626,7 +1628,7 @@ async def registry(instance: str | None = None) -> dict[str, Any]:
         "ok": True,
         "generated_at": _now(),
         "instance": effective_instance,
-        "version": raw_registry.get("version") if isinstance(raw_registry, dict) else None,
+        "version": _safe_surface_atom("registry_version", raw_registry.get("version")) if isinstance(raw_registry, dict) else None,
         "meta": {"block_count": len(blocks), "edge_count": len(edges), "privacy": "compact_only"},
         "blocks": blocks,
         "edges": edges,

@@ -693,3 +693,77 @@ def test_snapshot_hash_labels_secret_shaped_trace_settlement_decision(tmp_path, 
     assert trace["settlement"]["decision"].startswith("decision#")
     decision_stage = next(stage for stage in trace["stages"] if stage["key"] == "decision")
     assert decision_stage["detail"].startswith("decision#")
+
+
+def test_compact_get_surfaces_hash_label_raw_transcript_markers(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    marker = "RAW_TRANSCRIPT_BODY_DO_NOT_LEAK_8899"
+    root.mkdir(parents=True)
+    (root / "instance.config.json").write_text(
+        json.dumps({"tick_quiet_filename": f"quiet-{marker}.json", "outbox": {"note": marker}}),
+        encoding="utf-8",
+    )
+    (root / "sensors" / "registry.json").parent.mkdir(parents=True)
+    (root / "sensors" / "registry.json").write_text(
+        json.dumps({"version": marker, "blocks": {marker: {"summary": marker}}}),
+        encoding="utf-8",
+    )
+    (root / "sensors" / "edges.json").write_text(
+        json.dumps({"edges": [{"from": "safe_block", "to": marker, "kind": "feeds_back"}]}),
+        encoding="utf-8",
+    )
+    _append_jsonl(root, "inner_life/dampeners.jsonl", {"source_node": "safe", "target_node": marker, "reason": marker})
+    _append_jsonl(root, "inner_life/blockers.jsonl", {"source_node": "safe", "target_node": marker, "reason_label": marker})
+    _append_jsonl(
+        root,
+        "signals/inbox.jsonl",
+        {
+            "id": "sig_raw_marker",
+            "kind": "subconscious_advisory",
+            "summary": marker,
+            "correlation_keys": [marker],
+            "ts": "2026-06-21T15:00:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "threads.jsonl",
+        {"id": "sth_raw_marker", "status": "held", "title": marker, "updated_at": "2026-06-21T15:01:00Z"},
+    )
+    _append_jsonl(
+        root,
+        "thread_actions.jsonl",
+        {
+            "id": "act_raw_marker",
+            "status": "proposed",
+            "summary": marker,
+            "attachments": [{"kind": "artifact_ref", "ref_id": marker}],
+            "updated_at": "2026-06-21T15:02:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "outbox.jsonl",
+        {
+            "id": "obx_raw_marker",
+            "status": "prepared",
+            "message_preview": marker,
+            "target": {"thread_id": marker},
+            "media_refs": [marker],
+            "platform_refs": {"discord": marker},
+            "updated_at": "2026-06-21T15:03:00Z",
+        },
+    )
+    _append_jsonl(root, "artifacts.jsonl", {"id": "art_raw_marker", "ref_path": f"/tmp/{marker}.txt"})
+
+    payloads = {
+        "registry": asyncio.run(api.registry()),
+        "dampeners": asyncio.run(api.dampeners()),
+        "blockers": asyncio.run(api.blockers()),
+        "snapshot": _snapshot(api),
+    }
+
+    assert marker not in json.dumps(payloads, sort_keys=True)
