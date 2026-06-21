@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agent_sensorium.inner_life import InnerLifeValidationError, TemporalPredicateKind
+from agent_sensorium.inner_life import TemporalPredicateKind
 from agent_sensorium.runner import list_sensors, run_sensor
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.temporal_sensor import (
