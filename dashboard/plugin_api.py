@@ -1025,10 +1025,15 @@ def _receipt_graph(root: Path, *, limit_nodes: int = 200, limit_edges: int = 300
                 {
                     "id": f"candidate:{subject_label}",
                     "kind": "candidate",
-                    "status": candidate.get("status") or "unknown",
+                    "status": _safe_surface_atom("candidate_status", candidate.get("status") or "unknown"),
                     "candidate_kind": safe_candidate_kind_label(candidate.get("kind")),
-                    "sensitivity": candidate.get("sensitivity") or receipt.get("sensitivity") or "private",
-                    "allowed_surfaces": candidate.get("allowed_surfaces") or receipt.get("allowed_surfaces") or ["local"],
+                    "sensitivity": _safe_surface_atom(
+                        "sensitivity", candidate.get("sensitivity") or receipt.get("sensitivity") or "private"
+                    ),
+                    "allowed_surfaces": [
+                        _safe_surface_atom("surface", surface)
+                        for surface in (candidate.get("allowed_surfaces") or receipt.get("allowed_surfaces") or ["local"])
+                    ][:8],
                 }
             )
         receipt_id = _receipt_node_id(receipt)
@@ -1036,16 +1041,18 @@ def _receipt_graph(root: Path, *, limit_nodes: int = 200, limit_edges: int = 300
             {
                 "id": receipt_id,
                 "kind": "receipt",
-                "receipt_kind": receipt.get("receipt_kind") or "settlement",
-                "receipt_type": receipt.get("type"),
-                "schema": receipt.get("schema"),
+                "receipt_kind": _safe_surface_atom("receipt_kind", receipt.get("receipt_kind") or "settlement"),
+                "receipt_type": _safe_surface_atom("receipt_type", receipt.get("type")),
+                "schema": _safe_surface_atom("schema", receipt.get("schema")),
                 "subject_ref": _safe_receipt_subject_ref(receipt),
-                "decision": receipt.get("decision"),
-                "outcome": receipt.get("outcome") or receipt.get("new_status"),
+                "decision": _safe_surface_atom("decision", receipt.get("decision")),
+                "outcome": _safe_surface_atom("outcome", receipt.get("outcome") or receipt.get("new_status")),
                 "created_at": receipt.get("created_at") or receipt.get("ts"),
-                "surface": receipt.get("surface") or "kanban",
-                "sensitivity": receipt.get("sensitivity") or "private",
-                "allowed_surfaces": receipt.get("allowed_surfaces") or ["local"],
+                "surface": _safe_surface_atom("surface", receipt.get("surface") or "kanban"),
+                "sensitivity": _safe_surface_atom("sensitivity", receipt.get("sensitivity") or "private"),
+                "allowed_surfaces": [
+                    _safe_surface_atom("surface", surface) for surface in (receipt.get("allowed_surfaces") or ["local"])
+                ][:8],
                 "evidence_refs": _safe_receipt_evidence_refs(receipt),
             }
         )
@@ -1381,8 +1388,8 @@ def _health(
     return {
         "status": status,
         "band": band,
-        "last_dispatch_action": last_dispatch.get("action"),
-        "last_dispatch_reason": _truncate(last_dispatch.get("reason"), 120),
+        "last_dispatch_action": _safe_surface_atom("dispatch_action", last_dispatch.get("action")),
+        "last_dispatch_reason": _safe_surface_text("dispatch_reason", last_dispatch.get("reason"), limit=120),
     }
 
 

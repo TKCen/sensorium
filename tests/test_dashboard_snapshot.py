@@ -581,3 +581,23 @@ def test_snapshot_hash_labels_secret_shaped_thread_action_outbox_projection_fiel
     assert outbox["platform_refs"]["discord"].startswith("platform_ref#")
     assert outbox["safety"]["attached_action_id"].startswith("action#")
     assert any(warning["id"].startswith("action#") for warning in data["lifecycle_warnings"])
+
+
+def test_snapshot_health_hash_labels_secret_shaped_legacy_dispatch_reason(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "api_key_dispatch_reason_8899"
+    root.mkdir(parents=True)
+    (root / "state.latest.json").write_text(
+        json.dumps({"last_dispatch_result": {"action": sentinel, "reason": f"legacy dispatcher raw reason {sentinel}"}}),
+        encoding="utf-8",
+    )
+
+    data = _snapshot(api)
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    assert data["health"]["last_dispatch_action"].startswith("dispatch_action#")
+    assert data["health"]["last_dispatch_reason"].startswith("dispatch_reason#")

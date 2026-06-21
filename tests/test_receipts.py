@@ -409,3 +409,53 @@ def test_legacy_receipt_candidate_id_and_idempotency_key_are_sanitized(store, mo
     assert len(receipt_nodes) == 1
     assert receipt_nodes[0]["id"].startswith("receipt:")
     assert raw_idempotency_key not in receipt_nodes[0]["id"]
+
+
+def test_graph_hash_labels_secret_shaped_surface_metadata(store, monkeypatch):
+    sentinel = "api_key_graph_surface_8899"
+    candidate_id = "cand_graph_surface"
+    subject_label = candidate_ref_label(candidate_id)
+    store.append_jsonl(
+        "candidates",
+        {
+            **_candidate(candidate_id=candidate_id),
+            "sensitivity": sentinel,
+            "allowed_surfaces": [sentinel],
+        },
+    )
+    store.append_jsonl(
+        "decisions",
+        {
+            "schema": "sensorium.decision_receipt.v1",
+            "receipt_kind": "settlement",
+            "ts": "2026-06-20T10:00:00Z",
+            "created_at": "2026-06-20T10:00:00Z",
+            "type": "kanban.settlement.applied",
+            "subject_ref": {"type": "candidate", "id": subject_label},
+            "decision": "SAVE",
+            "outcome": "reviewed",
+            "idempotency_key": "receipt:graph-surface-regression",
+            "surface": sentinel,
+            "allowed_surfaces": [sentinel],
+            "sensitivity": sentinel,
+            "raw_content": False,
+            "evidence_refs": [{"type": "candidate", "ref": "candidate#safe"}],
+            "reason_label": "reason#safe",
+        },
+    )
+
+    api = _load_dashboard_api()
+    monkeypatch.setattr(api, "DEFAULT_ROOT", Path(store.root))
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "test")
+
+    graph_data = asyncio.run(api.graph(instance="test"))
+    graph_json = json.dumps(graph_data, sort_keys=True)
+
+    assert sentinel not in graph_json
+    candidate_node = next(node for node in graph_data["nodes"] if node.get("kind") == "candidate")
+    receipt_node = next(node for node in graph_data["nodes"] if node.get("kind") == "receipt")
+    assert candidate_node["sensitivity"].startswith("sensitivity#")
+    assert candidate_node["allowed_surfaces"][0].startswith("surface#")
+    assert receipt_node["surface"].startswith("surface#")
+    assert receipt_node["sensitivity"].startswith("sensitivity#")
+    assert receipt_node["allowed_surfaces"][0].startswith("surface#")
