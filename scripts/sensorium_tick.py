@@ -8,6 +8,13 @@ Pressure sensors remain deterministic/no-model. Subconscious model advisory runs
 when explicitly requested with --subconscious-advisory --subconscious-model.
 Writes a local tick receipt. Silent on stdout by default for cron use.
 Use --json to print result to stdout.
+
+Sensors run through the unified registry-driven runner (agent_sensorium.runner):
+`--sensor NAME` (repeatable) and `--sensor all` cover both built-in deterministic
+sensors and trusted local script sensors declared in sensors/registry.json.
+`--list-sensors` prints the runnable set and exits. The original per-sensor
+flags (--body-pressure, --network-pressure, etc.) remain as compatible aliases
+that resolve to the same sensor names through the same runner path.
 """
 
 import argparse
@@ -18,16 +25,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_sensorium import memory_reflection as memory_reflection_mod
+from agent_sensorium import runner
 from agent_sensorium.config import default_instance_name, load_instance_config
 from agent_sensorium.schemas import utc_now_iso
 from agent_sensorium.sensors import (
+    build_runtime_heartbeat_signal,
     classify_codex_usage_pressure,
-    classify_media_capacity,
     classify_hindsight_pressure,
     classify_kanban_pressure,
     classify_machine_body_pressure,
     classify_machine_network_pressure,
     classify_machine_process_pressure,
+    classify_media_capacity,
     classify_tts_sidecar_pressure,
     codex_usage_sample,
     hindsight_pressure_sample,
@@ -37,7 +46,6 @@ from agent_sensorium.sensors import (
     machine_process_pressure_sample,
     media_capacity_sample,
     runtime_heartbeat_sample,
-    build_runtime_heartbeat_signal,
     tts_sidecar_pressure_sample,
 )
 from agent_sensorium.store import SensoriumStore
@@ -49,68 +57,17 @@ from agent_sensorium.tools import (
     handle_sensorium_subconscious_advisory,
 )
 
-
-def _sensor_state_path(store: SensoriumStore, name: str) -> Path:
-    return store.root / f"{name}_state.json"
-
-
-def _body_state_path(store: SensoriumStore) -> Path:
-    return _sensor_state_path(store, "body_pressure")
-
-
-def _read_sensor_state(path: Path) -> dict:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(errors="ignore"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {}
-
-
-def _write_sensor_state(path: Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, separators=(",", ":")))
-
-
-_read_body_state = _read_sensor_state
-_write_body_state = _write_sensor_state
-
-
-def _run_transition_sensor(
-    *,
-    name: str,
-    store: SensoriumStore,
-    dry_run: bool,
-    kw: dict,
-    config: dict,
-    sample_fn,
-    classify_fn,
-) -> tuple[dict, str | None]:
-    path = _sensor_state_path(store, name)
-    state = _read_sensor_state(path)
-    sample = sample_fn()
-    signal, next_state = classify_fn(sample, state=state)
-    step = {
-        "sampled": True,
-        "emitted": signal is not None,
-        "level": next_state.get("level", "healthy"),
-    }
-    if isinstance(next_state.get("capacity_record"), dict):
-        step["capacity_status"] = next_state["capacity_record"].get("status")
-    if signal is not None:
-        step["transition"] = signal.get("transition")
-        if not dry_run:
-            raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=config, **kw))
-            if raw.get("success"):
-                step["ingest"] = raw["data"]
-            else:
-                return step, f"{name}_ingest: {raw.get('error', 'unknown')}"
-    if not dry_run:
-        store.ensure_dirs()
-        _write_sensor_state(path, next_state)
-        if isinstance(next_state.get("capacity_record"), dict):
-            _write_sensor_state(store.root / "media_capacity_record.json", next_state["capacity_record"])
-    return step, None
+# Sensors driven by --all-sensors. Preserves the exact pre-unification set:
+# heartbeat and codex_usage were never part of --all-sensors and still aren't.
+LEGACY_ALL_SENSORS_NAMES = (
+    "body_pressure",
+    "network_pressure",
+    "process_pressure",
+    "hindsight_pressure",
+    "kanban_pressure",
+    "tts_sidecar_pressure",
+    "media_capacity",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,6 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--all-sensors", action="store_true", help="Run all currently wired deterministic sensors")
     parser.add_argument(
+        "--sensor", action="append", default=None, metavar="NAME",
+        help=(
+            "Run one sensor by name through the unified runner (built-in or local "
+            "script sensor from sensors/registry.json). Repeatable. "
+            "Use 'all' to run every builtin sensor plus every enabled script sensor."
+        ),
+    )
+    parser.add_argument(
+        "--list-sensors", action="store_true",
+        help="Print the runnable builtin and script sensor names as JSON and exit",
+    )
+    parser.add_argument(
         "--subconscious-advisory", action="store_true",
         help="Run bounded Subconscious advisory dry-run over Events/Candidates",
     )
@@ -175,6 +144,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--subconscious-model-base-url", default=None, help="Override OpenAI-compatible base URL")
     args = parser.parse_args(argv)
 
+    if args.list_sensors:
+        store_for_list = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
+        listing = runner.list_sensors(store_for_list)
+        json.dump(listing, sys.stdout, indent=2)
+        print()
+        return 0
+
     store_for_config = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
     instance_config, config_diag = load_instance_config(
         config_path=args.config_path,
@@ -184,85 +160,74 @@ def main(argv: list[str] | None = None) -> int:
     steps: dict = {}
     errors: list[str] = []
 
+    legacy_flag_names = {
+        "body_pressure": args.body_pressure,
+        "network_pressure": args.network_pressure,
+        "process_pressure": args.process_pressure,
+        "hindsight_pressure": args.hindsight_pressure,
+        "kanban_pressure": args.kanban_pressure,
+        "tts_sidecar_pressure": args.tts_sidecar_pressure,
+        "media_capacity": args.media_capacity,
+        "codex_usage": args.codex_usage,
+        "heartbeat": args.heartbeat,
+    }
+    selected_sensors: set[str] = {name for name, enabled in legacy_flag_names.items() if enabled}
+    if args.all_sensors:
+        selected_sensors.update(LEGACY_ALL_SENSORS_NAMES)
+
+    run_all_unified = False
+    for raw_name in args.sensor or []:
+        if raw_name == "all":
+            run_all_unified = True
+        else:
+            selected_sensors.add(raw_name)
+
+    # Builtin sample/classify fns are referenced by name here (not imported
+    # directly into the runner call) so existing tests that monkeypatch these
+    # module-level names (e.g. sensorium_tick.machine_body_pressure_sample)
+    # keep working unchanged through the unified runner dispatch path.
+    builtin_override_table = {
+        "body_pressure": (machine_body_pressure_sample, classify_machine_body_pressure),
+        "network_pressure": (machine_network_pressure_sample, classify_machine_network_pressure),
+        "process_pressure": (machine_process_pressure_sample, classify_machine_process_pressure),
+        "hindsight_pressure": (hindsight_pressure_sample, classify_hindsight_pressure),
+        "kanban_pressure": (kanban_pressure_sample, classify_kanban_pressure),
+        "tts_sidecar_pressure": (tts_sidecar_pressure_sample, classify_tts_sidecar_pressure),
+        "media_capacity": (media_capacity_sample, classify_media_capacity),
+        "codex_usage": (codex_usage_sample, classify_codex_usage_pressure),
+    }
+
     try:
-        if args.body_pressure or args.all_sensors:
+        if run_all_unified or selected_sensors:
             store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
-            body_path = _body_state_path(store)
-            body_state = _read_body_state(body_path)
-            sample = machine_body_pressure_sample()
-            signal, next_state = classify_machine_body_pressure(sample, state=body_state)
-            body_step = {
-                "sampled": True,
-                "emitted": signal is not None,
-                "level": next_state.get("level", "healthy"),
-                "observed_level": next_state.get("last_observed_level", "healthy"),
-            }
-            if signal is not None:
-                body_step["transition"] = signal.get("transition")
-                if not args.dry_run:
-                    raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=instance_config, **kw))
-                    if raw.get("success"):
-                        body_step["ingest"] = raw["data"]
-                    else:
-                        errors.append(f"body_pressure_ingest: {raw.get('error', 'unknown')}")
-            if not args.dry_run:
-                store.ensure_dirs()
-                _write_body_state(body_path, next_state)
-            steps["body_pressure"] = body_step
-
-        if args.heartbeat:
-            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
-            sample = runtime_heartbeat_sample(store=store)
-            signal = build_runtime_heartbeat_signal(sample, instance=args.instance)
-            step = {"sampled": True, "emitted": True, "values": sample}
-            if not args.dry_run:
-                raw = json.loads(handle_sensorium_ingest_signal(signal=signal, config=instance_config, **kw))
-                if raw.get("success"):
-                    step["ingest"] = raw["data"]
-                else:
-                    errors.append(f"heartbeat_ingest: {raw.get('error', 'unknown')}")
-            steps["heartbeat"] = step
-
-        transition_specs = [
-            ("network_pressure", args.network_pressure, machine_network_pressure_sample, classify_machine_network_pressure),
-            ("process_pressure", args.process_pressure, machine_process_pressure_sample, classify_machine_process_pressure),
-            ("hindsight_pressure", args.hindsight_pressure, hindsight_pressure_sample, classify_hindsight_pressure),
-            ("kanban_pressure", args.kanban_pressure, kanban_pressure_sample, classify_kanban_pressure),
-            ("tts_sidecar_pressure", args.tts_sidecar_pressure, tts_sidecar_pressure_sample, classify_tts_sidecar_pressure),
-            ("media_capacity", args.media_capacity, media_capacity_sample, classify_media_capacity),
-        ]
-        if any(enabled or args.all_sensors for _, enabled, _, _ in transition_specs):
-            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
-            for name, enabled, sample_fn, classify_fn in transition_specs:
-                if not (enabled or args.all_sensors):
-                    continue
-                step, err = _run_transition_sensor(
-                    name=name,
+            if run_all_unified:
+                listing = runner.list_sensors(store)
+                selected_sensors.update(listing["builtin"])
+                selected_sensors.update(
+                    s["name"] for s in listing["script"] if s.get("enabled", True)
+                )
+            for name in sorted(selected_sensors):
+                sample_fn, classify_fn = builtin_override_table.get(name, (None, None))
+                heartbeat_kwargs = {}
+                if name == runner.HEARTBEAT_SENSOR_NAME:
+                    heartbeat_kwargs = {
+                        "heartbeat_sample_fn": runtime_heartbeat_sample,
+                        "heartbeat_signal_fn": build_runtime_heartbeat_signal,
+                    }
+                step, err = runner.run_sensor(
+                    name,
                     store=store,
+                    config=instance_config,
                     dry_run=args.dry_run,
                     kw=kw,
-                    config=instance_config,
+                    instance=args.instance,
                     sample_fn=sample_fn,
                     classify_fn=classify_fn,
+                    **heartbeat_kwargs,
                 )
                 steps[name] = step
                 if err:
                     errors.append(err)
-
-        if args.codex_usage:
-            store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
-            step, err = _run_transition_sensor(
-                name="codex_usage",
-                store=store,
-                dry_run=args.dry_run,
-                kw=kw,
-                config=instance_config,
-                sample_fn=codex_usage_sample,
-                classify_fn=classify_codex_usage_pressure,
-            )
-            steps["codex_usage"] = step
-            if err:
-                errors.append(err)
 
         if args.memory_reflection:
             store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
@@ -299,9 +264,18 @@ def main(argv: list[str] | None = None) -> int:
             }
             if mr_result.get("config_errors"):
                 steps["memory_reflection"]["config_errors"] = mr_result["config_errors"]
+            memory_reflection_errors = []
             for run in mr_result.get("runs", []):
                 if run.get("status") == "error":
-                    errors.append(f"memory_reflection[{run.get('probe_id')}]: {run.get('error', 'unknown')}")
+                    memory_reflection_errors.append(
+                        f"memory_reflection[{run.get('probe_id')}]: {run.get('error', 'unknown')}"
+                    )
+            if memory_reflection_errors:
+                # Memory reflection is a slow Subconscious/Hindsight probe, not a
+                # live deterministic sensor. A single reflect timeout should be
+                # recorded for later diagnosis but must not abort compaction,
+                # thread service, Kanban mirroring, or the quiet no-agent clock.
+                steps["memory_reflection"]["nonfatal_errors"] = memory_reflection_errors
 
         if not args.dry_run:
             raw = json.loads(handle_sensorium_compact(**kw))

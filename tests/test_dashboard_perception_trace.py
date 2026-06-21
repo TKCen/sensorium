@@ -97,13 +97,14 @@ def test_full_happy_path_trace_stitches_signal_event_settlement(tmp_path, monkey
     # Settlement
     assert trace["settlement"] is not None
     assert trace["settlement"]["decision"] == "SAVE"
-    assert trace["settlement"]["reason"] == "High priority budget issue requires attention"
-    assert trace["settlement"]["intake_task_id"] == "task_intake_001"
-    assert trace["settlement"]["review_task_id"] == "task_review_001"
+    assert trace["settlement"]["reason"].startswith("reason#")
+    assert trace["settlement"]["intake_task_id"].startswith("intake_task#")
+    assert trace["settlement"]["review_task_id"].startswith("review_task#")
     assert trace["settlement"]["settled_at"] == "2026-06-01T10:10:00Z"
-    assert trace["settlement"]["conscious_task_id"] == "conscious_task_001"
-    assert trace["settlement"]["conscious_thread_id"] == "thread_001"
+    assert trace["settlement"]["conscious_task_id"].startswith("conscious_task_id#")
+    assert trace["settlement"]["conscious_thread_id"].startswith("conscious_thread_id#")
     assert trace["settlement"]["unresolved"] is False
+    assert "High priority budget issue requires attention" not in json.dumps(trace, sort_keys=True)
 
     # All stages reached
     stage_map = {s["key"]: s for s in trace["stages"]}

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,35 @@ ACTIVE_ACTION_STATUSES = {"proposed", "prepared", "offered"}
 DIRECT_DELIVERY_MODES = {"discord_channel_thread", "discord_dm_bound_session"}
 OPEN_OUTBOX_STATUSES = {"prepared", "failed"}
 TERMINAL_THREAD_STATUSES = {"closed", "archived"}
+
+_INSTANCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_CANDIDATE_REF_LABEL_RE = re.compile(r"^candidate#[0-9a-f]{16}$")
+_RECEIPT_EVIDENCE_REF_TYPES = {
+    "candidate",
+    "event",
+    "fingerprint",
+    "intake_task",
+    "review_task",
+    "reason",
+    "correlation",
+    "conscious_task",
+}
+
+
+def _resolve_instance(instance: str | None) -> tuple[str, Path] | None:
+    """Resolve a request `instance` to (effective_instance, root), or None if invalid.
+
+    Omitted instance and the legacy/default instance name both resolve to
+    DEFAULT_ROOT. Any other instance must be a plain name (letters, digits,
+    underscore, hyphen) — no path separators, dot-segments, blank/whitespace,
+    or hidden/dot names — so it can't escape DEFAULT_ROOT.parent via traversal.
+    """
+    effective_instance = instance if instance is not None else DEFAULT_INSTANCE
+    if effective_instance in {"default", DEFAULT_INSTANCE}:
+        return effective_instance, DEFAULT_ROOT
+    if not _INSTANCE_NAME_RE.fullmatch(effective_instance):
+        return None
+    return effective_instance, DEFAULT_ROOT.parent / effective_instance
 
 
 def _now() -> str:
@@ -288,7 +318,7 @@ def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
 
 def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": candidate.get("id"),
+        "id": _safe_trace_candidate_id(candidate.get("id")),
         "status": candidate.get("status"),
         "kind": candidate.get("kind"),
         "pressure": candidate.get("pressure"),
@@ -301,7 +331,7 @@ def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _signal_item(signal: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": signal.get("id"),
+        "id": _safe_trace_ref("signal", signal.get("id")),
         "sensor": signal.get("sensor"),
         "source": signal.get("source"),
         "kind": signal.get("kind"),
@@ -309,7 +339,7 @@ def _signal_item(signal: dict[str, Any]) -> dict[str, Any]:
         "strength_hint": signal.get("strength_hint"),
         "pressure_level": signal.get("pressure_level"),
         "transition": signal.get("transition"),
-        "correlation_keys": signal.get("correlation_keys") or [],
+        "correlation_keys": _safe_trace_ref_list("correlation", signal.get("correlation_keys") or [], limit=8),
         "sensitivity": signal.get("sensitivity"),
         "allowed_surfaces": signal.get("allowed_surfaces") or [],
         "ts": signal.get("ts") or signal.get("created_at") or signal.get("updated_at"),
@@ -603,14 +633,383 @@ def _outbox_item(
 def _decision_item(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "ts": decision.get("ts"),
+        "created_at": decision.get("created_at") or decision.get("ts"),
         "type": decision.get("type"),
-        "thread_id": decision.get("thread_id"),
-        "candidate_id": decision.get("candidate_id"),
-        "outbox_id": decision.get("outbox_id"),
-        "action_id": decision.get("action_id"),
-        "artifact_id": decision.get("artifact_id"),
+        "schema": decision.get("schema"),
+        "receipt_kind": decision.get("receipt_kind"),
+        "subject_ref": _safe_receipt_subject_ref(decision),
+        "decision": decision.get("decision"),
+        "outcome": decision.get("outcome"),
+        "thread_id": _safe_decision_join_field(decision, "thread_id", "thread"),
+        "candidate_id": _safe_decision_candidate_id(decision),
+        "outbox_id": _safe_decision_join_field(decision, "outbox_id", "outbox"),
+        "action_id": _safe_decision_join_field(decision, "action_id", "action"),
+        "artifact_id": _safe_decision_join_field(decision, "artifact_id", "artifact"),
         "action": decision.get("action"),
-        "reason": _truncate(decision.get("reason") or decision.get("detail") or decision.get("error"), 140),
+        "reason": _safe_decision_reason(decision),
+    }
+
+
+def _settlement_label_helpers():
+    """Import the settlement module's opaque-label helpers for cross-module joins.
+
+    Receipts persist `candidate_id`/`subject_ref.id` as deterministic hash labels
+    (see `agent_sensorium.settlement.candidate_ref_label`); the dashboard must use
+    the same function to re-attach candidate metadata without ever echoing a raw
+    candidate id into graph/perception-trace output.
+    """
+    import sys
+
+    plugin_root = Path(__file__).resolve().parents[1]
+    if str(plugin_root) not in sys.path:
+        sys.path.insert(0, str(plugin_root))
+    from agent_sensorium.settlement import candidate_ref_label, evidence_ref_label, safe_candidate_kind_label
+
+    return candidate_ref_label, safe_candidate_kind_label, evidence_ref_label
+
+
+def _opaque_join_label(prefix: str, value: Any) -> str:
+    """Hash-label a join scalar for GET output; empty input stays empty.
+
+    Used for any id-like settlement field (intake/review task ids, conscious
+    task/thread ids, …) that the dashboard projects into a privacy-safe GET
+    response — these can originate from Kanban task text/comments or compact
+    state and must never be echoed raw.
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    _, _, evidence_ref_label = _settlement_label_helpers()
+    return evidence_ref_label(prefix, text)
+
+
+def _is_receipt_evidence_label(ref_type: str, value: Any) -> bool:
+    text = str(value or "")
+    return bool(re.fullmatch(rf"{re.escape(ref_type)}#[0-9a-f]{{16}}", text))
+
+
+def _safe_receipt_evidence_refs(receipt: dict[str, Any]) -> list[dict[str, str]]:
+    """Fail-closed projection of receipt evidence refs for GET /graph.
+
+    Older/corrupt receipt rows can carry raw candidate/event/fingerprint/task
+    scalars even with raw_content=false. Trust only the closed receipt evidence
+    vocabulary and demonstrable hash labels; hash-label anything else and drop
+    malformed refs rather than echoing persisted raw material.
+    """
+    refs = receipt.get("evidence_refs")
+    if not isinstance(refs, list):
+        return []
+    _, _, evidence_ref_label = _settlement_label_helpers()
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        ref_type = str(ref.get("type") or "").strip()
+        if ref_type not in _RECEIPT_EVIDENCE_REF_TYPES:
+            continue
+        raw_ref = ref.get("ref")
+        ref_text = str(raw_ref or "").strip()
+        if not ref_text:
+            continue
+        safe_ref = ref_text if _is_receipt_evidence_label(ref_type, ref_text) else evidence_ref_label(ref_type, raw_ref)
+        key = (ref_type, safe_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"type": ref_type, "ref": safe_ref})
+    return out[:24]
+
+
+def _safe_decision_reason(decision: dict[str, Any]) -> str:
+    """Privacy-safe reason/detail/error label for GET-exposed decision rows."""
+    for key in ("reason_label", "detail_label", "error_label"):
+        label = decision.get(key)
+        if label:
+            return _truncate(label, 140)
+    for key in ("reason", "detail", "error"):
+        raw = decision.get(key)
+        if raw:
+            return _truncate(_opaque_join_label(key, raw), 140)
+    return ""
+
+
+def _is_settlement_receipt(decision: dict[str, Any]) -> bool:
+    if decision.get("type") in SETTLEMENT_RECEIPT_TYPES:
+        return True
+    return (
+        decision.get("schema") == "sensorium.decision_receipt.v1"
+        and decision.get("receipt_kind") == "settlement"
+    )
+
+
+def _safe_decision_candidate_id(decision: dict[str, Any]) -> Any:
+    """Privacy-safe candidate id projection for GET-exposed decision rows.
+
+    Legacy settlement receipts may still carry raw `candidate_id` even though new
+    receipts use an opaque `subject_ref.id`. For receipt rows, never echo the raw
+    join scalar: trust only a demonstrable candidate hash label, otherwise derive
+    the same opaque candidate label used by the receipt writer.
+    """
+    raw = decision.get("candidate_id")
+    if not _is_settlement_receipt(decision):
+        return raw
+    text = str(raw or "")
+    if text:
+        if _CANDIDATE_REF_LABEL_RE.fullmatch(text):
+            return text
+        candidate_ref_label, _, _ = _settlement_label_helpers()
+        return candidate_ref_label(text)
+    return _receipt_subject_label(decision) or None
+
+
+def _safe_decision_join_field(decision: dict[str, Any], key: str, prefix: str) -> Any:
+    """Hash-label id-like receipt fields before exposing them through /snapshot."""
+    raw = decision.get(key)
+    if not raw or not _is_settlement_receipt(decision):
+        return raw
+    return _opaque_join_label(prefix, raw)
+
+
+def _safe_trace_reason(meta: dict[str, Any], latest_applied: dict[str, Any]) -> str:
+    """Privacy-safe settlement reason for GET-exposed perception traces.
+
+    New normalized receipts/candidate metadata carry `reason_label`, which is
+    already a deterministic opaque label. Legacy rows may still carry raw
+    `reason` prose copied from Kanban comments, transcripts, logs, or secrets;
+    `/snapshot` must hash-label that fallback instead of echoing it.
+    """
+    reason_label = meta.get("reason_label") or latest_applied.get("reason_label")
+    if reason_label:
+        return _truncate(reason_label, 200)
+    raw_reason = meta.get("reason") or latest_applied.get("reason")
+    if not raw_reason:
+        return ""
+    return _truncate(_opaque_join_label("reason", raw_reason), 200)
+
+
+def _candidate_label_indexes(
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Build candidate-by-label and label-to-raw-id indexes for receipt joins.
+
+    Returns ({label: candidate_row}, {label: raw_candidate_id}).
+    """
+    candidate_ref_label, _, _ = _settlement_label_helpers()
+    by_label: dict[str, dict[str, Any]] = {}
+    label_to_id: dict[str, str] = {}
+    for candidate in candidates:
+        cand_id = str(candidate.get("id") or "")
+        if not cand_id:
+            continue
+        label = candidate_ref_label(cand_id)
+        by_label[label] = candidate
+        label_to_id[label] = cand_id
+    return by_label, label_to_id
+
+
+def _receipt_subject_label(receipt: dict[str, Any]) -> str:
+    """Opaque candidate label for a settlement receipt, new- or legacy-format.
+
+    New-format receipts carry `candidate#<sha16>` in `subject_ref.id`. Legacy or
+    corrupt rows may carry a raw subject id there, or in the older `candidate_id`
+    field; every non-demonstrably-opaque value is hash-labeled before it can be
+    used as a join key or projected into GET output.
+    """
+    subject_ref = receipt.get("subject_ref") if isinstance(receipt.get("subject_ref"), dict) else {}
+    candidate_ref_label, _, _ = _settlement_label_helpers()
+    label = str(subject_ref.get("id") or "")
+    if label:
+        if _CANDIDATE_REF_LABEL_RE.fullmatch(label):
+            return label
+        return candidate_ref_label(label)
+    legacy_candidate_id = str(receipt.get("candidate_id") or "")
+    if legacy_candidate_id:
+        return candidate_ref_label(legacy_candidate_id)
+    return ""
+
+
+def _receipt_subject_type(receipt: dict[str, Any]) -> str:
+    """Closed-vocabulary subject-ref type for GET output.
+
+    `subject_ref.type` is persisted state and can be corrupt or secret-shaped, so
+    do not echo it unless it is a known public discriminator.
+    """
+    subject_ref = receipt.get("subject_ref") if isinstance(receipt.get("subject_ref"), dict) else {}
+    raw_type = str(subject_ref.get("type") or "candidate").strip()
+    return raw_type if raw_type == "candidate" else "unknown"
+
+
+def _safe_receipt_subject_ref(receipt: dict[str, Any]) -> dict[str, str] | None:
+    subject_id = _receipt_subject_label(receipt)
+    if not subject_id:
+        return None
+    return {"type": _receipt_subject_type(receipt), "id": subject_id}
+
+
+_SAFE_TRACE_REF_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,79}$")
+_SAFE_TRACE_CANDIDATE_RE = re.compile(r"^cand_[A-Za-z0-9_-]{1,75}$")
+_SAFE_TRACE_EVENT_RE = re.compile(r"^(evt|event)_[A-Za-z0-9_-]{1,74}$")
+_SAFE_TRACE_SIGNAL_RE = re.compile(r"^(sig|signal)_[A-Za-z0-9_-]{1,74}$")
+
+
+def _has_private_trace_marker(text: str) -> bool:
+    lowered = text.lower()
+    private_markers = (
+        "...",
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "private_key",
+        "privatekey",
+    )
+    return text.startswith(("sk-", "***")) or any(marker in lowered for marker in private_markers)
+
+
+def _is_safe_trace_ref(prefix: str, value: Any) -> bool:
+    """Return true only for compact dashboard refs safe to echo verbatim."""
+    text = str(value or "")
+    if not text or _has_private_trace_marker(text):
+        return False
+    if prefix == "candidate":
+        return bool(_SAFE_TRACE_CANDIDATE_RE.fullmatch(text))
+    if prefix == "event":
+        return bool(_SAFE_TRACE_EVENT_RE.fullmatch(text))
+    if prefix == "signal":
+        return bool(_SAFE_TRACE_SIGNAL_RE.fullmatch(text))
+    if prefix == "correlation":
+        return bool(_SAFE_TRACE_REF_RE.fullmatch(text))
+    return bool(_SAFE_TRACE_REF_RE.fullmatch(text))
+
+
+def _safe_trace_candidate_id(value: Any) -> str:
+    """Privacy-safe candidate identifier for GET /snapshot perception traces."""
+    text = str(value or "")
+    if not text:
+        return ""
+    if _is_safe_trace_ref("candidate", text):
+        return text
+    candidate_ref_label, _, _ = _settlement_label_helpers()
+    return candidate_ref_label(text)
+
+
+def _safe_trace_ref(prefix: str, value: Any) -> str:
+    """Privacy-safe lineage reference for GET /snapshot perception traces."""
+    text = str(value or "")
+    if not text:
+        return ""
+    if _is_safe_trace_ref(prefix, text):
+        return text
+    return _opaque_join_label(prefix, text)
+
+
+def _safe_trace_ref_list(prefix: str, values: Any, *, limit: int) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        label = _safe_trace_ref(prefix, value)
+        if label:
+            out.append(label)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _receipt_node_id(receipt: dict[str, Any]) -> str:
+    idem = str(receipt.get("idempotency_key") or "")
+    if idem:
+        import hashlib
+
+        return "receipt:" + hashlib.sha256(idem.encode("utf-8", errors="ignore")).hexdigest()[:24]
+    seed = json.dumps(receipt, sort_keys=True, default=str, separators=(",", ":"))
+    import hashlib
+
+    return "receipt:" + hashlib.sha256(seed.encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def _receipt_graph(root: Path, *, limit_nodes: int = 200, limit_edges: int = 300) -> dict[str, Any]:
+    """Project compact settlement receipts into a read-only graph fragment.
+
+    T8 receipt normalization uses `decisions.jsonl` as the authoritative receipt
+    store. This projection adds receipt nodes and `settles` edges without
+    exposing raw reason/prose/log content; evidence refs are normalized hash
+    labels from the receipt writer.
+    """
+    limit_nodes = max(1, min(int(limit_nodes or 200), 500))
+    limit_edges = max(1, min(int(limit_edges or 300), 1000))
+    candidates, _ = _read_jsonl(root, "candidates", limit=5000)
+    decisions, _ = _read_jsonl(root, "decisions", limit=5000)
+    candidate_by_label, _ = _candidate_label_indexes(candidates)
+    _, safe_candidate_kind_label, _ = _settlement_label_helpers()
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    seen_nodes: set[str] = set()
+
+    def add_node(node: dict[str, Any]) -> None:
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in seen_nodes or len(nodes) >= limit_nodes:
+            return
+        seen_nodes.add(node_id)
+        nodes.append(node)
+
+    receipt_rows = [
+        row for row in decisions
+        if isinstance(row, dict) and row.get("type") in SETTLEMENT_RECEIPT_TYPES
+    ]
+    for receipt in receipt_rows[-limit_nodes:]:
+        # `subject_label` is always an opaque hash label, never a raw candidate
+        # id: `_receipt_subject_label` trusts only demonstrable candidate hash
+        # labels and hashes any raw/corrupt subject_ref.id or legacy
+        # `candidate_id` before either can become a node id or output field.
+        subject_label = _receipt_subject_label(receipt)
+        if subject_label:
+            candidate = candidate_by_label.get(subject_label, {})
+            add_node(
+                {
+                    "id": f"candidate:{subject_label}",
+                    "kind": "candidate",
+                    "status": candidate.get("status") or "unknown",
+                    "candidate_kind": safe_candidate_kind_label(candidate.get("kind")),
+                    "sensitivity": candidate.get("sensitivity") or receipt.get("sensitivity") or "private",
+                    "allowed_surfaces": candidate.get("allowed_surfaces") or receipt.get("allowed_surfaces") or ["local"],
+                }
+            )
+        receipt_id = _receipt_node_id(receipt)
+        add_node(
+            {
+                "id": receipt_id,
+                "kind": "receipt",
+                "receipt_kind": receipt.get("receipt_kind") or "settlement",
+                "receipt_type": receipt.get("type"),
+                "schema": receipt.get("schema"),
+                "subject_ref": _safe_receipt_subject_ref(receipt),
+                "decision": receipt.get("decision"),
+                "outcome": receipt.get("outcome") or receipt.get("new_status"),
+                "created_at": receipt.get("created_at") or receipt.get("ts"),
+                "surface": receipt.get("surface") or "kanban",
+                "sensitivity": receipt.get("sensitivity") or "private",
+                "allowed_surfaces": receipt.get("allowed_surfaces") or ["local"],
+                "evidence_refs": _safe_receipt_evidence_refs(receipt),
+            }
+        )
+        if subject_label and len(edges) < limit_edges:
+            edges.append(
+                {
+                    "id": f"edge:{subject_label}:{receipt_id}",
+                    "kind": "settles",
+                    "from": f"candidate:{subject_label}",
+                    "to": receipt_id,
+                    "receipt_type": receipt.get("type"),
+                }
+            )
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "truncated": len(receipt_rows) > limit_nodes or len(edges) >= limit_edges,
     }
 
 
@@ -625,9 +1024,9 @@ DROP_CANDIDATE_STATUSES = {"suppressed", "dropped"}
 
 
 def _trace_event_item(event: dict[str, Any]) -> dict[str, Any]:
-    signal_ids = [str(s) for s in (event.get("source_signal_ids") or []) if s][:6]
+    signal_ids = _safe_trace_ref_list("signal", event.get("source_signal_ids") or [], limit=6)
     return {
-        "id": event.get("id"),
+        "id": _safe_trace_ref("event", event.get("id")),
         "kind": event.get("kind"),
         "summary": _truncate(event.get("summary"), 160),
         "strength": event.get("strength"),
@@ -638,7 +1037,7 @@ def _trace_event_item(event: dict[str, Any]) -> dict[str, Any]:
 
 def _trace_signal_item(signal: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": signal.get("id"),
+        "id": _safe_trace_ref("signal", signal.get("id")),
         "kind": signal.get("kind"),
         "sensor": signal.get("sensor"),
         "summary": _truncate(signal.get("summary"), 160),
@@ -655,8 +1054,9 @@ def _trace_settlement(candidate: dict[str, Any], receipts: list[dict[str, Any]])
     The candidate's own ``kanban_settlement`` is authoritative; settlement
     receipts from ``decisions.jsonl`` backfill any fields missing on the
     candidate and surface unresolved/no-match attempts (the literal
-    "interpretation went wrong" case). Reasons are already compact summaries
-    written by the bridge, but they are truncated again here defensively.
+    "interpretation went wrong" case). Reason labels are surfaced when already
+    normalized; legacy raw reasons are hash-labeled here because `/snapshot` is
+    a GET-exposed privacy-safe surface.
     """
     raw_meta = candidate.get("kanban_settlement")
     meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
@@ -670,14 +1070,25 @@ def _trace_settlement(candidate: dict[str, Any], receipts: list[dict[str, Any]])
         return None
     raw_ref = meta.get("conscious_task_ref")
     ref: dict[str, Any] = raw_ref if isinstance(raw_ref, dict) else {}
+    # `meta` (the candidate's own internal `kanban_settlement` block) and
+    # `latest_applied` (a `decisions.jsonl` receipt) can both still carry raw
+    # id-like join scalars (intake/review task ids, conscious task/thread ids)
+    # — `meta` because it is internal storage, `latest_applied` for legacy rows
+    # written before receipt normalization hashed these fields. `/snapshot` is a
+    # GET-exposed privacy-safe surface, so every one of those scalars is
+    # hash-labeled here before being placed in the trace, never echoed raw.
+    intake_task_id = meta.get("intake_task_id") or latest_applied.get("intake_task_id") or ""
+    review_task_id = meta.get("review_task_id") or latest_applied.get("review_task_id") or ""
+    conscious_task_id = ref.get("task_id") or ref.get("kanban_task_id") or ""
+    conscious_thread_id = ref.get("thread_id") or ""
     return {
         "decision": meta.get("decision") or latest_applied.get("decision"),
-        "reason": _truncate(meta.get("reason") or latest_applied.get("reason"), 200),
-        "intake_task_id": meta.get("intake_task_id") or latest_applied.get("intake_task_id") or "",
-        "review_task_id": meta.get("review_task_id") or latest_applied.get("review_task_id") or "",
+        "reason": _safe_trace_reason(meta, latest_applied),
+        "intake_task_id": _opaque_join_label("intake_task", intake_task_id),
+        "review_task_id": _opaque_join_label("review_task", review_task_id),
         "settled_at": meta.get("settled_at") or latest_applied.get("ts"),
-        "conscious_task_id": ref.get("task_id") or ref.get("kanban_task_id") or "",
-        "conscious_thread_id": ref.get("thread_id") or "",
+        "conscious_task_id": _opaque_join_label("conscious_task_id", conscious_task_id),
+        "conscious_thread_id": _opaque_join_label("conscious_thread_id", conscious_thread_id),
         "unresolved": bool(unresolved) and not applied,
     }
 
@@ -752,11 +1163,19 @@ def _perception_traces(
     Subconscious decided in Kanban, the compact evidence/reason, and where it
     settled. Pure: it only reads already-loaded rows and never mutates state.
     """
+    _, label_to_candidate_id = _candidate_label_indexes(candidates)
     receipts_by_candidate: dict[str, list[dict[str, Any]]] = {}
     for row in decisions:
         if not isinstance(row, dict) or row.get("type") not in SETTLEMENT_RECEIPT_TYPES:
             continue
-        cand_id = str(row.get("candidate_id") or "")
+        # Prefer the normalized subject-ref label whenever it resolves to a
+        # loaded candidate. Legacy/corrupt rows may still carry a raw
+        # `candidate_id`; keep it only as the no-subject/no-match fallback so it
+        # cannot override a valid subject_ref join.
+        subject_label = _receipt_subject_label(row)
+        cand_id = label_to_candidate_id.get(subject_label, "")
+        if not cand_id:
+            cand_id = str(row.get("candidate_id") or "")
         if cand_id:
             receipts_by_candidate.setdefault(cand_id, []).append(row)
 
@@ -780,17 +1199,21 @@ def _perception_traces(
 
         traces.append(
             {
-                "candidate_id": cand_id,
+                "candidate_id": _safe_trace_candidate_id(cand_id),
                 "kind": candidate.get("kind"),
                 "status": candidate.get("status"),
                 "pressure": candidate.get("pressure"),
                 "summary": _truncate(candidate.get("summary"), 200),
-                "correlation_keys": (candidate.get("correlation_keys") or [])[:4],
+                "correlation_keys": _safe_trace_ref_list(
+                    "correlation", candidate.get("correlation_keys") or [], limit=4
+                ),
                 "created_at": candidate.get("created_at"),
                 "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
                 "events": [_trace_event_item(e) for e in events],
                 "signals": [_trace_signal_item(s) for s in signals],
-                "missing_event_ids": [eid for eid in event_ids if eid not in event_by_id][:4],
+                "missing_event_ids": [
+                    _safe_trace_ref("event", eid) for eid in event_ids if eid not in event_by_id
+                ][:4],
                 "settlement": settlement,
                 "stages": lifecycle["stages"],
                 "flags": lifecycle["flags"],
@@ -921,7 +1344,56 @@ def _view_card(view_id: str, label: str, summary: str, count: int, band: str) ->
     }
 
 
-def _dashboard_views(counts: dict[str, int], *, recent_signals: int) -> list[dict[str, Any]]:
+def _attention_footprint(counts: dict[str, int], *, metrics: dict[str, Any]) -> dict[str, Any]:
+    """Separate live attention from historical/residue substrate.
+
+    The dashboard should not make old held artifacts or historical pointers feel
+    like immediate work. Keep the arithmetic explicit so UI and tests can show
+    "now" separately from archive/museum residue.
+    """
+    raw_latest = metrics.get("latest")
+    latest = raw_latest if isinstance(raw_latest, dict) else {}
+    raw_open = latest.get("open")
+    open_block = raw_open if isinstance(raw_open, dict) else {}
+    open_reviews = (
+        int(open_block.get("open_conscious_review_tasks") or 0)
+        + int(open_block.get("open_subconscious_review_tasks") or 0)
+        + int(open_block.get("open_intake_tasks") or 0)
+    )
+    live_items = (
+        counts.get("lifecycle_warnings", 0)
+        + counts.get("active_candidates", 0)
+        + counts.get("active_threads", 0)
+        + counts.get("open_actions", 0)
+        + counts.get("actionable_outbox", 0)
+        + open_reviews
+    )
+    residue_items = (
+        counts.get("held_artifacts", 0)
+        + counts.get("historical_outbox", 0)
+        + counts.get("closed_actions", 0)
+    )
+    return {
+        "live_items": live_items,
+        "residue_items": residue_items,
+        "open_reviews": open_reviews,
+        "live_breakdown": {
+            "active_candidates": counts.get("active_candidates", 0),
+            "active_threads": counts.get("active_threads", 0),
+            "open_reviews": open_reviews,
+            "open_actions": counts.get("open_actions", 0),
+            "actionable_outbox": counts.get("actionable_outbox", 0),
+            "lifecycle_warnings": counts.get("lifecycle_warnings", 0),
+        },
+        "residue_breakdown": {
+            "held_artifacts": counts.get("held_artifacts", 0),
+            "historical_outbox": counts.get("historical_outbox", 0),
+            "closed_actions": counts.get("closed_actions", 0),
+        },
+    }
+
+
+def _dashboard_views(counts: dict[str, int], *, recent_signals: int, footprint: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Create posture-aligned dashboard views from already-computed counts.
 
     The views reflect the active-session salience policy: immediate work stays in
@@ -930,19 +1402,15 @@ def _dashboard_views(counts: dict[str, int], *, recent_signals: int) -> list[dic
     material is isolated in Actuators. This keeps the cockpit from becoming one
     flat JSONL pile while preserving the no-mutation safety boundary.
     """
-    overview_count = (
-        counts.get("lifecycle_warnings", 0)
-        + counts.get("active_candidates", 0)
-        + counts.get("open_actions", 0)
-        + counts.get("actionable_outbox", 0)
-    )
+    footprint = footprint or {}
+    overview_count = int(footprint.get("live_items") or 0)
     overview_band = "red" if counts.get("corrupt_lines", 0) else ("yellow" if overview_count else "green")
     perception_count = counts.get("perception_wrong_turns", 0) + recent_signals
     perception_band = "yellow" if counts.get("perception_wrong_turns", 0) else ("green" if recent_signals else "neutral")
-    substrate_count = counts.get("active_candidates", 0) + counts.get("active_threads", 0) + counts.get("decisions", 0)
+    substrate_count = counts.get("active_candidates", 0) + counts.get("active_threads", 0)
     substrate_band = "yellow" if counts.get("active_candidates", 0) else ("green" if counts.get("active_threads", 0) else "neutral")
-    actuator_count = counts.get("open_actions", 0) + counts.get("prepared_outbox", 0) + counts.get("held_artifacts", 0)
-    actuator_band = "yellow" if counts.get("open_actions", 0) or counts.get("actionable_outbox", 0) else ("green" if actuator_count else "neutral")
+    actuator_count = counts.get("open_actions", 0) + counts.get("actionable_outbox", 0)
+    actuator_band = "yellow" if actuator_count else "neutral"
     return [
         _view_card(
             "overview",
@@ -989,8 +1457,10 @@ async def attention(instance: str | None = None, surface: str = "local", limit: 
     except ImportError:
         return {"ok": False, "error": "agent_sensorium not importable"}
 
-    effective_instance = instance or DEFAULT_INSTANCE
-    root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
     store = SensoriumStore(instance=effective_instance, state_dir=str(root))
     try:
         # Read-only dashboard endpoint: SensoriumStore.read_jsonl returns empty
@@ -1007,13 +1477,79 @@ async def metrics() -> dict[str, Any]:
     return {"ok": True, "generated_at": _now(), "metrics": _metrics_snapshot(limit=288)}
 
 
+@router.get("/graph")
+async def graph(instance: str | None = None, limit_nodes: int = 200, limit_edges: int = 300) -> dict[str, Any]:
+    """Read-only compact graph projection for receipt settlement links."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    projected = _receipt_graph(root, limit_nodes=limit_nodes, limit_edges=limit_edges)
+    return {
+        "ok": True,
+        "generated_at": _now(),
+        "instance": effective_instance,
+        "meta": {
+            "node_count": len(projected["nodes"]),
+            "edge_count": len(projected["edges"]),
+            "truncated": projected["truncated"],
+            "privacy": "compact_only",
+        },
+        "nodes": projected["nodes"],
+        "edges": projected["edges"],
+    }
+
+
+@router.get("/explanation")
+async def explanation(subject_id: str, instance: str | None = None) -> dict[str, Any]:
+    """Read-only deterministic pressure explanation for one candidate/review.
+
+    Answers "why did this candidate surface, and what pushed back?" from compact
+    candidate rows plus recent dampener/blocker sidecar evidence. Pure and
+    output-boundary safe: the explanation builder hash-labels every free-form
+    scalar, so this never echoes raw ids/summaries/secrets. GET-only; it never
+    mutates Sensorium state.
+    """
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.explanations import build_explanation
+        from agent_sensorium.store import SensoriumStore
+    except ImportError:
+        return {"ok": False, "error": "agent_sensorium not importable"}
+
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
+    store = SensoriumStore(instance=effective_instance, state_dir=str(root))
+    try:
+        candidates = _index_by_id(store.read_jsonl("candidates"))
+        dampeners = store.read_dampener_effects(limit=200)
+        blockers = store.read_blocker_effects(limit=200)
+        built = build_explanation(
+            subject_id,
+            records=candidates,
+            dampener_evidence=dampeners,
+            blocker_evidence=blockers,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "generated_at": _now(), "instance": effective_instance, "explanation": built}
+
+
 @router.get("/snapshot")
 async def snapshot(instance: str | None = None) -> dict[str, Any]:
     # `instance` is surfaced for multi-instance UI without allowing arbitrary
     # path traversal. Omitted and legacy `default` requests both resolve to the
     # configured default instance.
-    effective_instance = instance or DEFAULT_INSTANCE
-    root = DEFAULT_ROOT if effective_instance in {"default", DEFAULT_INSTANCE} else DEFAULT_ROOT.parent / effective_instance
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "error": "invalid_instance"}
+    effective_instance, root = resolved
     state = _read_json(root / "state.latest.json", {})
     config = _read_json(root / "instance.config.json", {})
     freshness = _freshness_snapshot(root)
@@ -1058,6 +1594,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     )
     open_outbox = [r for r in outbox if r.get("status") in OPEN_OUTBOX_STATUSES]
     open_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
+    closed_actions = [a for a in actions if a.get("status") not in ACTIVE_ACTION_STATUSES]
     perception_traces = _perception_traces(
         candidates,
         event_by_id=event_by_id,
@@ -1065,7 +1602,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         decisions=decisions,
     )
 
-    outbox_items = [
+    outbox_items_all = [
         _outbox_item(
             r,
             thread_by_id=thread_by_id,
@@ -1073,9 +1610,15 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             action_for_outbox=action_for_outbox,
             config=config,
         )
-        for r in recent_outbox[:12]
+        for r in recent_outbox
     ]
-    actionable_outbox = sum(1 for item in outbox_items if item.get("safety", {}).get("actionable"))
+    outbox_items = outbox_items_all[:12]
+    actionable_outbox = sum(1 for item in outbox_items_all if item.get("safety", {}).get("actionable"))
+    historical_outbox = sum(
+        1
+        for item in outbox_items_all
+        if item.get("safety", {}).get("label") in {"historical_prepared_pointer", "recorded", "dispatched"}
+    )
     warnings = _lifecycle_warnings(
         outbox=outbox,
         actions=actions,
@@ -1102,13 +1645,18 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "outbox": len(outbox),
         "prepared_outbox": sum(1 for o in outbox if o.get("status") == "prepared"),
         "open_outbox": len(open_outbox),
+        "historical_outbox": historical_outbox,
         "actionable_outbox": actionable_outbox,
         "lifecycle_warnings": len(warnings),
         "decisions": len(decisions),
+        "closed_actions": len(closed_actions),
         "perception_traces": len(perception_traces),
         "perception_wrong_turns": sum(1 for t in perception_traces if t.get("band") in {"red", "yellow"}),
         "corrupt_lines": corrupt,
     }
+
+    metrics_data = _metrics_snapshot()
+    attention_footprint = _attention_footprint(counts, metrics=metrics_data)
 
     return {
         "ok": True,
@@ -1128,6 +1676,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             "outbox": config.get("outbox") if isinstance(config.get("outbox"), dict) else {},
         },
         "counts": counts,
+        "attention_footprint": attention_footprint,
         "health": _health(
             counts,
             len(visible_threads),
@@ -1143,7 +1692,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             "artifacts": dict(Counter(str(a.get("delivery_state") or "unknown") for a in artifacts)),
             "outbox": dict(Counter(str(o.get("status") or "unknown") for o in outbox)),
         },
-        "views": _dashboard_views(counts, recent_signals=len(recent_signals[:12])),
+        "views": _dashboard_views(counts, recent_signals=len(recent_signals[:12]), footprint=attention_footprint),
         "perception_traces": perception_traces,
         "top_candidates": [_candidate_item(c) for c in active_candidates[:6]],
         "recent_signals": [_signal_item(s) for s in recent_signals[:12]],
@@ -1155,5 +1704,5 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "lifecycle_warnings": warnings,
         "decisions": [_decision_item(d) for d in decisions[-14:]][::-1],
         "budgets": _current_budgets(root, config),
-        "metrics": _metrics_snapshot(),
+        "metrics": metrics_data,
     }

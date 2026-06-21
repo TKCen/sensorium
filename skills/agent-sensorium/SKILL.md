@@ -10,7 +10,7 @@ During normal operation exactly one tool is exposed: `sensorium`. It always oper
 
 | Action | Purpose |
 |--------|---------|
-| `status` | Read current attention state: pending thread count, top candidate, inbox summary, dispatcher lock status |
+| `status` | Read current attention state: open thread count, top candidate, inbox summary, dispatcher lock status |
 | `ingest` | Record deferred salience from the current session as a compact signal. Pass `text`, `kind`, and optionally `strength` (0–1). The tool fills correlation keys and metadata internally. |
 | `open` | Open a dormant conscious thread capsule. Pass `id` of the thread (visible from `status`). Returns the capsule content if the surface/sensitivity gate allows it. |
 | `update` | Apply a lifecycle keyword to an open thread. Pass `id` and `keyword` (e.g. `close`, `hold`, `archive`, `mark_reviewed`). |
@@ -29,8 +29,10 @@ Do not dump full transcripts or raw messages. Keep `text` compact.
 The pre-LLM hook may inject a pointer like:
 
 ```
-Sensorium has something pending: <short title>. Say "take it up" to open it.
+I have something for you: <short title>. Say "take it up" to open it.
 ```
+
+That confident phrase is valid only when Sensorium has already produced a visible/openable pointer for the current surface. Do not improvise it before checking `sensorium(action="status")` or receiving a hook-provided pointer. If status shows no openable thread but you feel residual salience, use uncertainty phrasing instead, such as “I think I have something that might matter — want me to look?” or “I have some unsettled salience — want me to surface it?”
 
 When your user says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
 
@@ -48,7 +50,7 @@ Sensors → Signals → [Gate] → Events → Candidates → [Dispatcher] → Co
 2. A deterministic **Gate** promotes strong signals to **Events** based on strength/kind thresholds.
 3. Events create **Candidates** with weighted pressure scores.
 4. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
-5. The **pre-LLM hook** injects a compact pointer when an eligible thread is pending.
+5. The **pre-LLM hook** injects a compact pointer when an eligible thread is available.
 
 ---
 

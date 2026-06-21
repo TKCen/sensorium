@@ -95,16 +95,27 @@ def save_sensor_registry(store) -> dict:
 
 
 def load_sensor_registry(store) -> dict:
+    from .inner_life import BlockKind, InnerLifeValidationError, load_block_registry_v2
+
     _sensor_registry.clear()
-    for name, entry in sorted(store.read_sensor_registry().items()):
-        if isinstance(entry, dict):
-            safe_name = _safe_sensor_name(name)
-            if safe_name:
-                _sensor_registry[safe_name] = {
-                    "name": safe_name,
-                    "status": entry.get("status") if entry.get("status") in _SENSOR_STATUSES else "active",
-                    "defaults": dict(entry.get("defaults") or {}),
-                }
+    raw_registry = store.read_sensor_registry()
+    try:
+        registry = load_block_registry_v2(raw_registry)
+    except InnerLifeValidationError:
+        registry = {"blocks": {}}
+    for name, entry in sorted(registry.get("blocks", {}).items()):
+        if not isinstance(entry, dict) or entry.get("type") != BlockKind.SENSOR.value:
+            continue
+        safe_name = _safe_sensor_name(name)
+        if safe_name:
+            status = entry.get("status")
+            if status not in _SENSOR_STATUSES:
+                status = "active" if entry.get("enabled", True) else "paused"
+            _sensor_registry[safe_name] = {
+                "name": safe_name,
+                "status": status,
+                "defaults": dict(entry.get("defaults") or {}),
+            }
     return sensor_registry_snapshot()
 
 
@@ -326,7 +337,7 @@ def build_runtime_heartbeat_signal(sample: dict, *, instance: str = "default") -
         "source": "machine",
         "kind": "runtime_heartbeat",
         "summary": truncate_text(
-            f"runtime heartbeat: {sig} signals, {n} sensors, {pending} pending threads",
+            f"runtime heartbeat: {sig} signals, {n} sensors, {pending} open threads",
             MAX_SUMMARY_CHARS,
         ),
         "actor": "tool",

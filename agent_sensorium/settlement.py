@@ -22,6 +22,12 @@ from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 VALID_SETTLEMENT_DECISIONS = {"DROP", "SAVE", "PROMOTE_CONSCIOUS"}
+RECEIPT_SCHEMA = "sensorium.decision_receipt.v1"
+SETTLEMENT_RECEIPT_TYPES = {
+    "kanban.settlement.applied",
+    "kanban.settlement.unresolved",
+    "kanban.settlement.no_candidate_match",
+}
 
 # Mirror of the dispatcher's default `dispatch_pressure` threshold. The
 # reconciliation pass treats any active candidate at or above this pressure as a
@@ -42,6 +48,297 @@ DECISION_TO_CANDIDATE_STATUS = {
     "SAVE": "reviewed",
     "PROMOTE_CONSCIOUS": "reviewed",
 }
+
+
+def _safe_scalar_label(prefix: str, value: Any) -> str | None:
+    """Deterministic, non-reversible label for free-form receipt scalars.
+
+    Settlement evidence can originate in Kanban task text or operator comments,
+    so receipt rows must never persist raw prose/log/transcript/secret content.
+    IDs that are needed for joins remain in their legacy compact fields; every
+    evidence/reason/detail scalar in the normalized receipt body is hash-labeled.
+    """
+    if value is None:
+        return None
+    try:
+        seed = json.dumps(value, default=str, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        seed = str(value)
+    digest = hashlib.sha256(seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{prefix}#{digest}"
+
+
+def _receipt_idempotency_key(*, receipt_type: str, subject_id: str, decision: str, evidence: dict) -> str:
+    material = {
+        "type": receipt_type,
+        "subject": subject_id,
+        "decision": decision,
+        "intake_task_id": evidence.get("intake_task_id") or "",
+        "review_task_id": evidence.get("review_task_id") or "",
+        "event_id": evidence.get("event_id") or "",
+        "fingerprint": evidence.get("fingerprint") or "",
+        "correlation_keys": sorted(str(k) for k in (evidence.get("correlation_keys") or []) if k),
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"receipt:{digest}"
+
+
+def _evidence_ref(ref_type: str, value: Any) -> dict | None:
+    label = _safe_scalar_label(ref_type, value)
+    if label is None:
+        return None
+    return {"type": ref_type, "ref": label}
+
+
+def candidate_ref_label(candidate_id: str) -> str:
+    """Deterministic opaque label for a candidate id.
+
+    Used both as the receipt `subject_ref.id` and as the join key dashboard
+    projections use to re-attach candidate metadata without ever echoing the
+    raw (potentially corrupted/secret-shaped) candidate id.
+    """
+    return _safe_scalar_label("candidate", candidate_id) or _safe_scalar_label("candidate", "") or "candidate#0"
+
+
+def evidence_ref_label(ref_type: str, value: Any) -> str:
+    """Public deterministic label for an evidence scalar, for cross-module joins."""
+    return _safe_scalar_label(ref_type, value) or _safe_scalar_label(ref_type, "") or f"{ref_type}#0"
+
+
+# Candidate `kind` is attacker/sensor-controlled free text (it is copied verbatim
+# from the originating event's `kind`; see `gate.event_to_candidate`). There is no
+# existing closed vocabulary for it project-wide, so this is a small explicit safe
+# vocab of known-benign builtin kinds. Anything outside this set is hash-labeled
+# rather than echoed raw into any privacy-safe projection (e.g. the dashboard graph).
+SAFE_CANDIDATE_KINDS = {
+    "dashboard_memory_pressure",
+    "budget_pressure",
+    "inference_budget_pressure",
+    "process_pressure",
+    "body_pressure",
+    "hindsight_pressure",
+    "kanban_pressure",
+    "media_capacity",
+    "rate_window",
+    "temporal_trend",
+    "pressure_spike",
+    "pressure_event",
+    "relational_salience",
+    "relational_thread_pickup_request",
+    "internal_conscious_task_candidate",
+    "gateway_error",
+    "runtime_heartbeat",
+    "tts_sidecar_pressure",
+    "user_correction",
+    "explicit_correction",
+    "embodiment_insight",
+    "design_insight",
+    "design_decision",
+    "sensorium_strategy_insight",
+    "llm_reflect",
+    "kanban_outcome",
+    "manual_intervention",
+    "settlement_gap",
+    "identity",
+    "note",
+    "subconscious_advisory",
+    "anomaly",
+    "noise_event",
+    "test",
+    "test_event",
+    "test_signal",
+    "unknown",
+}
+
+
+def safe_candidate_kind_label(kind: Any) -> str:
+    """Closed-vocab-or-hash label for a candidate `kind` value.
+
+    Never echoes raw kind text outside the safe vocab, since `kind` is copied
+    verbatim from sensor/event input and can carry secret-shaped or corrupted
+    content.
+    """
+    text = str(kind or "unknown")
+    if text in SAFE_CANDIDATE_KINDS:
+        return text
+    return _safe_scalar_label("kind", text) or "kind#0"
+
+
+# conscious_task_ref id-like subfields are Kanban task/thread/board/candidate ids
+# supplied by the caller (the Conscious-promotion bridge) and are therefore just
+# as corruptible/secret-shaped as candidate_id/intake_task_id/review_task_id.
+# Every one of them must be opaque before it is persisted into a normalized
+# receipt row.
+_CONSCIOUS_REF_ID_KEYS = ("task_id", "thread_id", "board", "kanban_task_id", "candidate_id", "conscious_task_id")
+_ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+def safe_conscious_task_ref(ref: Any) -> dict:
+    """Privacy-safe projection of a conscious_task_ref for a normalized receipt.
+
+    Every id-like subfield (`task_id`, `thread_id`, `board`, `kanban_task_id`,
+    `candidate_id`, `conscious_task_id`) is hash-labeled rather than echoed raw.
+    `kind` reuses the same closed-vocab-or-hash treatment as candidate kind.
+    `promoted_at` is only passed through when it looks like a validated ISO
+    timestamp; anything else is dropped rather than risk echoing free text.
+    """
+    if not isinstance(ref, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _CONSCIOUS_REF_ID_KEYS:
+        value = ref.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = evidence_ref_label(f"conscious_{key}", value)
+    kind = ref.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        out["kind"] = safe_candidate_kind_label(kind)
+    promoted_at = ref.get("promoted_at")
+    if isinstance(promoted_at, str) and _ISO_TIMESTAMP_RE.match(promoted_at):
+        out["promoted_at"] = promoted_at
+    return out
+
+
+def _settlement_evidence_refs(
+    *,
+    candidate_id: str = "",
+    event_id: str = "",
+    fingerprint: str = "",
+    correlation_keys: list[str] | None = None,
+    intake_task_id: str = "",
+    review_task_id: str = "",
+    conscious_task_ref: dict | None = None,
+    reason: str = "",
+) -> list[dict]:
+    refs: list[dict] = []
+    for ref_type, value in (
+        ("candidate", candidate_id),
+        ("event", event_id),
+        ("fingerprint", fingerprint),
+        ("intake_task", intake_task_id),
+        ("review_task", review_task_id),
+        ("reason", reason),
+    ):
+        ref = _evidence_ref(ref_type, value)
+        if ref is not None:
+            refs.append(ref)
+    for key in correlation_keys or []:
+        ref = _evidence_ref("correlation", key)
+        if ref is not None:
+            refs.append(ref)
+    if conscious_task_ref:
+        ref = _evidence_ref("conscious_task", conscious_task_ref)
+        if ref is not None:
+            refs.append(ref)
+    # Stable de-duplication without leaking raw values.
+    unique: dict[tuple[str, str], dict] = {}
+    for ref in refs:
+        unique[(ref["type"], ref["ref"])] = ref
+    return list(unique.values())[:24]
+
+
+def normalize_settlement_receipt(
+    *,
+    receipt_type: str,
+    decision: str,
+    subject_id: str,
+    outcome: str,
+    created_at: str,
+    candidate_id: str = "",
+    event_id: str = "",
+    fingerprint: str = "",
+    correlation_keys: list[str] | None = None,
+    intake_task_id: str = "",
+    review_task_id: str = "",
+    conscious_task_ref: dict | None = None,
+    old_status: str = "",
+    new_status: str = "",
+    reason: str = "",
+    sensitivity: str = "private",
+    allowed_surfaces: list[str] | None = None,
+) -> dict:
+    """Return the normalized decisions.jsonl receipt row for a settlement.
+
+    The schema is intentionally compact and review-oriented. It carries enough
+    structured refs for dashboard/graph settlement links while replacing raw
+    evidence/prose with deterministic labels.
+    """
+    evidence = {
+        "candidate_id": candidate_id,
+        "event_id": event_id,
+        "fingerprint": fingerprint,
+        "correlation_keys": list(correlation_keys or []),
+        "intake_task_id": intake_task_id,
+        "review_task_id": review_task_id,
+    }
+    subject = subject_id or candidate_id or event_id or fingerprint or "unknown"
+    receipt = {
+        "schema": RECEIPT_SCHEMA,
+        "receipt_kind": "settlement",
+        "ts": created_at,
+        "created_at": created_at,
+        "type": receipt_type,
+        "subject_ref": {"type": "candidate", "id": candidate_ref_label(subject)},
+        "decision": decision,
+        "outcome": outcome,
+        "decided_by": {
+            "kind": "kanban_review",
+            "ref": _safe_scalar_label("review", review_task_id or intake_task_id or "settlement"),
+        },
+        "evidence_refs": _settlement_evidence_refs(
+            candidate_id=candidate_id or subject,
+            event_id=event_id,
+            fingerprint=fingerprint,
+            correlation_keys=list(correlation_keys or []),
+            intake_task_id=intake_task_id,
+            review_task_id=review_task_id,
+            conscious_task_ref=conscious_task_ref,
+            reason=reason,
+        ),
+        "idempotency_key": _receipt_idempotency_key(
+            receipt_type=receipt_type,
+            subject_id=subject,
+            decision=decision,
+            evidence=evidence,
+        ),
+        "surface": "kanban",
+        "allowed_surfaces": list(allowed_surfaces or ["local"]),
+        "sensitivity": sensitivity or "private",
+        "raw_content": False,
+    }
+    # Closed-vocab statuses only; raw id-like join material (candidate/event ids,
+    # fingerprints, correlation keys, intake/review task ids) is deliberately not
+    # persisted here. Those scalars can originate from Kanban task text/comments
+    # or compact state and are corruptible/secret-shaped; joins are carried via
+    # `evidence_refs` (hash-labeled) and `subject_ref.id` instead.
+    if old_status:
+        receipt["old_status"] = old_status
+    if new_status:
+        receipt["new_status"] = new_status
+    reason_label = _safe_scalar_label("reason", reason)
+    if reason_label:
+        receipt["reason_label"] = reason_label
+    if conscious_task_ref:
+        safe_ref = safe_conscious_task_ref(conscious_task_ref)
+        if safe_ref:
+            receipt["conscious_task_ref"] = safe_ref
+    return receipt
+
+
+def _find_receipt_by_idempotency(decisions: list[dict], idempotency_key: str) -> dict | None:
+    for row in decisions:
+        if isinstance(row, dict) and row.get("idempotency_key") == idempotency_key:
+            return row
+    return None
+
+
+def _append_decision_receipt_once(store: SensoriumStore, receipt: dict, *, record_receipt: bool) -> dict | None:
+    if not record_receipt:
+        return receipt
+    existing = _find_receipt_by_idempotency(store.read_jsonl("decisions"), str(receipt.get("idempotency_key") or ""))
+    if existing is not None:
+        return existing
+    store.append_jsonl("decisions", receipt)
+    return receipt
 
 ACTIONABLE_DASHBOARD_MARKERS = (
     "service not running",
@@ -200,25 +497,26 @@ def apply_kanban_settlement(
     )
 
     if not matched:
-        receipt = {
-            "ts": utc_now_iso(),
-            "type": "kanban.settlement.unresolved",
-            "decision": decision_upper,
-            "candidate_id": candidate_id,
-            "event_id": event_id,
-            "fingerprint": fingerprint,
-            "correlation_keys": list(correlation_keys or []),
-            "intake_task_id": intake_task_id,
-            "review_task_id": review_task_id,
-            "reason": truncate_text(reason, 240),
-        }
-        if record_receipt:
-            store.append_jsonl("decisions", receipt)
+        receipt = normalize_settlement_receipt(
+            receipt_type="kanban.settlement.unresolved",
+            decision=decision_upper,
+            subject_id=candidate_id or event_id or fingerprint or "unresolved",
+            outcome="unresolved",
+            created_at=utc_now_iso(),
+            candidate_id=candidate_id,
+            event_id=event_id,
+            fingerprint=fingerprint,
+            correlation_keys=correlation_keys,
+            intake_task_id=intake_task_id,
+            review_task_id=review_task_id,
+            reason=reason,
+        )
+        written = _append_decision_receipt_once(store, receipt, record_receipt=record_receipt)
         return {
             "action": "no_candidate_match",
             "decision": decision_upper,
             "matched_candidate_ids": [],
-            "receipts": [receipt] if record_receipt else [],
+            "receipts": [written] if written is not None else [],
         }
 
     target_status = DECISION_TO_CANDIDATE_STATUS[decision_upper]
@@ -251,29 +549,35 @@ def apply_kanban_settlement(
             "intake_task_id": intake_task_id,
             "review_task_id": review_task_id,
             "settled_at": now,
-            "reason": truncate_text(reason, 240),
+            "reason_label": _safe_scalar_label("reason", truncate_text(reason, 240)),
         }
         if conscious_ref:
             settlement_meta["conscious_task_ref"] = conscious_ref
         candidate["kanban_settlement"] = settlement_meta
         updated_ids.append(cand_id)
 
-        receipt = {
-            "ts": now,
-            "type": "kanban.settlement.applied",
-            "decision": decision_upper,
-            "candidate_id": cand_id,
-            "old_status": old_status,
-            "new_status": candidate["status"],
-            "intake_task_id": intake_task_id,
-            "review_task_id": review_task_id,
-            "reason": truncate_text(reason, 240),
-        }
-        if conscious_ref:
-            receipt["conscious_task_ref"] = conscious_ref
-        receipts.append(receipt)
-        if record_receipt:
-            store.append_jsonl("decisions", receipt)
+        receipt = normalize_settlement_receipt(
+            receipt_type="kanban.settlement.applied",
+            decision=decision_upper,
+            subject_id=cand_id,
+            outcome=candidate["status"],
+            created_at=now,
+            candidate_id=cand_id,
+            event_id=event_id,
+            fingerprint=fingerprint or str(candidate.get("fingerprint") or ""),
+            correlation_keys=correlation_keys or list(candidate.get("correlation_keys") or []),
+            intake_task_id=intake_task_id,
+            review_task_id=review_task_id,
+            conscious_task_ref=conscious_ref,
+            old_status=old_status,
+            new_status=candidate["status"],
+            reason=reason,
+            sensitivity=str(candidate.get("sensitivity") or "private"),
+            allowed_surfaces=list(candidate.get("allowed_surfaces") or ["local"]),
+        )
+        written = _append_decision_receipt_once(store, receipt, record_receipt=record_receipt)
+        if written is not None:
+            receipts.append(written)
 
     if updated_ids:
         _rewrite_candidates(store, candidates)
@@ -414,14 +718,21 @@ def infer_kanban_settlement_decision(task: dict) -> str | None:
 def _settlement_receipt_exists(decisions: list[dict], intake_task_id: str) -> bool:
     if not intake_task_id:
         return False
+    # New-format receipts no longer carry a raw `intake_task_id` field (it is a
+    # corruptible/secret-shaped join scalar); match via the hash-labeled
+    # `evidence_refs` entry instead. Legacy rows with a raw field are still
+    # honored for back-compat with receipts written before this change.
+    target_ref = evidence_ref_label("intake_task", intake_task_id)
     for decision in decisions:
         if not isinstance(decision, dict):
             continue
-        if (
-            decision.get("type") == "kanban.settlement.applied"
-            and str(decision.get("intake_task_id") or "") == intake_task_id
-        ):
+        if decision.get("type") != "kanban.settlement.applied":
+            continue
+        if str(decision.get("intake_task_id") or "") == intake_task_id:
             return True
+        for ref in decision.get("evidence_refs") or []:
+            if isinstance(ref, dict) and ref.get("type") == "intake_task" and ref.get("ref") == target_ref:
+                return True
     return False
 
 

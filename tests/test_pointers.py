@@ -40,6 +40,22 @@ def _thread(**overrides):
     return base
 
 
+def _candidate(**overrides):
+    base = {
+        "id": "cand_livepointer",
+        "status": "candidate",
+        "kind": "relational_salience",
+        "summary": "Sebastian misses small private presents and wants salience left open for later",
+        "pressure": 0.82,
+        "sensitivity": "private",
+        "allowed_surfaces": ["local", "discord"],
+        "created_at": "2026-06-10T05:40:00Z",
+        "updated_at": "2026-06-10T05:40:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
 def _write_config(state_dir, surfaces=None, max_sensitivity="private"):
     from pathlib import Path
     config = {"allowed_surfaces": surfaces or ["local"], "max_sensitivity": max_sensitivity}
@@ -76,7 +92,7 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
     )
     assert first is not None
     assert "[Sensorium Pointer]" in first["context"]
-    assert "Pending thread: sth_testpointer" in first["context"]
+    assert "Conscious thread: sth_testpointer" in first["context"]
     assert "If the user says" in first["context"]
     assert "sensorium(action=\"open\"" in first["context"]
     assert "surface=\"discord\"" in first["context"]
@@ -95,7 +111,7 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
         state_dir=str(tmp_path),
     )
     assert second is not None
-    assert "Pending thread: sth_testpointer" in second["context"]
+    assert "Conscious thread: sth_testpointer" in second["context"]
 
     receipts = store.read_jsonl("decisions")
     assert len(receipts) == 2
@@ -105,7 +121,7 @@ def test_pointer_context_is_door_handle_not_capsule():
     pointer = {
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "Sensorium has a pending thread: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": "I have something for you: A small title. Say ‘take it up’ if you want me to open it.",
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
@@ -113,6 +129,75 @@ def test_pointer_context_is_door_handle_not_capsule():
     assert "take it up" in context
     assert "sensorium(action=\"open\"" in context
     assert "sth_x" in context
+
+
+def test_candidate_fallback_pointer_when_no_threads(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
+
+    pointer = select_attention_pointer(store, surface="discord")
+    assert pointer["action"] == "pointer_available"
+    assert pointer["pointer_type"] == "candidate"
+    assert pointer["candidate_id"] == "cand_livepointer"
+    assert "I have something for you" in pointer["invitation"]
+
+
+def test_candidate_pointer_context_uses_status_not_thread_open():
+    pointer = {
+        "pointer_type": "candidate",
+        "candidate_id": "cand_x",
+        "title": "Live salience",
+        "surface": "discord",
+        "invitation": "I have something for you: Live salience.",
+    }
+    context = pointer_context_for_llm(pointer)
+    assert "Candidate salience: cand_x" in context
+    assert "sensorium(action=\"status\"" in context
+    assert "sensorium(action=\"open\"" not in context
+    assert "Do not mark it reviewed merely because it was shown" in context
+
+
+def test_candidate_pointer_records_candidate_cooldown_receipt(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
+
+    first = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-1",
+        state_dir=str(tmp_path),
+    )
+    assert first is not None
+    assert "Candidate salience: cand_livepointer" in first["context"]
+
+    receipts = store.read_jsonl("decisions")
+    assert len(receipts) == 1
+    assert receipts[0]["type"] == "pointer.presented"
+    assert receipts[0]["candidate_id"] == "cand_livepointer"
+
+    second = select_attention_pointer(
+        store,
+        surface="discord",
+        config={"fallback_when_all_visible_on_cooldown": False},
+    )
+    assert second["action"] == "no_pointer"
+
+
+def test_thread_pointer_preferred_over_candidate_fallback(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
+    store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+
+    pointer = select_attention_pointer(store, surface="discord")
+    assert pointer["action"] == "pointer_available"
+    assert pointer["pointer_type"] == "thread"
+    assert pointer["thread_id"] == "sth_testpointer"
 
 
 def test_pointer_preview_bypasses_cooldown_when_every_visible_thread_is_blocked(tmp_path):

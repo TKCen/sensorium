@@ -139,3 +139,72 @@ def test_snapshot_exposes_posture_aligned_dashboard_views(tmp_path, monkeypatch)
     assert "Compact residue" in views["perception"]["summary"]
     assert views["substrate"]["count"] >= 1
     assert views["actuators"]["band"] == "yellow"
+
+
+def test_snapshot_hash_labels_password_key_like_compact_refs(tmp_path, monkeypatch):
+    """Compact-looking refs with key/password semantics are still private.
+
+    Regression for R8: prefix-shaped values such as ``cand_*``, ``evt_*`` and
+    ``sig_*`` are allowed through only when they are benign dashboard refs. If
+    their content names password/key material, snapshot must expose stable
+    opaque labels instead of echoing the raw strings.
+    """
+    root = tmp_path / "sensorium" / "demo"
+    raw_candidate_id = "cand_passwordreset4242"
+    raw_event_id = "evt_passwordreset4242"
+    raw_missing_event_id = "event_apikey4242"
+    raw_signal_id = "sig_privatekey4242"
+    raw_signal_correlation = "api_key_4242"
+    raw_candidate_correlation = "privatekeycorrelation4242"
+
+    _append_jsonl(root / "signals" / "inbox.jsonl", {
+        "id": raw_signal_id,
+        "sensor": "r8.test",
+        "source": "adversarial",
+        "kind": "test_signal",
+        "summary": "safe compact summary",
+        "strength_hint": 0.9,
+        "correlation_keys": [raw_signal_correlation],
+        "ts": "2026-06-21T12:00:00Z",
+    })
+    _append_jsonl(root / "events.jsonl", {
+        "id": raw_event_id,
+        "kind": "test_event",
+        "summary": "safe compact event summary",
+        "strength": 0.8,
+        "source_signal_ids": [raw_signal_id],
+        "ts": "2026-06-21T12:01:00Z",
+    })
+    _append_jsonl(root / "candidates.jsonl", {
+        "id": raw_candidate_id,
+        "kind": "subconscious_advisory",
+        "status": "candidate",
+        "pressure": 0.9,
+        "summary": "safe compact candidate summary",
+        "event_ids": [raw_event_id, raw_missing_event_id],
+        "correlation_keys": [raw_candidate_correlation],
+        "created_at": "2026-06-21T12:02:00Z",
+        "updated_at": "2026-06-21T12:02:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.snapshot(instance="demo"))
+    payload = json.dumps(data, sort_keys=True)
+
+    for raw in [
+        raw_candidate_id,
+        raw_event_id,
+        raw_missing_event_id,
+        raw_signal_id,
+        raw_signal_correlation,
+        raw_candidate_correlation,
+    ]:
+        assert raw not in payload
+
+    trace = data["perception_traces"][0]
+    assert trace["candidate_id"].startswith("candidate#")
+    assert trace["events"][0]["id"].startswith("event#")
+    assert trace["signals"][0]["id"].startswith("signal#")
+    assert trace["missing_event_ids"][0].startswith("event#")
+    assert trace["correlation_keys"][0].startswith("correlation#")
+    assert data["recent_signals"][0]["correlation_keys"][0].startswith("correlation#")

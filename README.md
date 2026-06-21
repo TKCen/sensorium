@@ -155,7 +155,7 @@ A single tool `sensorium` with four actions. This is the only surface exposed to
 
 | Action | Purpose |
 |--------|---------|
-| `status` | Read current attention state: pending threads, pointer, inbox |
+| `status` | Read current attention state: open threads, pointer, inbox |
 | `ingest` | Record deferred salience from the current session as a compact signal |
 | `open` | Open a dormant conscious thread capsule by id |
 | `update` | Apply a lifecycle keyword to an open thread |
