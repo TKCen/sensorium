@@ -801,3 +801,51 @@ def test_metrics_and_snapshot_metrics_hash_label_hostile_metrics_payloads(tmp_pa
     assert marker not in serialized
     assert metrics_payload["metrics"]["latest"]["queue"]["depth"] == 1
     assert metrics_payload["metrics"]["series"][0]["value"] == 1
+
+
+def test_attention_and_snapshot_state_dir_hash_label_hostile_attention_payloads(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    marker = "RAW_TRANSCRIPT_BODY_DO_NOT_LEAK_9911"
+    root = tmp_path / f"demo-{marker}"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    root.mkdir(parents=True)
+    _append_jsonl(
+        root,
+        "candidates.jsonl",
+        {
+            "id": f"cand-{marker}",
+            "status": "candidate",
+            "kind": marker,
+            "summary": f"candidate summary {marker}",
+            "pressure": 0.8,
+            "allowed_surfaces": ["local"],
+            "sensitivity": "private",
+            "created_at": "2026-06-21T15:10:00Z",
+            "updated_at": "2026-06-21T15:11:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "threads.jsonl",
+        {
+            "id": f"sth-{marker}",
+            "status": "held",
+            "conscious_task": {"request_type": marker, "title": f"thread title {marker}", "why": marker},
+            "source_refs": [marker],
+            "origin_candidate_id": f"cand-{marker}",
+            "hold_reason": marker,
+            "resume_trigger": marker,
+            "allowed_surfaces": ["local"],
+            "sensitivity": "private",
+            "created_at": "2026-06-21T15:12:00Z",
+            "updated_at": "2026-06-21T15:13:00Z",
+        },
+    )
+
+    attention_payload = asyncio.run(api.attention())
+    snapshot_payload = _snapshot(api)
+    serialized = json.dumps({"attention": attention_payload, "state_dir": snapshot_payload["state_dir"]}, sort_keys=True)
+
+    assert marker not in serialized
+    assert snapshot_payload["state_dir"].startswith("state_dir#")

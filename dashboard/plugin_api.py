@@ -1873,7 +1873,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "ok": True,
         "generated_at": _now(),
         "instance": effective_instance,
-        "state_dir": str(root),
+        "state_dir": _safe_surface_text("state_dir", str(root), limit=240),
         "state_exists": root.exists(),
         "state_mtime": freshness.get("canonical_latest_mtime"),
         "state_latest_mtime": freshness.get("legacy_state_latest", {}).get("mtime"),
