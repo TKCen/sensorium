@@ -1560,6 +1560,14 @@ def _topology_safe_id(value: Any) -> str:
     return _safe_surface_atom("topology_node", value)
 
 
+def _topology_edge_status(raw_status: Any) -> str | None:
+    """Closed-vocabulary edge status; never echo free-form/raw config status text."""
+    if raw_status is None or raw_status == "":
+        return None
+    text = str(raw_status).strip().lower()
+    return text if text in _TOPOLOGY_STATUSES else "unknown"
+
+
 def _sanitize_topology_node(raw_id: str, block: Any) -> tuple[str, dict[str, Any]]:
     data = block if isinstance(block, dict) else {}
     kind = _topology_node_kind(data.get("type") or data.get("kind"))
@@ -1583,8 +1591,7 @@ def _sanitize_topology_edge(edge: Any, node_lookup: dict[str, str]) -> dict[str,
     to_id = node_lookup.get(str(raw_to)) or f"unknown:{_topology_safe_id(raw_to)}"
     kind = _topology_edge_kind(data.get("kind") or data.get("type"))
     enabled = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
-    raw_status = data.get("status")
-    status = _safe_surface_atom("topology_edge_status", raw_status) if raw_status else None
+    status = _topology_edge_status(data.get("status"))
     return {
         "id": f"{from_id}->{to_id}",
         "from": from_id,

@@ -111,6 +111,37 @@ def test_topology_node_and_edge_kinds_and_statuses_are_closed_vocabulary(tmp_pat
     assert edge["kind"] == "configured_flow"
 
 
+def test_topology_edge_status_is_closed_vocabulary_not_raw_atom(tmp_path, monkeypatch):
+    """A safe-atom-shaped edge status must still map to the closed vocabulary, not leak verbatim.
+
+    Regression: WEIRD_STATUS_SHOULD_NOT_LEAK passes the generic safe-atom regex
+    (alnum/underscore), so a naive _safe_surface_atom("topology_edge_status", ...)
+    call let it through unchanged even though it's not in the closed
+    active|disabled|degraded|unknown vocabulary.
+    """
+    root = tmp_path / "sensorium" / "demo"
+    sentinel = "WEIRD_STATUS_SHOULD_NOT_LEAK"
+    _write_registry(
+        root,
+        blocks={"a": {"type": "sensor"}, "b": {"type": "processor"}},
+        edges=[
+            {"from": "a", "to": "b", "kind": "configured_flow", "status": sentinel},
+            {"from": "b", "to": "a", "kind": "configured_flow", "status": "degraded"},
+            {"from": "a", "to": "a", "kind": "configured_flow"},
+        ],
+    )
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.topology(instance="demo"))
+    payload = json.dumps(data, sort_keys=True)
+
+    assert sentinel not in payload
+    statuses = [edge["status"] for edge in data["edges"]]
+    assert statuses[0] == "unknown"
+    assert statuses[1] == "degraded"
+    assert statuses[2] is None
+
+
 def test_topology_does_not_leak_hostile_marker_verbatim(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     sentinel = "sk-t9-topology...4242"
