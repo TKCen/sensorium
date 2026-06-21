@@ -147,7 +147,7 @@ Missing config fails safe: local-only surfaces, private sensitivity, default thr
 
 - **Surface policy** intersects the item's `allowed_surfaces` with the config `allowed_surfaces`. Config can only narrow scope, never broaden it.
 - **Sensitivity policy** takes the more restrictive of item sensitivity and config `max_sensitivity`. An item marked `local_only` stays `local_only` even if config allows `public_safe`.
-- **Diagnostics** (`sensorium_status`, `sensorium_profile show`) expose compact config status (source, path, `policy_card_ref`, `instance_name`, `allowed_surfaces`, `max_sensitivity`) — never raw budgets, thresholds, or private policy contents.
+- **Diagnostics** (`sensorium_status`, `sensorium_profile show`, dashboard GET routes) expose compact config/status projections (source labels, path labels, `policy_card_ref`, `instance_name`, `allowed_surfaces`, `max_sensitivity`) — never raw budgets, thresholds, private policy contents, raw transcript/log text, or caller-controlled filesystem paths.
 
 ---
 

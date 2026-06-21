@@ -211,6 +211,7 @@ Before merging a new sensor or Subconscious job:
 - [ ] It has tests for no-spam/no-raw/no-outbound.
 - [ ] It appears in probe inventory/audit.
 - [ ] It writes decision receipts for meaningful state changes.
+- [ ] Any new dashboard/API projection is read-only, compact-only, and covered by a hostile-value privacy smoke; see `dashboard-and-review-surfaces.md`.
 - [ ] It cannot self-amplify from its own feedback.
 - [ ] Conscious review remains the first place with authority to act externally.
 

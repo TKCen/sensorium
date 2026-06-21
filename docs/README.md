@@ -1,5 +1,6 @@
 # Docs
 
+- `dashboard-and-review-surfaces.md`: read-only dashboard route contract, compact privacy projection rules, and regression checklist for `/snapshot`, `/attention`, `/metrics`, graph, registry, dampener/blocker, and explanation surfaces.
 - `extending-sensors-and-subconscious-jobs.md`: how to add new deterministic sensors and bounded Subconscious jobs without breaking the awareness/action boundary.
 - `profiles-and-config.md`: the profile model, active-profile resolution, and the code/config boundary — what deployers configure vs what the plugin provides as generic defaults.
 - `examples/demo-instance-config.json`: sample `instance.config.json` for a profile named `demo`.

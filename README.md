@@ -48,7 +48,7 @@ Core pieces:
 - **Pre-LLM hooks (`pointers.py`, `pre_llm_salience.py`)** — inject compact reminders/pointers before model calls without mutating state.
 - **Deterministic tick scripts (`scripts/sensorium_tick.py`)** — run heartbeat/pressure sensors, compaction, and thread service from cron or manual smoke tests.
 - **Admin tools** — inspect and manage profiles, sensors, attention inboxes, artifacts, policies, and diagnostics.
-- **Dashboard plugin (`dashboard/`)** — optional read-only FastAPI dashboard surface for profile state snapshots.
+- **Dashboard plugin (`dashboard/`)** — optional read-only FastAPI dashboard surface for attention, snapshots, graph/receipt traces, metrics, and inner-life sidecar audits. Dashboard routes are GET-only and project hostile legacy/corrupt values through compact safe labels before rendering.
 
 ---
 
@@ -172,6 +172,27 @@ A separate toolset for operator setup, diagnostics, and management. Load it only
 
 ---
 
+## Dashboard review surfaces
+
+The optional dashboard plugin is a read-only observability surface for operators. It is not a second control plane and it does not broaden the live `sensorium` tool footprint.
+
+Dashboard routes are intentionally limited to GET-only compact projections:
+
+| Route | Purpose |
+|-------|---------|
+| `/attention` | Current pull-based attention inbox: visible candidates and dormant/held threads |
+| `/snapshot` | Whole-profile overview: counts, health, config summary, freshness, traces, artifacts, actions, outbox |
+| `/graph` | Compact candidate/receipt graph links for settlement and lineage review |
+| `/metrics` | Efficiency and pressure metrics from the metrics sidecar |
+| `/registry` | Compact sensor/inner-life block and edge registry projection |
+| `/probe-audit` | Compact run-state/probe audit projection |
+| `/dampeners` / `/blockers` | Inner-life dampener/blocker sidecar evidence |
+| `/explanation` | Deterministic pressure explanation for one candidate/review subject |
+
+All dashboard output is an output boundary: legacy/corrupt row values, raw transcript/log markers, secrets, metric labels, state paths, and free-form refs are sanitized or replaced with deterministic opaque labels before rendering. See `docs/dashboard-and-review-surfaces.md` for the route contract and privacy checklist.
+
+---
+
 ## Profiles and configuration
 
 A *profile* is a named runtime namespace under `~/.hermes/agent-sensorium/<profile>/`. Each profile has its own `instance.config.json`, signal/event/candidate/thread state, and sensor registry. The `default` profile is the portable fallback; multiple profiles (e.g. `default`, `demo`) can coexist.
@@ -212,7 +233,8 @@ See `docs/profiles-and-config.md` for the full profile model and config/code bou
 - Surface/sensitivity/cooldown gating: each signal class carries a surface intersection policy before it can become visible
 - Policy-gated action preparation: local artifacts and handoff records remain inert until an operator or external system acts on them
 - Pull-based review: the agent (and operator) request status; nothing is pushed
-- Safe admin and debug surfaces: a separate admin toolset for read/diagnose/manage operations, intentionally hidden from the live agent surface
+- **Safe admin and debug surfaces:** a separate admin toolset for read/diagnose/manage operations, intentionally hidden from the live agent surface
+- **Read-only dashboard review surfaces:** `/attention`, `/snapshot`, `/graph`, `/metrics`, `/registry`, `/probe-audit`, `/dampeners`, `/blockers`, and `/explanation` expose compact status and traces without mutation routes
 
 ---
 
@@ -299,6 +321,8 @@ sensorium(action="status")
 - **Surface intersection policy.** A signal must pass both its own sensitivity gate and the current session-surface policy before it can surface in the context window.
 - **No autonomous outbound delivery.** Prepared artifacts remain local until an operator or external system explicitly chooses what to do with them.
 - **Conscious-tier receipts required.** Any mediated artifact (message draft, task, external action) requires a conscious review path. The pipeline cannot self-authorize delivery.
+- **Dashboard output is compact-only.** Dashboard/API GET routes treat persisted legacy rows, metrics sidecars, paths, and corrupt scalars as hostile. Raw transcripts, raw logs, secrets, and secret-shaped identifiers are replaced with deterministic opaque labels before leaving the process.
+- **Read-only means read-only.** Dashboard routes are limited to `GET`; state mutation remains in the explicit live/admin tools and receipt-writing code paths.
 
 ---
 
