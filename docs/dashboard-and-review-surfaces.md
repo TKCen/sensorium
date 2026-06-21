@@ -19,6 +19,9 @@ The dashboard FastAPI router exposes only GET/HEAD-safe routes. The expected rou
 | `/attention` | `GET` | Current pull-based attention inbox: visible active candidates and dormant/held threads |
 | `/snapshot` | `GET` | Whole-profile overview: counts, attention footprint, health, config summary, freshness, traces, artifacts, actions, outbox, metrics |
 | `/graph` | `GET` | Compact candidate/receipt graph links for settlement and lineage review |
+| `/topology` | `GET` | Config-derived flow DAG topology: sensors, processors, gates, queues, sinks, and configured edges |
+| `/runtime-status` | `GET` | Closed-vocabulary runtime status overlay for topology nodes plus bounded active instance nodes |
+| `/trace` | `GET` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
 | `/metrics` | `GET` | Efficiency and pressure metrics loaded from the metrics sidecar |
 | `/registry` | `GET` | Compact sensor/inner-life block and edge registry projection |
 | `/probe-audit` | `GET` | Compact run-state/probe audit projection |
@@ -84,6 +87,16 @@ Graph and explanation routes expose why a candidate surfaced and how settlement 
 
 `/graph` and `/registry` should remain `compact_only` projections.
 
+### Flow DAG (`/topology`, `/runtime-status`, `/trace`)
+
+The primary dashboard graph is the Flow DAG. It is deliberately split across three compact GET-only contracts:
+
+- `/topology` answers **what can happen** from config-derived organs/pathways: sensors, processors, gates, queues, sinks, and configured edges. Edge IDs must be stable and collision-safe for parallel edges, and labels are display text only after the dashboard label/path/secret projection boundary.
+- `/runtime-status` answers **what is happening now** by overlaying a closed status vocabulary (`active`, `quiet`, `degraded`, `error`, `processing`, `waiting`, `reviewing`, `blocked`, `held`, `settled`, `stale`) onto topology nodes and bounded active instance nodes. Unknown/free-form runtime states must not pass through.
+- `/trace` answers **where this selected thing came from** for a node or edge. It may expose compact upstream/downstream refs, influences, config refs, timestamps, evidence refs, and limitations. If a relation cannot be honestly derived, return an empty bounded list plus a limitation note rather than fabricating causality.
+
+The older `/snapshot`/`/graph` lane projection can remain as a debug/fallback view, but it is not the primary model for the human-facing flow graph.
+
 ### Metrics (`/metrics`, `/snapshot.metrics`)
 
 Metrics are loaded from sidecar files (`latest.json`, `timeseries.jsonl`). They are still an output boundary: hostile labels and nested strings in metrics JSON must be recursively sanitized before returning from `/metrics` or embedding inside `/snapshot`.
@@ -106,6 +119,9 @@ The smoke should cover at least:
 - `/attention` candidate/thread fields;
 - `/metrics` latest/series JSON;
 - `/graph` candidate/receipt nodes and edges;
+- `/topology` node/edge labels, ids, kinds, statuses, and parallel-edge keying;
+- `/runtime-status` status vocabulary, active instance ids, freshness metadata, and truncation flags;
+- `/trace` selected node/edge subject, upstream/downstream/influence/config/evidence refs, timestamps, and limitation notes;
 - `/registry`, `/probe-audit`, `/dampeners`, `/blockers`;
 - invalid `instance` values, including path traversal and newline variants;
 - route matrix: only expected GET routes, no mutation methods;
@@ -115,8 +131,8 @@ Useful local commands:
 
 ```bash
 ruff check agent_sensorium dashboard tests
-node --check dashboard/dist/index.v7.js
-uv run --extra test pytest tests/test_dashboard_plugin.py tests/test_dashboard_snapshot.py tests/test_dashboard_perception_trace.py tests/test_explanations.py tests/test_receipts.py -q -o 'addopts='
+node --check dashboard/dist/index.v8.js
+uv run --extra test pytest tests/test_dashboard_plugin.py tests/test_dashboard_snapshot.py tests/test_dashboard_topology.py tests/test_dashboard_runtime_status.py tests/test_dashboard_trace.py tests/test_dashboard_frontend_smoke.py tests/test_dashboard_perception_trace.py tests/test_explanations.py tests/test_receipts.py -q -o 'addopts='
 uv run --extra test pytest -q -o 'addopts='
 git diff --check upstream/main...HEAD
 ```
