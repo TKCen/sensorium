@@ -183,7 +183,7 @@ Dashboard routes are intentionally limited to GET-only compact projections:
 | `/attention` | Current pull-based attention inbox: visible candidates and dormant/held threads |
 | `/snapshot` | Whole-profile overview: counts, health, config summary, freshness, traces, artifacts, actions, outbox |
 | `/graph` | Compact candidate/receipt graph links for settlement and lineage review |
-| `/topology` | Config-derived flow DAG topology: sensors, processors, gates, queues, sinks, and configured edges |
+| `/topology` | Config-derived flow DAG topology: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges |
 | `/runtime-status` | Closed-vocabulary runtime overlay for topology nodes plus bounded active instance nodes |
 | `/trace` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
 | `/metrics` | Efficiency and pressure metrics from the metrics sidecar |
@@ -192,7 +192,7 @@ Dashboard routes are intentionally limited to GET-only compact projections:
 | `/dampeners` / `/blockers` | Inner-life dampener/blocker sidecar evidence |
 | `/explanation` | Deterministic pressure explanation for one candidate/review subject |
 
-The primary dashboard graph is the **Flow DAG**: `/topology` answers what can happen, `/runtime-status` overlays what is happening now, and `/trace` explains where a selected node/edge came from and what influenced it. The older `/snapshot`/`/graph` lane projection remains available as an explicit debug/fallback view, not the primary model.
+The primary dashboard graph is the **Flow DAG**: `/topology` answers what can happen, `/runtime-status` overlays what is happening now, and `/trace` explains where a selected node/edge came from and what influenced it. The DAG cards stay compact for scanability; selecting a card or edge opens the right-hand trace rail with role, origin, status source, configured/enabled state, meaning, relationship counts, refs, timestamps, and limitations. The older `/snapshot`/`/graph` lane projection remains available as an explicit debug/fallback view, not the primary model.
 
 All dashboard output is an output boundary: legacy/corrupt row values, raw transcript/log markers, secrets, metric labels, state paths, and free-form refs are sanitized or replaced with deterministic opaque labels before rendering. See `docs/dashboard-and-review-surfaces.md` for the route contract and privacy checklist.
 

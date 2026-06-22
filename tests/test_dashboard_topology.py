@@ -111,6 +111,41 @@ def test_topology_node_and_edge_kinds_and_statuses_are_closed_vocabulary(tmp_pat
     assert edge["kind"] == "configured_flow"
 
 
+def test_topology_maps_inner_life_block_kinds_to_flow_dag_stage_kinds(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(
+        root,
+        blocks={
+            "signal_inbox": {"type": "aggregator"},
+            "attention_inbox": {"type": "router"},
+            "memory_reflection": {"type": "memory_reflector"},
+            "subconscious_review": {"type": "consciousness_review"},
+            "receipt_writer": {"type": "receipt_writer"},
+            "dashboard_projection": {"type": "dashboard_projection"},
+        },
+        edges=[
+            {"from": "signal_inbox", "to": "subconscious_review", "kind": "configured_flow"},
+            {"from": "subconscious_review", "to": "attention_inbox", "kind": "configured_flow"},
+            {"from": "attention_inbox", "to": "receipt_writer", "kind": "configured_flow"},
+        ],
+    )
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.topology(instance="demo"))
+    nodes_by_label = {node["label"]: node for node in data["nodes"]}
+
+    assert nodes_by_label["signal_inbox"]["id"] == "queue:signal_inbox"
+    assert nodes_by_label["attention_inbox"]["id"] == "router:attention_inbox"
+    assert nodes_by_label["memory_reflection"]["id"] == "processor:memory_reflection"
+    assert nodes_by_label["subconscious_review"]["id"] == "review:subconscious_review"
+    assert nodes_by_label["receipt_writer"]["id"] == "receipt:receipt_writer"
+    assert nodes_by_label["dashboard_projection"]["id"] == "sink:dashboard_projection"
+
+    edge_pairs = {(edge["from"], edge["to"]) for edge in data["edges"]}
+    assert ("queue:signal_inbox", "review:subconscious_review") in edge_pairs
+    assert ("review:subconscious_review", "router:attention_inbox") in edge_pairs
+
+
 def test_topology_edge_status_is_closed_vocabulary_not_raw_atom(tmp_path, monkeypatch):
     """A safe-atom-shaped edge status must still map to the closed vocabulary, not leak verbatim.
 

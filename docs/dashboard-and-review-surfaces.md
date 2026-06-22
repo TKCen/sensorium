@@ -19,7 +19,7 @@ The dashboard FastAPI router exposes only GET/HEAD-safe routes. The expected rou
 | `/attention` | `GET` | Current pull-based attention inbox: visible active candidates and dormant/held threads |
 | `/snapshot` | `GET` | Whole-profile overview: counts, attention footprint, health, config summary, freshness, traces, artifacts, actions, outbox, metrics |
 | `/graph` | `GET` | Compact candidate/receipt graph links for settlement and lineage review |
-| `/topology` | `GET` | Config-derived flow DAG topology: sensors, processors, gates, queues, sinks, and configured edges |
+| `/topology` | `GET` | Config-derived flow DAG topology: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges |
 | `/runtime-status` | `GET` | Closed-vocabulary runtime status overlay for topology nodes plus bounded active instance nodes |
 | `/trace` | `GET` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
 | `/metrics` | `GET` | Efficiency and pressure metrics loaded from the metrics sidecar |
@@ -91,11 +91,11 @@ Graph and explanation routes expose why a candidate surfaced and how settlement 
 
 The primary dashboard graph is the Flow DAG. It is deliberately split across three compact GET-only contracts:
 
-- `/topology` answers **what can happen** from config-derived organs/pathways: sensors, processors, gates, queues, sinks, and configured edges. Edge IDs must be stable and collision-safe for parallel edges, and labels are display text only after the dashboard label/path/secret projection boundary.
+- `/topology` answers **what can happen** from config-derived organs/pathways: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges. Edge IDs must be stable and collision-safe for parallel edges, and labels are display text only after the dashboard label/path/secret projection boundary.
 - `/runtime-status` answers **what is happening now** by overlaying a closed status vocabulary (`active`, `quiet`, `degraded`, `error`, `processing`, `waiting`, `reviewing`, `blocked`, `held`, `settled`, `stale`) onto topology nodes and bounded active instance nodes. Unknown/free-form runtime states must not pass through.
 - `/trace` answers **where this selected thing came from** for a node or edge. It may expose compact upstream/downstream refs, influences, config refs, timestamps, evidence refs, and limitations. If a relation cannot be honestly derived, return an empty bounded list plus a limitation note rather than fabricating causality.
 
-The older `/snapshot`/`/graph` lane projection can remain as a debug/fallback view, but it is not the primary model for the human-facing flow graph.
+The Flow DAG UI should keep node cards compact enough to scan in the DAG itself. Detailed interpretation belongs in the selected-node/edge trace rail: purpose/detail text, role, origin, status source, configured/enabled state, pressure/freshness when present, relationship counts, compact refs, timestamps, and honest limitation notes. The older `/snapshot`/`/graph` lane projection can remain as a debug/fallback view, but it is not the primary model for the human-facing flow graph.
 
 ### Metrics (`/metrics`, `/snapshot.metrics`)
 
@@ -131,7 +131,7 @@ Useful local commands:
 
 ```bash
 ruff check agent_sensorium dashboard tests
-node --check dashboard/dist/index.v8.js
+node --check dashboard/dist/index.v11.js
 uv run --extra test pytest tests/test_dashboard_plugin.py tests/test_dashboard_snapshot.py tests/test_dashboard_topology.py tests/test_dashboard_runtime_status.py tests/test_dashboard_trace.py tests/test_dashboard_frontend_smoke.py tests/test_dashboard_perception_trace.py tests/test_explanations.py tests/test_receipts.py -q -o 'addopts='
 uv run --extra test pytest -q -o 'addopts='
 git diff --check upstream/main...HEAD

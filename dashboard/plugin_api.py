@@ -1527,7 +1527,22 @@ def _sanitize_edge(edge: Any) -> dict[str, Any]:
     }
 
 
-_TOPOLOGY_NODE_KINDS = {"sensor", "emitter", "processor", "gate", "queue", "sink"}
+_TOPOLOGY_NODE_KINDS = {"sensor", "emitter", "processor", "gate", "queue", "router", "review", "receipt", "sink"}
+_TOPOLOGY_NODE_KIND_ALIASES = {
+    # Inner-life registry block kinds are more specific than the public Flow DAG
+    # display vocabulary. Map them into stable stage categories instead of
+    # rendering valid configured organs as `unknown`.
+    "temporal_sensor": "sensor",
+    "memory_reflector": "processor",
+    "normalizer": "processor",
+    "aggregator": "queue",
+    "dampener": "gate",
+    "blocker": "gate",
+    "consciousness_review": "review",
+    "receipt_writer": "receipt",
+    "tendency_proposer": "processor",
+    "dashboard_projection": "sink",
+}
 _TOPOLOGY_STATUSES = {"active", "disabled", "degraded"}
 _TOPOLOGY_EDGE_KINDS = {"configured_flow", "dependency", "fallback"}
 
@@ -1537,6 +1552,7 @@ def _topology_node_kind(raw: Any) -> str:
     if raw is None or raw == "":
         return "sensor"
     text = str(raw).strip().lower()
+    text = _TOPOLOGY_NODE_KIND_ALIASES.get(text, text)
     return text if text in _TOPOLOGY_NODE_KINDS else "unknown"
 
 
