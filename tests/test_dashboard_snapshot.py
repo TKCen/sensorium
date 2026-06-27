@@ -223,6 +223,13 @@ def test_runtime_status_projects_flow_edges_and_trace_contents(tmp_path, monkeyp
     assert trace["contents"]["event_count"] == 1
     assert any(ref["kind"] == "signal" for ref in trace["upstream"])
 
+    runtime_edge_id = next(edge["id"] for edge in data["edges"] if edge["kind"] == "signal_to_candidate")
+    edge_trace = _trace(api, edge_id=runtime_edge_id)
+    assert edge_trace["subject"]["origin"] == "runtime_projection"
+    assert edge_trace["contents"]["role"] == "runtime_projection_edge"
+    assert edge_trace["contents"]["observed"] is True
+    assert "not a complete traversal log" in json.dumps(edge_trace)
+
 
 def test_snapshot_warns_on_unattached_prepared_outbox(tmp_path, monkeypatch):
     api = _load_dashboard_api()

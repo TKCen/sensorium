@@ -2441,6 +2441,74 @@ def _trace_topology_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
     }
 
 
+def _trace_runtime_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
+    raw_registry = _read_json(root / "sensors" / "registry.json", {})
+    blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
+    if not isinstance(blocks_obj, dict) and isinstance(raw_registry, dict):
+        blocks_obj = raw_registry
+    if not isinstance(blocks_obj, dict):
+        blocks_obj = {}
+
+    is_stale, _ = _runtime_is_stale(root)
+    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=_recent_signal_sensors(root), is_stale=is_stale)
+    candidates, _ = _read_jsonl(root, "candidates", limit=2000)
+    threads, _ = _read_jsonl(root, "threads", limit=2000)
+    actions, _ = _read_jsonl(root, "thread_actions", limit=2000)
+    outbox, _ = _read_jsonl(root, "outbox", limit=2000)
+    eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in _RUNTIME_CANDIDATE_STATUS]
+    eligible_threads = [t for t in threads if t.get("status") in ACTIVE_THREAD_STATUSES]
+    eligible_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
+    eligible_outbox = [o for o in outbox if o.get("status") in OPEN_OUTBOX_STATUSES]
+    instance_nodes = (
+        [_runtime_candidate_node(c) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
+        + [_runtime_thread_node(t) for t in sorted(eligible_threads, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
+        + [_runtime_action_node(a) for a in sorted(eligible_actions, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
+        + [_runtime_outbox_node(o) for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
+    )
+    nodes = topology_nodes + instance_nodes
+    node_ids = {str(n.get("id") or "") for n in nodes}
+    edge = next((e for e in _runtime_flow_edges(
+        root,
+        visible_node_ids=node_ids,
+        candidates=eligible_candidates,
+        threads=eligible_threads,
+        actions=eligible_actions,
+        outbox=eligible_outbox,
+    ) if e.get("id") == edge_id), None)
+    if edge is None:
+        return None
+    from_id = str(edge.get("from") or "")
+    to_id = str(edge.get("to") or "")
+    return {
+        "subject": {
+            "id": edge_id,
+            "type": "edge",
+            "kind": _safe_surface_atom("edge_kind", edge.get("kind")),
+            "origin": "runtime_projection",
+            "status": _safe_surface_atom("runtime_status", edge.get("status")),
+        },
+        "upstream": [_trace_compact_ref(from_id, from_id.split(":", 1)[0] or "node", "runtime_source")],
+        "downstream": [_trace_compact_ref(to_id, to_id.split(":", 1)[0] or "node", "runtime_target")],
+        "influences": [],
+        "contents": {
+            "role": "runtime_projection_edge",
+            "kind": _safe_surface_atom("edge_kind", edge.get("kind")),
+            "status": _safe_surface_atom("runtime_status", edge.get("status")),
+            "source": _safe_surface_atom("runtime_source", edge.get("source")),
+            "observed": bool(edge.get("observed")),
+            "projection": bool(edge.get("projection")),
+            "upstream_count": 1,
+            "downstream_count": 1,
+        },
+        "config_refs": [],
+        "timestamps": {"observed_at": edge.get("ts")},
+        "evidence_refs": [],
+        "limitations": [
+            "runtime edges are bounded compact relation evidence from JSONL lineage fields, not a complete traversal log"
+        ],
+    }
+
+
 def _trace_candidate(root: Path, candidate_node_id: str) -> dict[str, Any] | None:
     """Trace for a runtime candidate node: upstream perception, downstream effects, settlement evidence.
 
@@ -2727,7 +2795,7 @@ async def trace(node_id: str | None = None, edge_id: str | None = None, instance
 
     built_trace: dict[str, Any] | None = None
     if edge_id:
-        built_trace = _trace_topology_edge(root, edge_id)
+        built_trace = _trace_runtime_edge(root, edge_id) if edge_id.startswith("runtime:") else _trace_topology_edge(root, edge_id)
     elif node_id:
         prefix = node_id.split(":", 1)[0] if ":" in node_id else ""
         if prefix in _TRACE_TOPOLOGY_NODE_KINDS:
