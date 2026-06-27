@@ -48,7 +48,7 @@ Core pieces:
 - **Pre-LLM hooks (`pointers.py`, `pre_llm_salience.py`)** — inject compact reminders/pointers before model calls without mutating state.
 - **Deterministic tick scripts (`scripts/sensorium_tick.py`)** — run heartbeat/pressure sensors, compaction, and thread service from cron or manual smoke tests.
 - **Admin tools** — inspect and manage profiles, sensors, attention inboxes, artifacts, policies, and diagnostics.
-- **Dashboard plugin (`dashboard/`)** — optional read-only FastAPI dashboard surface for attention, snapshots, graph/receipt traces, metrics, live-turn receipt balance, and inner-life sidecar audits. Dashboard routes are GET-only and project hostile legacy/corrupt values through compact safe labels before rendering.
+- **Dashboard plugin (`dashboard/`)** — optional read-only FastAPI dashboard surface for attention, snapshots, graph/receipt traces, metrics, and inner-life sidecar audits. Dashboard routes are GET-only and project hostile legacy/corrupt values through compact safe labels before rendering.
 
 ---
 

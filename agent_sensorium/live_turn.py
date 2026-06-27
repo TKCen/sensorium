@@ -8,23 +8,13 @@ unresolved residue.
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any
 
 from .schemas import new_id, truncate_text, utc_now_iso
 
-LIVE_TURN_RECEIPT_TYPE = "live_turn.ingest_decision"
 FOREGROUND_RESOLUTIONS = frozenset({"full", "partial", "none", "explicit_no_action"})
 RESIDUE_KINDS = frozenset({"none", "watch", "later_review", "pattern_pressure"})
 DURABLE_CAPTURES = frozenset({"none", "memory", "skill", "docs", "task", "artifact"})
-SKIPPED_REASONS = frozenset({
-    "",
-    "foreground_owned_no_residue",
-    "captured_elsewhere_no_residue",
-    "partial_foreground_without_residue",
-    "no_residue",
-    "ingest_failed",
-})
 TURN_REVIEW_DECISIONS = frozenset({
     "no_action",
     "sensorium_residue_candidate",
@@ -133,73 +123,6 @@ def should_ingest_live_residue(intent: dict[str, Any]) -> tuple[bool, str]:
     if foreground and resolution == "partial":
         return False, "partial_foreground_without_residue"
     return False, "no_residue"
-
-
-def _receipt_ts(receipt: dict[str, Any]) -> str:
-    return str(receipt.get("ts") or receipt.get("created_at") or "")
-
-
-def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 500) -> dict[str, Any]:
-    """Return transcript-free metrics for live-turn ingest decisions.
-
-    The projection intentionally exposes only closed-vocabulary counts and a tiny
-    recent timeline. It never returns receipt summaries, raw reasons, ids, or
-    surface names because those can carry private conversation content in
-    persisted/corrupt rows.
-    """
-
-    bounded_limit = max(1, min(int(limit or 500), 5000))
-    receipts = [
-        row for row in decisions
-        if isinstance(row, dict) and row.get("type") == LIVE_TURN_RECEIPT_TYPE
-    ][-bounded_limit:]
-    ingested = [r for r in receipts if bool(r.get("ingested"))]
-    skipped = [r for r in receipts if not bool(r.get("ingested"))]
-
-    def enum_value(receipt: dict[str, Any], key: str, allowed: frozenset[str], default: str) -> str:
-        value = receipt.get(key)
-        return value if isinstance(value, str) and value in allowed else default
-
-    def skipped_reason(receipt: dict[str, Any]) -> str:
-        value = receipt.get("skipped_reason")
-        if not isinstance(value, str) or not value:
-            return "none"
-        return value if value in SKIPPED_REASONS else "other"
-
-    residue_counter = Counter(enum_value(r, "residue", RESIDUE_KINDS, "unknown") for r in receipts)
-    resolution_counter = Counter(enum_value(r, "foreground_resolution", FOREGROUND_RESOLUTIONS, "unknown") for r in receipts)
-    durable_counter = Counter(enum_value(r, "durable_capture", DURABLE_CAPTURES, "unknown") for r in receipts)
-    skipped_counter = Counter(skipped_reason(r) for r in skipped)
-
-    recent = [
-        {
-            "ts": _receipt_ts(r),
-            "ingested": bool(r.get("ingested")),
-            "residue": enum_value(r, "residue", RESIDUE_KINDS, "unknown"),
-            "foreground_resolution": enum_value(r, "foreground_resolution", FOREGROUND_RESOLUTIONS, "unknown"),
-            "durable_capture": enum_value(r, "durable_capture", DURABLE_CAPTURES, "unknown"),
-            "skipped_reason": skipped_reason(r),
-            "background_action_allowed": bool(r.get("background_action_allowed")),
-        }
-        for r in sorted(receipts, key=_receipt_ts, reverse=True)[:12]
-    ]
-
-    return {
-        "receipt_type": LIVE_TURN_RECEIPT_TYPE,
-        "window_limit": bounded_limit,
-        "receipt_count": len(receipts),
-        "ingested_count": len(ingested),
-        "skipped_count": len(skipped),
-        "foreground_owned_no_residue_count": skipped_counter.get("foreground_owned_no_residue", 0),
-        "captured_elsewhere_no_residue_count": skipped_counter.get("captured_elsewhere_no_residue", 0),
-        "residue_breakdown": dict(residue_counter),
-        "foreground_resolution_breakdown": dict(resolution_counter),
-        "durable_capture_breakdown": dict(durable_counter),
-        "skipped_reason_breakdown": dict(skipped_counter),
-        "background_action_allowed_count": sum(1 for r in receipts if bool(r.get("background_action_allowed"))),
-        "latest_ts": max((_receipt_ts(r) for r in receipts), default=""),
-        "recent": recent,
-    }
 
 
 def review_turn_for_residue(

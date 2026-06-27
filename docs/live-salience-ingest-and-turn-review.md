@@ -178,47 +178,6 @@ followup_review_needed
 
 The reviewer should be cheap and mostly deterministic. A small/cheap model can be used only when simple receipt/keyword checks are ambiguous.
 
-## Dashboard/API projection
-
-The dashboard snapshot exposes a transcript-free `live_turn_metrics` object derived from `decisions.jsonl` rows of type `live_turn.ingest_decision`.
-
-Allowed projection shape:
-
-```json
-{
-  "receipt_type": "live_turn.ingest_decision",
-  "receipt_count": 2,
-  "ingested_count": 1,
-  "skipped_count": 1,
-  "foreground_owned_no_residue_count": 1,
-  "captured_elsewhere_no_residue_count": 0,
-  "residue_breakdown": {"none": 1, "watch": 1},
-  "foreground_resolution_breakdown": {"full": 1, "partial": 1},
-  "durable_capture_breakdown": {"docs": 1, "none": 1},
-  "skipped_reason_breakdown": {"foreground_owned_no_residue": 1},
-  "background_action_allowed_count": 0,
-  "latest_ts": "2026-06-27T10:01:00Z",
-  "recent": [
-    {
-      "ts": "2026-06-27T10:01:00Z",
-      "ingested": true,
-      "residue": "watch",
-      "foreground_resolution": "partial",
-      "durable_capture": "none",
-      "skipped_reason": "none",
-      "background_action_allowed": false
-    }
-  ]
-}
-```
-
-Projection privacy contract:
-
-- do **not** return receipt `summary`, `surface`, raw `reason`, ids, correlation keys, or signal ids;
-- only closed-vocabulary fields may be counted/rendered;
-- unknown scalar values collapse to `unknown` / `other`, never to the persisted string;
-- the dashboard may show aggregate live-turn counts and the closed-vocabulary recent timeline, but not raw receipt text.
-
 ## Monitoring metrics
 
 Do not judge the gate by raw signal counts alone. Track balance:
