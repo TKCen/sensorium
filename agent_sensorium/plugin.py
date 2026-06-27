@@ -240,6 +240,7 @@ def register(ctx) -> None:
                 target_ref=target_ref,
                 target=target,
                 thread_id="" if target_id == "latest" else target_id,
+                outbox_id=str(args.get("outbox_id") or "").strip(),
                 config=instance_config,
                 execute=False,
             )
@@ -274,6 +275,7 @@ def register(ctx) -> None:
                 "reason": {"type": "string", "description": "For reach_out: compact conscious reason."},
                 "target_ref": {"type": "string", "description": "For reach_out: compact allowed target ref such as local or discord:<channel>."},
                 "target": {"type": "object", "description": "For reach_out: optional target map, e.g. channel_id or dm_channel_id."},
+                "outbox_id": {"type": "string", "description": "For reach_out deliver_prepared: prepared outbox request id."},
                 "strength": {"type": "number", "description": "Optional ingest strength 0-1."},
                 "foreground_action_taken": {
                     "type": "boolean",

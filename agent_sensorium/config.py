@@ -437,6 +437,12 @@ def _validate_config(raw: dict) -> dict:
         "attention_policy": sanitize_attention_policy(SAFE_DEFAULTS["attention_policy"]),
         "media_gift_policy": sanitize_media_gift_policy(SAFE_DEFAULTS["media_gift_policy"]),
     }
+    if isinstance(raw.get("conscious_reachout"), dict):
+        # Preserve the raw subtree for the conscious reach-out policy gate; the
+        # reach-out module owns field-level sanitization. Without this, the
+        # validated instance config silently drops operator allowlists and falls
+        # back to defaults at the live-tool seam.
+        config["conscious_reachout"] = dict(raw["conscious_reachout"])
     if "instance_name" in raw:
         val = raw["instance_name"]
         if isinstance(val, str) and val.strip():

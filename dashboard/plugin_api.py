@@ -2305,6 +2305,10 @@ def _topology_node_contents(root: Path, node_id: str, node: dict[str, Any], over
     return contents
 
 
+def _safe_list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
 def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 0, downstream_count: int = 0) -> dict[str, Any]:
     contents: dict[str, Any] = {
         "role": _safe_surface_atom("instance_role", kind),
@@ -2317,8 +2321,8 @@ def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 
             "status": _safe_surface_atom("candidate_status", row.get("status")),
             "pressure": row.get("pressure"),
             "summary": _safe_surface_text("candidate_summary", row.get("summary"), limit=180),
-            "event_count": len(row.get("event_ids") or []),
-            "correlation_count": len(row.get("correlation_keys") or []),
+            "event_count": _safe_list_count(row.get("event_ids")),
+            "correlation_count": _safe_list_count(row.get("correlation_keys")),
         })
     elif kind == "thread":
         task = row.get("conscious_task") if isinstance(row.get("conscious_task"), dict) else {}
@@ -2326,14 +2330,14 @@ def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 
             "status": _safe_surface_atom("thread_status", row.get("status")),
             "title": _safe_surface_text("thread_title", task.get("title") or row.get("title"), limit=160),
             "request_type": _safe_surface_atom("request_type", task.get("request_type")),
-            "interaction_ref_count": len(row.get("interaction_refs") or []),
+            "interaction_ref_count": _safe_list_count(row.get("interaction_refs")),
         })
     elif kind == "action":
         contents.update({
             "status": _safe_surface_atom("action_status", row.get("status")),
             "intent": _safe_surface_atom("action_intent", row.get("intent")),
             "title": _safe_surface_text("action_title", row.get("title"), limit=160),
-            "attachment_count": len(row.get("attachments") or []),
+            "attachment_count": _safe_list_count(row.get("attachments")),
         })
     elif kind == "outbox":
         contents.update({
@@ -2342,7 +2346,7 @@ def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 
             "surface": _safe_surface_atom("surface", row.get("surface")),
             "delivery_mode": _safe_surface_atom("delivery_mode", row.get("delivery_mode")),
             "message_chars": len(str(row.get("message_preview") or "")),
-            "media_ref_count": len(row.get("media_refs") or []),
+            "media_ref_count": _safe_list_count(row.get("media_refs")),
         })
     return contents
 

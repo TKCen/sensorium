@@ -126,6 +126,7 @@ def test_direct_reachout_requires_policy_and_adapter(store):
     )
     assert no_adapter["success"] is False
     assert no_adapter["error"] == "missing_delivery_adapter"
+    assert store.read_jsonl("outbox") == []
 
 
 def test_direct_reachout_with_adapter_records_delivered_receipt_and_cooldown(store):
@@ -195,3 +196,63 @@ def test_conscious_reachout_metrics_are_compact(store):
     assert metrics["blocked_count"] == 1
     assert metrics["blocked_breakdown"] == {"subconscious_may_not_reach_out": 1}
     assert "leak it" not in str(metrics)
+
+
+def test_conscious_reachout_metrics_hash_unknown_breakdown_keys(store):
+    store.append_jsonl("decisions", {
+        "type": CONSCIOUS_REACHOUT_DENIED_TYPE,
+        "decision": "SECRET_DECISION_VALUE",
+        "blocked_reason": "SECRET_BLOCK_REASON",
+        "surface": "SECRET_SURFACE",
+        "target_ref": "discord:secret-channel",
+        "ts": "2026-06-27T10:00:00Z",
+    })
+
+    metrics = conscious_reachout_metrics(store.read_jsonl("decisions"))
+
+    rendered = str(metrics)
+    assert "SECRET_DECISION_VALUE" not in rendered
+    assert "SECRET_BLOCK_REASON" not in rendered
+    assert "SECRET_SURFACE" not in rendered
+    assert "decision:" in rendered
+    assert "blocked:" in rendered
+    assert "surface:" in rendered
+
+
+def test_deliver_prepared_dispatches_existing_outbox_and_marks_it_dispatched(store):
+    store.append_jsonl("threads", _thread())
+    prepared = apply_conscious_reachout_decision(
+        store,
+        decision="reach_out",
+        actor_tier="conscious",
+        message="Prepared direct message.",
+        surface="discord",
+        target_ref="discord:chan_1",
+        target={"channel_id": "chan_1"},
+        thread_id="sth_reach",
+        execute=False,
+        config=_config(direct_delivery_enabled=True),
+    )
+    outbox_id = prepared["receipt"]["outbox_id"]
+    adapter = FakeDiscordAdapter()
+
+    delivered = apply_conscious_reachout_decision(
+        store,
+        decision="deliver_prepared",
+        actor_tier="conscious",
+        surface="discord",
+        target_ref="discord:chan_1",
+        outbox_id=outbox_id,
+        execute=True,
+        adapter=adapter,
+        config=_config(direct_delivery_enabled=True),
+        now="2026-06-27T12:00:00Z",
+    )
+
+    assert delivered["success"] is True
+    assert adapter.calls[0]["method"] == "create_thread"
+    assert store.read_jsonl("outbox")[0]["status"] == "dispatched"
+    receipt = store.read_jsonl("decisions")[-1]
+    assert receipt["type"] == CONSCIOUS_REACHOUT_DELIVERED_TYPE
+    assert receipt["outbox_id"] == outbox_id
+    assert "Prepared direct message" not in str(receipt)

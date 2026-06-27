@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .outbox import DiscordAdapter, DIRECT_DELIVERY_MODES, prepare_outbox_request
+from .outbox import DiscordAdapter, DIRECT_DELIVERY_MODES, dispatch_outbox_request, prepare_outbox_request
 from .schemas import SENSITIVITY_RANK, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -43,14 +43,37 @@ CONSCIOUS_REACHOUT_DEFAULTS: dict[str, Any] = {
 }
 
 _DIRECT_DECISIONS = {"reach_out", "deliver_prepared"}
-_CONTENT_DECISIONS = {"prepare_message", "reach_out", "deliver_prepared"}
+_CONTENT_DECISIONS = {"prepare_message", "reach_out"}
+_BLOCKED_REASONS = frozenset({
+    "invalid_decision",
+    "reachout_disabled",
+    "subconscious_may_not_reach_out",
+    "surface_not_allowed",
+    "target_not_allowed",
+    "sensitivity_exceeds_policy",
+    "missing_message",
+    "missing_outbox_id",
+    "outbox_not_found",
+    "outbox_not_prepared",
+    "cooldown_active",
+    "outbox_prepare_failed",
+    "thread_not_found",
+    "thread_not_openable",
+    "delivery_mode_not_allowed",
+    "direct_modes_disabled",
+    "direct_delivery_disabled",
+    "direct_delivery_surface_unsupported",
+    "missing_delivery_adapter",
+    "dispatch_failed",
+    "delivery_failed",
+})
 
 
 def _merged_reachout_config(config: dict | None = None) -> dict[str, Any]:
     cfg = deepcopy(CONSCIOUS_REACHOUT_DEFAULTS)
     if not isinstance(config, dict):
         return cfg
-    raw_obj = config.get("conscious_reachout") if isinstance(config.get("conscious_reachout"), dict) else config
+    raw_obj = config.get("conscious_reachout") if isinstance(config.get("conscious_reachout"), dict) else {}
     raw: dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
     for key in (
         "enabled",
@@ -131,6 +154,15 @@ def _target_label(target_ref: Any) -> str:
     return f"{surface}:{_content_hash(text)[:8]}"
 
 
+def _metric_key(value: Any, allowed: frozenset[str], *, prefix: str = "other") -> str:
+    text = str(value or "unknown").strip()
+    if text in allowed:
+        return text
+    if not text:
+        return "unknown"
+    return f"{prefix}:{_content_hash(text)[:8]}"
+
+
 def _receipt_base(*, now: str, decision: str, actor_tier: str, source: str, surface: str, target_ref: str, reason: str, sensitivity: str, message: str) -> dict[str, Any]:
     message_len = len(message or "")
     return {
@@ -185,6 +217,7 @@ def apply_conscious_reachout_decision(
     target: dict | None = None,
     sensitivity: str = "private",
     thread_id: str = "",
+    outbox_id: str = "",
     config: dict | None = None,
     execute: bool = False,
     adapter: DiscordAdapter | None = None,
@@ -205,6 +238,21 @@ def apply_conscious_reachout_decision(
     surface = str(surface or "local").strip()
     message = truncate_text(message.strip(), int(cfg["max_message_chars"])) if message else ""
     target = target if isinstance(target, dict) else {}
+    outbox_id = str(outbox_id or "").strip()
+    prepared_for_delivery: dict[str, Any] | None = None
+    if decision == "deliver_prepared" and outbox_id:
+        for row in store.read_jsonl("outbox"):
+            if isinstance(row, dict) and row.get("id") == outbox_id:
+                prepared_for_delivery = row
+                break
+        if prepared_for_delivery is not None:
+            surface = str(prepared_for_delivery.get("surface") or surface or "local").strip()
+            row_target = prepared_for_delivery.get("target")
+            target = row_target if isinstance(row_target, dict) else target
+            target_ref = target_ref or _target_ref(surface, "", target)
+            thread_id = thread_id or str(prepared_for_delivery.get("origin_thread_id") or "")
+            preview = str(prepared_for_delivery.get("message_preview") or "")
+            message = truncate_text(preview.strip(), int(cfg["max_message_chars"])) if preview else message
     target_ref = _target_ref(surface, target_ref, target)
     sensitivity = sensitivity if sensitivity in SENSITIVITY_RANK else "private"
     receipt = _receipt_base(
@@ -220,6 +268,8 @@ def apply_conscious_reachout_decision(
     )
     if thread_id:
         receipt["thread_id"] = thread_id
+    if outbox_id:
+        receipt["outbox_id"] = outbox_id
 
     if decision not in REACHOUT_DECISIONS:
         return _append_denied(store, receipt, "invalid_decision")
@@ -233,6 +283,13 @@ def apply_conscious_reachout_decision(
         return _append_denied(store, receipt, "target_not_allowed")
     if SENSITIVITY_RANK[sensitivity] > SENSITIVITY_RANK[cfg["max_sensitivity"]]:
         return _append_denied(store, receipt, "sensitivity_exceeds_policy")
+    if decision == "deliver_prepared":
+        if not outbox_id:
+            return _append_denied(store, receipt, "missing_outbox_id")
+        if prepared_for_delivery is None:
+            return _append_denied(store, receipt, "outbox_not_found")
+        if prepared_for_delivery.get("status") != "prepared":
+            return _append_denied(store, receipt, "outbox_not_prepared")
     if decision in _CONTENT_DECISIONS and not message:
         return _append_denied(store, receipt, "missing_message")
     if decision in _DIRECT_DECISIONS and _cooldown_active(
@@ -252,14 +309,59 @@ def apply_conscious_reachout_decision(
     if decision in _DIRECT_DECISIONS and cfg.get("direct_delivery_enabled") and surface == "discord":
         # Choose a direct mode only at the conscious actuator boundary.
         delivery_mode = "discord_dm_bound_session" if target.get("dm_channel_id") else "discord_channel_thread"
+    if prepared_for_delivery is not None:
+        delivery_mode = str(prepared_for_delivery.get("delivery_mode") or delivery_mode)
+        receipt["delivery_mode"] = delivery_mode
 
-    if thread_id:
-        outbox_cfg = {
-            "enabled": True,
-            "direct_modes_enabled": bool(cfg.get("direct_delivery_enabled")),
-            "allowed_delivery_modes": ["context_pointer", "peripheral_reference", delivery_mode],
-            "discord": {"enabled": bool(cfg.get("direct_delivery_enabled"))},
+    outbox_cfg = {
+        "enabled": True,
+        "direct_modes_enabled": bool(cfg.get("direct_delivery_enabled")),
+        "allowed_delivery_modes": ["context_pointer", "peripheral_reference", delivery_mode],
+        "discord": {"enabled": bool(cfg.get("direct_delivery_enabled"))},
+    }
+
+    if decision == "deliver_prepared":
+        receipt["delivery_authorized"] = True
+        if not execute:
+            receipt["requires_separate_dispatch"] = True
+            store.append_jsonl("decisions", receipt)
+            return {"success": True, "receipt": receipt, "outbox_id": outbox_id}
+        dispatched = dispatch_outbox_request(
+            store,
+            outbox_id=outbox_id,
+            adapter=adapter,
+            config=outbox_cfg,
+            execute=True,
+        )
+        if not dispatched.get("success"):
+            reason = str(dispatched.get("error") or "dispatch_failed")
+            return _append_denied(store, receipt, reason if reason in _BLOCKED_REASONS else "dispatch_failed")
+        dispatch_receipt = dispatched.get("receipt") if isinstance(dispatched.get("receipt"), dict) else {}
+        raw_platform_refs = dispatch_receipt.get("platform_refs") if isinstance(dispatch_receipt, dict) else {}
+        platform_refs = raw_platform_refs if isinstance(raw_platform_refs, dict) else {}
+        delivered = {
+            **receipt,
+            "type": CONSCIOUS_REACHOUT_DELIVERED_TYPE,
+            "delivery_authorized": True,
+            "outbound_delivery": delivery_mode in DIRECT_DELIVERY_MODES,
+            "delivery_mode": delivery_mode,
+            "platform_refs": {
+                key: str(value)[:120]
+                for key, value in platform_refs.items()
+                if key in {"message_id", "channel_id", "thread_id"}
+            },
         }
+        store.append_jsonl("decisions", delivered)
+        return {"success": True, "receipt": delivered, "outbox_id": outbox_id}
+
+    if execute:
+        if not cfg.get("direct_delivery_enabled"):
+            return _append_denied(store, receipt, "direct_delivery_disabled")
+        if surface != "discord":
+            return _append_denied(store, receipt, "direct_delivery_surface_unsupported")
+        if adapter is None:
+            return _append_denied(store, receipt, "missing_delivery_adapter")
+    elif thread_id:
         prepared = prepare_outbox_request(
             store,
             thread_id=thread_id,
@@ -274,7 +376,8 @@ def apply_conscious_reachout_decision(
             dry_run=False,
         )
         if not prepared.get("success"):
-            return _append_denied(store, receipt, str(prepared.get("error") or "outbox_prepare_failed"))
+            reason = str(prepared.get("error") or "outbox_prepare_failed")
+            return _append_denied(store, receipt, reason if reason in _BLOCKED_REASONS else "outbox_prepare_failed")
         prepared_outbox = prepared.get("data") if isinstance(prepared.get("data"), dict) else None
         receipt["outbox_id"] = prepared_outbox.get("id") if prepared_outbox else ""
         receipt["delivery_mode"] = delivery_mode
@@ -285,13 +388,7 @@ def apply_conscious_reachout_decision(
         store.append_jsonl("decisions", receipt)
         return {"success": True, "receipt": receipt, "outbox": prepared_outbox}
 
-    if not cfg.get("direct_delivery_enabled"):
-        return _append_denied(store, receipt, "direct_delivery_disabled")
-    if surface != "discord":
-        return _append_denied(store, receipt, "direct_delivery_surface_unsupported")
-    if adapter is None:
-        return _append_denied(store, receipt, "missing_delivery_adapter")
-
+    assert adapter is not None
     try:
         if target.get("dm_channel_id"):
             platform_refs = adapter.send_message(channel_id=str(target.get("dm_channel_id")), content=message)
@@ -317,7 +414,7 @@ def apply_conscious_reachout_decision(
         },
     }
     store.append_jsonl("decisions", delivered)
-    return {"success": True, "receipt": delivered, "outbox": prepared_outbox, "platform_refs": platform_refs}
+    return {"success": True, "receipt": delivered, "platform_refs": platform_refs}
 
 
 def conscious_reachout_metrics(decisions: list[dict[str, Any]], *, limit: int = 500) -> dict[str, Any]:
@@ -326,19 +423,20 @@ def conscious_reachout_metrics(decisions: list[dict[str, Any]], *, limit: int = 
     blocked_breakdown: dict[str, int] = {}
     recent: list[dict[str, Any]] = []
     for row in rows:
-        decision = str(row.get("decision") or "unknown")
+        decision = _metric_key(row.get("decision"), REACHOUT_DECISIONS, prefix="decision")
         decision_breakdown[decision] = decision_breakdown.get(decision, 0) + 1
+        blocked_reason = ""
         if row.get("type") == CONSCIOUS_REACHOUT_DENIED_TYPE:
-            reason = str(row.get("blocked_reason") or "unknown")
-            blocked_breakdown[reason] = blocked_breakdown.get(reason, 0) + 1
+            blocked_reason = _metric_key(row.get("blocked_reason"), _BLOCKED_REASONS, prefix="blocked")
+            blocked_breakdown[blocked_reason] = blocked_breakdown.get(blocked_reason, 0) + 1
         recent.append({
             "ts": row.get("ts") if isinstance(row.get("ts"), str) and len(row.get("ts")) <= 40 else "",
             "type": row.get("type"),
             "decision": decision,
-            "surface": row.get("surface"),
+            "surface": _metric_key(row.get("surface"), frozenset({"local", "discord"}), prefix="surface"),
             "target_ref_label": _target_label(row.get("target_ref")),
             "delivered": row.get("type") == CONSCIOUS_REACHOUT_DELIVERED_TYPE,
-            "blocked_reason": row.get("blocked_reason", ""),
+            "blocked_reason": blocked_reason,
         })
     return {
         "receipt_type": CONSCIOUS_REACHOUT_RECEIPT_TYPE,
