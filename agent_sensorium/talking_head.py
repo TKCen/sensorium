@@ -226,8 +226,9 @@ def _run_lipsync_command(req: TalkingHeadRequest, paths: PlannedPaths) -> None:
         raise ValueError("--lipsync-command is required for --real-run")
     if paths.video.exists() and not req.overwrite:
         raise FileExistsError(f"Refusing to overwrite existing artifact: {paths.video}")
-    cmd = _render_lipsync_command(req.lipsync_command, paths)
-    subprocess.run(cmd, shell=True, check=True, cwd=str(paths.run_dir))  # noqa: S602 - explicit manual local invocation
+    cmd_str = _render_lipsync_command(req.lipsync_command, paths)
+    cmd_list = shlex.split(cmd_str)
+    subprocess.run(cmd_list, shell=False, check=True, cwd=str(paths.run_dir))
     if not paths.video.exists():
         raise RuntimeError(f"lipsync_command_completed_without_video: {paths.video}")
 

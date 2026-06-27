@@ -1,5 +1,6 @@
 """Pure helpers for IDs, timestamps, validation, and normalization."""
 
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -24,6 +25,35 @@ SUCCESS_OUTCOMES = frozenset({
 FAILURE_OUTCOMES = frozenset({
     "operator_rejected", "failed", "no_response", "expired_no_response",
 })
+
+# A Sensorium profile is a named runtime namespace (config + state) living in a
+# directory under the Sensorium state root. Internally the mechanism is the
+# "instance"; "profile" is the operator/agent-facing term. Profile names must be
+# safe directory names so they cannot traverse outside the state root.
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def sanitize_profile_name(name: str) -> str:
+    """Validate and return a safe profile (instance) name, else raise ValueError.
+
+    Rejects blank names, path traversal, separators, and leading dots so a
+    profile name can only ever address a direct child of the state root.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise ValueError("profile name must not be blank")
+    if len(candidate) > 64:
+        raise ValueError("profile name must be at most 64 characters")
+    if candidate.startswith(".") or candidate in {".", ".."}:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if not PROFILE_NAME_RE.match(candidate):
+        raise ValueError(
+            "profile name may only contain letters, digits, '.', '_', '-': "
+            f"{name!r}"
+        )
+    return candidate
 
 
 def utc_now_iso() -> str:
