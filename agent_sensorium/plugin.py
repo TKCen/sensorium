@@ -39,8 +39,14 @@ def _schema(name: str, description: str, properties: dict[str, Any] | None = Non
 def register(ctx) -> None:
     """Register Agent Sensorium plugin tools, command, and bundled skill."""
     from .commands import handle_sensorium_command
+    from .live_turn import (
+        build_live_ingest_receipt,
+        normalize_live_turn_intent,
+        should_ingest_live_residue,
+    )
     from .pointers import handle_pointer_pre_llm
     from .pre_llm_salience import handle_salience_pre_llm
+    from .store import SensoriumStore
     from .tools import (
         handle_sensorium_artifact_status,
         handle_sensorium_artifact_store,
@@ -126,6 +132,36 @@ def register(ctx) -> None:
                 strength = 0.75
             strength = max(0.0, min(1.0, strength))
             allowed_surfaces = ["local"] if surface == "local" else ["local", surface]
+            intent = normalize_live_turn_intent(
+                foreground_action_taken=args.get("foreground_action_taken", False),
+                foreground_resolution=args.get("foreground_resolution", "none"),
+                residue=args.get("residue", "later_review"),
+                durable_capture=args.get("durable_capture", "none"),
+                background_action_allowed=args.get("background_action_allowed", False),
+            )
+            should_ingest, ingest_reason = should_ingest_live_residue(intent)
+            store = SensoriumStore(instance=instance, state_dir=state_dir)
+            store.ensure_dirs()
+            if not should_ingest:
+                receipt = build_live_ingest_receipt(
+                    text=text,
+                    kind=kind,
+                    surface=surface,
+                    intent=intent,
+                    ingested=False,
+                    skipped_reason=ingest_reason,
+                )
+                store.append_jsonl("decisions", receipt)
+                return _live_result({
+                    "success": True,
+                    "instance": instance,
+                    "data": {
+                        "ingested": False,
+                        "reason": ingest_reason,
+                        "receipt": receipt,
+                    },
+                })
+
             signal = {
                 "sensor": "active_session",
                 "source": "foreground_tool",
@@ -134,9 +170,33 @@ def register(ctx) -> None:
                 "strength_hint": strength,
                 "sensitivity": "private",
                 "allowed_surfaces": allowed_surfaces,
-                "correlation_keys": ["active-session", f"surface:{surface}", kind],
+                "correlation_keys": [
+                    "active-session",
+                    f"surface:{surface}",
+                    kind,
+                    f"live-residue:{intent['residue']}",
+                    f"foreground:{intent['foreground_resolution']}",
+                ],
+                "live_turn_intent": intent,
             }
-            return handle_sensorium_ingest_signal(signal=signal, instance=instance, state_dir=state_dir)
+            raw_result = handle_sensorium_ingest_signal(signal=signal, instance=instance, state_dir=state_dir)
+            parsed = _loads_result(raw_result)
+            data = parsed.get("data") or {}
+            signal_id = str(data.get("signal_id") or "")
+            receipt = build_live_ingest_receipt(
+                text=text,
+                kind=kind,
+                surface=surface,
+                intent=intent,
+                signal_id=signal_id,
+                ingested=bool(parsed.get("success")),
+                skipped_reason="" if parsed.get("success") else str(parsed.get("error") or "ingest_failed"),
+            )
+            store.append_jsonl("decisions", receipt)
+            if isinstance(data, dict):
+                data["live_turn_receipt"] = receipt
+                parsed["data"] = data
+            return _live_result(parsed)
 
         if action == "open":
             return handle_sensorium_thread_open(
@@ -175,6 +235,29 @@ def register(ctx) -> None:
                 "text": {"type": "string", "description": "Short salience summary or update reason."},
                 "kind": {"type": "string", "description": "Optional salience kind for ingest."},
                 "strength": {"type": "number", "description": "Optional ingest strength 0-1."},
+                "foreground_action_taken": {
+                    "type": "boolean",
+                    "description": "For ingest: true if the live turn already answered/acted/patched/retained/decided on this item.",
+                },
+                "foreground_resolution": {
+                    "type": "string",
+                    "enum": ["full", "partial", "none", "explicit_no_action"],
+                    "description": "For ingest: how much the foreground turn resolved before any Sensorium residue capture.",
+                },
+                "residue": {
+                    "type": "string",
+                    "enum": ["none", "watch", "later_review", "pattern_pressure"],
+                    "description": "For ingest: compact unresolved residue to preserve; use none when foreground fully settled it.",
+                },
+                "durable_capture": {
+                    "type": "string",
+                    "enum": ["none", "memory", "skill", "docs", "task", "artifact"],
+                    "description": "For ingest: where the item was already captured outside Sensorium, if anywhere.",
+                },
+                "background_action_allowed": {
+                    "type": "boolean",
+                    "description": "For ingest receipts only; defaults false and does not authorize outbound action.",
+                },
                 "id": {"type": "string", "description": "Thread id, or latest."},
                 "keyword": {
                     "type": "string",

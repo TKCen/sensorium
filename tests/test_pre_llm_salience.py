@@ -47,6 +47,10 @@ class TestSalienceContextForLl:
         assert "not exhaustive" in lower
         assert "use a concise kind" in lower
         assert "handle the live turn normally first" in lower
+        assert "do not ingest merely because" in lower
+        assert "answering, acting on, retaining, or patching" in lower
+        assert "unresolved residue" in lower
+        assert "skip ingest" in lower
         assert "appropriate kind (" not in ctx
         assert "supported kinds" not in lower
 

@@ -6,3 +6,4 @@
 - `examples/demo-instance-config.json`: sample `instance.config.json` for a profile named `demo`.
 - `examples/demo-policy-card.md`: sample policy card showing the boundary between reusable core and deployment-specific policy.
 - `demo-sensors-and-tick.md`: fresh-install walkthrough — seed the demo profile, inspect sensors, run the heartbeat tick, and read status via the live tool.
+- `live-salience-ingest-and-turn-review.md`: design note for foreground-owned salience vs unresolved residue, starvation/over-ingestion monitoring, and a cheap turn-review safety net before broader implementation changes.

@@ -84,6 +84,72 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert status["data"]["counts"]["signals"] == 0
     assert "pointer" in status["data"]
 
+    live_schema = ctx.tools["sensorium"]["schema"]["parameters"]["properties"]
+    assert "foreground_action_taken" in live_schema
+    assert "foreground_resolution" in live_schema
+    assert "residue" in live_schema
+    assert "durable_capture" in live_schema
+    assert "background_action_allowed" in live_schema
+
+
+def test_live_ingest_receipt_suppresses_foreground_owned_no_residue(tmp_path):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    ctx = FakePluginContext()
+    register(ctx)
+
+    result = json.loads(ctx.tools["sensorium"]["handler"]({
+        "action": "ingest",
+        "instance": "plugin-test",
+        "state_dir": str(tmp_path),
+        "text": "Documented foreground issue",
+        "kind": "design_insight",
+        "foreground_action_taken": True,
+        "foreground_resolution": "full",
+        "residue": "none",
+        "durable_capture": "docs",
+    }))
+
+    store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
+    assert result["success"] is True
+    assert result["data"]["ingested"] is False
+    assert result["data"]["reason"] == "foreground_owned_no_residue"
+    assert store.read_jsonl("signals") == []
+    receipts = store.read_jsonl("decisions")
+    assert receipts[-1]["type"] == "live_turn.ingest_decision"
+    assert receipts[-1]["ingested"] is False
+    assert receipts[-1]["residue"] == "none"
+
+
+def test_live_ingest_records_residue_intent_on_signal_and_receipt(tmp_path):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    ctx = FakePluginContext()
+    register(ctx)
+
+    result = json.loads(ctx.tools["sensorium"]["handler"]({
+        "action": "ingest",
+        "instance": "plugin-test",
+        "state_dir": str(tmp_path),
+        "text": "Watch this repeated pattern",
+        "kind": "design_insight",
+        "foreground_action_taken": True,
+        "foreground_resolution": "partial",
+        "residue": "watch",
+        "durable_capture": "docs",
+    }))
+
+    store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
+    signals = store.read_jsonl("signals")
+    receipts = store.read_jsonl("decisions")
+    assert result["success"] is True
+    assert signals[-1]["live_turn_intent"]["residue"] == "watch"
+    assert "live-residue:watch" in signals[-1]["correlation_keys"]
+    assert result["data"]["live_turn_receipt"]["ingested"] is True
+    assert receipts[-1]["signal_id"] == result["data"]["signal_id"]
+
 
 def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path):
     from agent_sensorium.plugin import register

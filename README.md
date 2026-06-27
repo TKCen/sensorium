@@ -156,7 +156,7 @@ A single tool `sensorium` with four actions. This is the only surface exposed to
 | Action | Purpose |
 |--------|---------|
 | `status` | Read current attention state: open threads, pointer, inbox |
-| `ingest` | Record deferred salience from the current session as a compact signal |
+| `ingest` | Record deferred salience from the current session as a compact signal. The live tool can also carry a closed-vocabulary foreground/residue receipt (`foreground_action_taken`, `foreground_resolution`, `residue`, `durable_capture`, `background_action_allowed`) so foreground-owned work can be recorded as intentionally **not** ingested when no residue remains. |
 | `open` | Open a dormant conscious thread capsule by id |
 | `update` | Apply a lifecycle keyword to an open thread |
 
