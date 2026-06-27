@@ -333,6 +333,26 @@ def _current_budgets(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _live_turn_metrics(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.live_turn import live_turn_receipt_metrics
+
+        return live_turn_receipt_metrics(decisions)
+    except Exception:
+        return {
+            "receipt_type": "live_turn.ingest_decision",
+            "receipt_count": 0,
+            "ingested_count": 0,
+            "skipped_count": 0,
+            "error": "unavailable",
+        }
+
+
 def _sort_key(row: dict[str, Any]) -> str:
     return str(row.get("updated_at") or row.get("created_at") or row.get("ts") or "")
 
@@ -2735,6 +2755,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     }
 
     metrics_data = _metrics_snapshot()
+    live_turn_metrics = _live_turn_metrics(decisions)
     attention_footprint = _attention_footprint(counts, metrics=metrics_data)
 
     return {
@@ -2759,6 +2780,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         },
         "counts": counts,
         "attention_footprint": attention_footprint,
+        "live_turn_metrics": live_turn_metrics,
         "health": _health(
             counts,
             len(visible_threads),
