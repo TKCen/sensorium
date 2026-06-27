@@ -11,7 +11,6 @@ or allowed_surfaces beyond what the item already has.
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 
