@@ -64,13 +64,14 @@ def test_bundle_merges_topology_and_runtime_status_client_side():
     assert "selected.selType" in source
 
 
-def test_bundle_does_not_invent_observed_edges():
+def test_bundle_labels_runtime_edges_as_bounded_not_complete_traversal():
     manifest = _manifest()
     entry_path = DASHBOARD_DIR / manifest["entry"]
     source = entry_path.read_text()
 
     assert "observed: false" in source
-    assert "no honest traversal source yet" in source.lower() or "no honest" in source.lower()
+    assert "observed: true" in source
+    assert "not a complete traversal log" in source.lower()
 
 
 def test_flow_dag_is_the_default_primary_view():

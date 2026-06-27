@@ -184,15 +184,15 @@ Dashboard routes are intentionally limited to GET-only compact projections:
 | `/snapshot` | Whole-profile overview: counts, health, config summary, freshness, traces, artifacts, actions, outbox |
 | `/graph` | Compact candidate/receipt graph links for settlement and lineage review |
 | `/topology` | Config-derived flow DAG topology: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges |
-| `/runtime-status` | Closed-vocabulary runtime overlay for topology nodes plus bounded active instance nodes |
-| `/trace` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
+| `/runtime-status` | Closed-vocabulary runtime overlay for topology nodes, bounded active instance nodes, and compact runtime relation edges derived from signal/event/origin/attachment lineage |
+| `/trace` | On-demand compact provenance and content-detail fields for selected topology/runtime nodes or configured edges |
 | `/metrics` | Efficiency and pressure metrics from the metrics sidecar |
 | `/registry` | Compact sensor/inner-life block and edge registry projection |
 | `/probe-audit` | Compact run-state/probe audit projection |
 | `/dampeners` / `/blockers` | Inner-life dampener/blocker sidecar evidence |
 | `/explanation` | Deterministic pressure explanation for one candidate/review subject |
 
-The primary dashboard graph is the **Flow DAG**: `/topology` answers what can happen, `/runtime-status` overlays what is happening now, and `/trace` explains where a selected node/edge came from and what influenced it. The DAG cards stay compact for scanability; selecting a card or edge opens the right-hand trace rail with role, origin, status source, configured/enabled state, meaning, relationship counts, refs, timestamps, and limitations. The older `/snapshot`/`/graph` lane projection remains available as an explicit debug/fallback view, not the primary model.
+The primary dashboard graph is the **Flow DAG**: `/topology` answers what can happen, `/runtime-status` overlays what is happening now, and `/trace` explains where a selected node/edge came from, what it contains, and what influenced it. The DAG cards stay compact for scanability; selecting a card or edge opens the right-hand trace rail with role, origin, status source, configured/enabled state, compact content fields, meaning, relationship counts, refs, timestamps, and limitations. Runtime edges are bounded current-state relation evidence, not a complete traversal log. The older `/snapshot`/`/graph` lane projection remains available as an explicit debug/fallback view, not the primary model.
 
 All dashboard output is an output boundary: legacy/corrupt row values, raw transcript/log markers, secrets, metric labels, state paths, and free-form refs are sanitized or replaced with deterministic opaque labels before rendering. See `docs/dashboard-and-review-surfaces.md` for the route contract and privacy checklist.
 

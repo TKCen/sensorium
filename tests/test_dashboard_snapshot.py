@@ -26,6 +26,14 @@ def _snapshot(api):
     return asyncio.run(api.snapshot())
 
 
+def _runtime_status(api):
+    return asyncio.run(api.runtime_status())
+
+
+def _trace(api, *, node_id: str | None = None, edge_id: str | None = None):
+    return asyncio.run(api.trace(node_id=node_id, edge_id=edge_id))
+
+
 def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_path, monkeypatch):
     api = _load_dashboard_api()
     root = tmp_path / "demo"
@@ -136,6 +144,91 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     assert data["artifact_groups"][0]["id"] == "action:tact_lakmus"
     assert data["artifact_groups"][0]["count"] == 2
     assert data["artifact_groups"][0]["kinds"] == {"audio": 1, "text": 1}
+
+
+def test_snapshot_exposes_conscious_reachout_metrics_without_message_body(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+
+    _append_jsonl(
+        root,
+        "decisions.jsonl",
+        {
+            "ts": "2026-06-27T10:00:00Z",
+            "type": "conscious_reachout.decision",
+            "decision": "prepare_message",
+            "surface": "discord",
+            "target_ref": "discord:chan_1",
+            "reason": "selected",
+            "message_hash": "abc123",
+            "message_chars": 44,
+        },
+    )
+    _append_jsonl(
+        root,
+        "decisions.jsonl",
+        {
+            "ts": "2026-06-27T10:01:00Z",
+            "type": "conscious_reachout.denied",
+            "decision": "reach_out",
+            "surface": "discord",
+            "target_ref": "discord:chan_1",
+            "blocked_reason": "cooldown_active",
+            "message_hash": "def456",
+            "message_chars": 18,
+        },
+    )
+
+    data = _snapshot(api)
+    metrics = data["conscious_reachout_metrics"]
+    assert metrics["receipt_type"] == "conscious_reachout.decision"
+    assert metrics["receipt_count"] == 2
+    assert metrics["prepared_count"] == 1
+    assert metrics["blocked_count"] == 1
+    assert metrics["blocked_breakdown"] == {"cooldown_active": 1}
+    assert "direct chosen" not in json.dumps(metrics)
+    assert "chan_1" not in json.dumps(metrics)
+
+
+def test_runtime_status_projects_flow_edges_and_trace_contents(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    (root / "sensors").mkdir(parents=True)
+    (root / "sensors" / "registry.json").write_text(
+        json.dumps({"blocks": {"sensor_a": {"type": "sensor", "label": "Sensor A"}}}),
+        encoding="utf-8",
+    )
+    _append_jsonl(root, "signals/inbox.jsonl", {"id": "sig_1", "sensor": "sensor_a", "kind": "cue", "summary": "compact cue", "ts": "2026-06-27T10:00:00Z"})
+    _append_jsonl(root, "events.jsonl", {"id": "evt_1", "source_signal_ids": ["sig_1"], "kind": "signal_promoted", "ts": "2026-06-27T10:01:00Z"})
+    _append_jsonl(root, "candidates.jsonl", {"id": "cand_1", "status": "candidate", "kind": "salience", "summary": "review this", "pressure": 0.88, "event_ids": ["evt_1"], "updated_at": "2026-06-27T10:02:00Z"})
+    _append_jsonl(root, "threads.jsonl", {"id": "thread_1", "status": "held", "origin_candidate_id": "cand_1", "conscious_task": {"title": "Review cue"}, "updated_at": "2026-06-27T10:03:00Z"})
+    _append_jsonl(root, "thread_actions.jsonl", {"id": "act_1", "status": "prepared", "origin_candidate_id": "cand_1", "origin_thread_id": "thread_1", "title": "Prepare response", "attachments": [{"kind": "outbox_request", "ref_id": "obx_1"}], "updated_at": "2026-06-27T10:04:00Z"})
+    _append_jsonl(root, "outbox.jsonl", {"id": "obx_1", "status": "prepared", "origin_candidate_id": "cand_1", "origin_thread_id": "thread_1", "request_type": "REACH_OUT", "surface": "discord", "delivery_mode": "context_pointer", "message_preview": "Prepared pointer.", "updated_at": "2026-06-27T10:05:00Z"})
+
+    data = _runtime_status(api)
+    assert data["ok"] is True
+    edge_kinds = {edge["kind"] for edge in data["edges"]}
+    assert {"signal_to_candidate", "candidate_to_thread", "thread_to_action", "action_to_outbox"}.issubset(edge_kinds)
+    assert data["meta"]["edge_count"] == len(data["edges"])
+    assert all(edge["observed"] is True and edge["projection"] is True for edge in data["edges"])
+
+    candidate_node_id = next(node["id"] for node in data["nodes"] if node["kind"] == "candidate")
+    trace = _trace(api, node_id=candidate_node_id)
+    assert trace["subject"]["kind"] == "candidate"
+    assert trace["contents"]["summary"] == "review this"
+    assert trace["contents"]["event_count"] == 1
+    assert any(ref["kind"] == "signal" for ref in trace["upstream"])
+
+    runtime_edge_id = next(edge["id"] for edge in data["edges"] if edge["kind"] == "signal_to_candidate")
+    edge_trace = _trace(api, edge_id=runtime_edge_id)
+    assert edge_trace["subject"]["origin"] == "runtime_projection"
+    assert edge_trace["contents"]["role"] == "runtime_projection_edge"
+    assert edge_trace["contents"]["observed"] is True
+    assert "not a complete traversal log" in json.dumps(edge_trace)
 
 
 def test_snapshot_warns_on_unattached_prepared_outbox(tmp_path, monkeypatch):

@@ -47,6 +47,8 @@ def register(ctx) -> None:
     from .pointers import handle_pointer_pre_llm
     from .pre_llm_salience import handle_salience_pre_llm
     from .store import SensoriumStore
+    from .config import load_instance_config
+    from .conscious_reachout import apply_conscious_reachout_decision
     from .tools import (
         handle_sensorium_artifact_status,
         handle_sensorium_artifact_store,
@@ -213,11 +215,42 @@ def register(ctx) -> None:
                 state_dir=state_dir,
             )
 
+        if action == "reach_out":
+            # Foreground/conscious lane only. This records/prepares a bounded
+            # reach-out decision; direct delivery still requires explicit config
+            # and an adapter-backed dispatch path outside this tiny live surface.
+            store = SensoriumStore(instance=instance, state_dir=state_dir)
+            store.ensure_dirs()
+            instance_config, _ = load_instance_config(state_dir=str(store.root))
+            decision = str(args.get("decision") or "prepare_message").strip().lower()
+            target = args.get("target") if isinstance(args.get("target"), dict) else {}
+            target_ref = str(args.get("target_ref") or surface).strip()
+            if not args.get("target_ref") and surface == "discord" and isinstance(target, dict):
+                chan = target.get("channel_id") or target.get("dm_channel_id")
+                if chan:
+                    target_ref = f"discord:{chan}"
+            result = apply_conscious_reachout_decision(
+                store,
+                decision=decision,
+                actor_tier="conscious",
+                source="foreground_live_tool",
+                reason=str(args.get("reason") or "foreground conscious reach-out").strip(),
+                message=text,
+                surface=surface,
+                target_ref=target_ref,
+                target=target,
+                thread_id="" if target_id == "latest" else target_id,
+                outbox_id=str(args.get("outbox_id") or "").strip(),
+                config=instance_config,
+                execute=False,
+            )
+            return _live_result({"success": bool(result.get("success")), "instance": instance, "data": result, "error": result.get("error")})
+
         return _live_result({
             "success": False,
             "instance": instance,
             "error": "invalid_action",
-            "allowed_actions": ["status", "ingest", "open", "update"],
+            "allowed_actions": ["status", "ingest", "open", "update", "reach_out"],
         })
 
     ctx.register_tool(
@@ -225,15 +258,24 @@ def register(ctx) -> None:
         toolset=_LIVE_TOOLSET,
         schema=_schema(
             "sensorium",
-            "Compact live Sensorium aperture: status, ingest deferred salience, open a pointer/thread, or update by keyword.",
+            "Compact live Sensorium aperture: status, ingest deferred salience, open a pointer/thread, update by keyword, or record a conscious reach-out preparation.",
             {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "ingest", "open", "update"],
-                    "description": "status|ingest|open|update",
+                    "enum": ["status", "ingest", "open", "update", "reach_out"],
+                    "description": "status|ingest|open|update|reach_out",
                 },
-                "text": {"type": "string", "description": "Short salience summary or update reason."},
+                "text": {"type": "string", "description": "Short salience summary, update reason, or reach-out message body."},
                 "kind": {"type": "string", "description": "Optional salience kind for ingest."},
+                "decision": {
+                    "type": "string",
+                    "enum": ["no_action", "hold", "prepare_message", "prepare_artifact", "reach_out", "deliver_prepared"],
+                    "description": "For reach_out: conscious decision posture; live surface executes false by default.",
+                },
+                "reason": {"type": "string", "description": "For reach_out: compact conscious reason."},
+                "target_ref": {"type": "string", "description": "For reach_out: compact allowed target ref such as local or discord:<channel>."},
+                "target": {"type": "object", "description": "For reach_out: optional target map, e.g. channel_id or dm_channel_id."},
+                "outbox_id": {"type": "string", "description": "For reach_out deliver_prepared: prepared outbox request id."},
                 "strength": {"type": "number", "description": "Optional ingest strength 0-1."},
                 "foreground_action_taken": {
                     "type": "boolean",
