@@ -372,6 +372,28 @@ def _live_turn_review_metrics(decisions: list[dict[str, Any]]) -> dict[str, Any]
         }
 
 
+def _conscious_reachout_metrics(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        import sys
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from agent_sensorium.conscious_reachout import conscious_reachout_metrics
+
+        return conscious_reachout_metrics(decisions)
+    except Exception:
+        return {
+            "receipt_type": "conscious_reachout.decision",
+            "receipt_count": 0,
+            "prepared_count": 0,
+            "authorized_count": 0,
+            "delivered_count": 0,
+            "blocked_count": 0,
+            "error": "unavailable",
+        }
+
+
 def _sort_key(row: dict[str, Any]) -> str:
     return str(row.get("updated_at") or row.get("created_at") or row.get("ts") or "")
 
@@ -1825,17 +1847,27 @@ def _runtime_candidate_node(candidate: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "source": "field_status",
         "origin": "instance",
+        "label": _safe_surface_atom("candidate_kind", candidate.get("kind") or "candidate"),
+        "detail": _safe_surface_text("candidate_summary", candidate.get("summary"), limit=160),
+        "pressure": candidate.get("pressure"),
+        "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
+        "contents": _instance_contents("candidate", candidate),
     }
 
 
 def _runtime_thread_node(thread: dict[str, Any]) -> dict[str, Any]:
     status = _RUNTIME_THREAD_STATUS.get(str(thread.get("status") or "").strip().lower(), "quiet")
+    task = thread.get("conscious_task") if isinstance(thread.get("conscious_task"), dict) else {}
     return {
         "id": f"thread:{_safe_surface_atom('thread', thread.get('id'))}",
         "kind": "thread",
         "status": status,
         "source": "field_status",
         "origin": "instance",
+        "label": _safe_surface_text("thread_title", task.get("title") or thread.get("title") or "held thread", limit=120),
+        "detail": _safe_surface_text("thread_detail", task.get("summary") or thread.get("summary"), limit=160),
+        "updated_at": thread.get("updated_at") or thread.get("created_at"),
+        "contents": _instance_contents("thread", thread),
     }
 
 
@@ -1847,6 +1879,10 @@ def _runtime_action_node(action: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "source": "field_status",
         "origin": "instance",
+        "label": _safe_surface_text("action_title", action.get("title") or action.get("intent") or "thread action", limit=120),
+        "detail": _safe_surface_text("action_summary", action.get("summary") or action.get("result_summary"), limit=160),
+        "updated_at": action.get("updated_at") or action.get("ts"),
+        "contents": _instance_contents("action", action),
     }
 
 
@@ -1858,7 +1894,97 @@ def _runtime_outbox_node(req: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "source": "field_status",
         "origin": "instance",
+        "label": _safe_surface_text("outbox_title", req.get("title") or req.get("request_type") or "outbox request", limit=120),
+        "detail": _safe_surface_text("outbox_preview", req.get("message_preview"), limit=160),
+        "updated_at": req.get("updated_at") or req.get("created_at"),
+        "contents": _instance_contents("outbox", req),
     }
+
+
+def _runtime_flow_edges(
+    root: Path,
+    *,
+    visible_node_ids: set[str],
+    candidates: list[dict[str, Any]],
+    threads: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+    outbox: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compact runtime relation overlay for the Flow DAG.
+
+    These edges are derived from explicit JSONL lineage fields (signal/event IDs,
+    origin_candidate_id/origin_thread_id, and action outbox attachments). They
+    are a bounded current-state relation overlay, not a complete historical
+    traversal log.
+    """
+    edges: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_edge(from_id: str, to_id: str, kind: str, source: str, ts: Any = None) -> None:
+        if not from_id or not to_id or from_id not in visible_node_ids or to_id not in visible_node_ids:
+            return
+        base = f"runtime:{kind}:{from_id}->{to_id}"
+        edge_id = base
+        if edge_id in seen:
+            edge_id = f"{base}#{len(seen)}"
+        if edge_id in seen:
+            return
+        seen.add(edge_id)
+        edges.append({
+            "id": edge_id,
+            "from": from_id,
+            "to": to_id,
+            "kind": kind,
+            "status": "active",
+            "source": source,
+            "observed": True,
+            "projection": True,
+            "ts": ts if isinstance(ts, str) and len(ts) <= 60 else None,
+        })
+
+    candidate_node_by_raw = {str(c.get("id") or ""): f"candidate:{_safe_trace_candidate_id(c.get('id'))}" for c in candidates}
+    thread_node_by_raw = {str(t.get("id") or ""): f"thread:{_safe_surface_atom('thread', t.get('id'))}" for t in threads}
+    action_node_by_raw = {str(a.get("id") or ""): f"action:{_safe_surface_atom('action', a.get('id'))}" for a in actions}
+    outbox_node_by_raw = {str(o.get("id") or ""): f"outbox:{_safe_surface_atom('outbox', o.get('id'))}" for o in outbox}
+
+    events, _ = _read_jsonl(root, "events", limit=5000)
+    signals, _ = _read_jsonl(root, "signals", limit=5000)
+    event_by_id = _index_by_id(events)
+    signal_by_id = _index_by_id(signals)
+    for candidate in candidates:
+        candidate_node_id = candidate_node_by_raw.get(str(candidate.get("id") or ""), "")
+        for event_id in [str(e) for e in (candidate.get("event_ids") or []) if e]:
+            event = event_by_id.get(event_id, {})
+            for signal_id in event.get("source_signal_ids") or []:
+                signal = signal_by_id.get(str(signal_id), {})
+                sensor = signal.get("sensor")
+                if sensor:
+                    add_edge(
+                        f"sensor:{_topology_safe_id(sensor)}",
+                        candidate_node_id,
+                        "signal_to_candidate",
+                        "event_lineage",
+                        signal.get("ts") or signal.get("created_at") or signal.get("updated_at"),
+                    )
+
+    for thread in threads:
+        candidate_node_id = candidate_node_by_raw.get(str(thread.get("origin_candidate_id") or ""), "")
+        thread_node_id = thread_node_by_raw.get(str(thread.get("id") or ""), "")
+        add_edge(candidate_node_id, thread_node_id, "candidate_to_thread", "origin_candidate_id", thread.get("updated_at") or thread.get("created_at"))
+
+    for action in actions:
+        action_node_id = action_node_by_raw.get(str(action.get("id") or ""), "")
+        add_edge(candidate_node_by_raw.get(str(action.get("origin_candidate_id") or ""), ""), action_node_id, "candidate_to_action", "origin_candidate_id", action.get("updated_at") or action.get("ts"))
+        add_edge(thread_node_by_raw.get(str(action.get("origin_thread_id") or ""), ""), action_node_id, "thread_to_action", "origin_thread_id", action.get("updated_at") or action.get("ts"))
+        for outbox_ref in _action_attachment_ids(action, "outbox_request"):
+            add_edge(action_node_id, outbox_node_by_raw.get(str(outbox_ref), ""), "action_to_outbox", "attachment_ref", action.get("updated_at") or action.get("ts"))
+
+    for req in outbox:
+        outbox_node_id = outbox_node_by_raw.get(str(req.get("id") or ""), "")
+        add_edge(candidate_node_by_raw.get(str(req.get("origin_candidate_id") or ""), ""), outbox_node_id, "candidate_to_outbox", "origin_candidate_id", req.get("updated_at") or req.get("created_at"))
+        add_edge(thread_node_by_raw.get(str(req.get("origin_thread_id") or ""), ""), outbox_node_id, "thread_to_outbox", "origin_thread_id", req.get("updated_at") or req.get("created_at"))
+
+    return edges[:80]
 
 
 def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, Any]]:
@@ -2101,6 +2227,14 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
     ]
     instance_nodes = candidate_nodes + thread_nodes + action_nodes + outbox_nodes
     nodes = topology_nodes + instance_nodes
+    runtime_edges = _runtime_flow_edges(
+        root,
+        visible_node_ids={str(n.get("id") or "") for n in nodes},
+        candidates=eligible_candidates,
+        threads=eligible_threads,
+        actions=eligible_actions,
+        outbox=eligible_outbox,
+    )
 
     ts = _now()
     return {
@@ -2112,14 +2246,14 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
         "topology_config_version": _topology_config_version(root),
         "status_vocab": sorted(_RUNTIME_STATUSES),
         "nodes": nodes,
-        "edges": [],
+        "edges": runtime_edges,
         "meta": {
             "privacy": "compact_only",
             "node_count": len(nodes),
             "topology_node_count": len(topology_nodes),
             "instance_node_count": len(instance_nodes),
-            "edge_count": 0,
-            "edges_limitation": "no honest current-traversal source yet; populated by a future /trace slice",
+            "edge_count": len(runtime_edges),
+            "edges_limitation": "runtime edges are bounded compact relation evidence from JSONL lineage fields, not a complete traversal log",
             "instance_node_limit": _RUNTIME_INSTANCE_LIMIT,
             "truncated_candidates": len(eligible_candidates) > _RUNTIME_INSTANCE_LIMIT,
             "truncated_threads": len(eligible_threads) > _RUNTIME_INSTANCE_LIMIT,
@@ -2138,6 +2272,79 @@ _TRACE_INSTANCE_NODE_KINDS = {"candidate", "thread", "action", "outbox"}
 
 def _trace_compact_ref(node_id: str, kind: str, relation: str) -> dict[str, str]:
     return {"id": node_id, "kind": kind, "relation": relation}
+
+
+def _topology_node_contents(root: Path, node_id: str, node: dict[str, Any], overlay: dict[str, Any] | None, *, upstream_count: int, downstream_count: int) -> dict[str, Any]:
+    """Compact operator-facing node contents for the Flow DAG detail rail."""
+    overlay_obj: dict[str, Any] = overlay if isinstance(overlay, dict) else {}
+    contents: dict[str, Any] = {
+        "role": _safe_surface_atom("topology_role", node.get("kind")),
+        "status": _safe_surface_atom("runtime_status", overlay_obj.get("status")),
+        "status_source": _safe_surface_atom("runtime_source", overlay_obj.get("source")),
+        "configured_status": _safe_surface_atom("topology_status", node.get("configured_status")),
+        "enabled": node.get("enabled") if isinstance(node.get("enabled"), bool) else None,
+        "upstream_count": upstream_count,
+        "downstream_count": downstream_count,
+    }
+    if node.get("kind") == "sensor":
+        rows, _ = _read_jsonl(root, "signals", limit=300)
+        matching = [
+            row for row in rows
+            if f"sensor:{_topology_safe_id(row.get('sensor'))}" == node_id
+        ]
+        if matching:
+            latest = matching[-1]
+            contents.update({
+                "recent_signal_count": len(matching),
+                "latest_signal_kind": _safe_surface_atom("signal_kind", latest.get("kind")),
+                "latest_signal_ts": latest.get("ts") or latest.get("created_at") or latest.get("updated_at"),
+                "latest_signal_summary": _safe_surface_text("signal_summary", latest.get("summary"), limit=140),
+            })
+        else:
+            contents["recent_signal_count"] = 0
+    return contents
+
+
+def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 0, downstream_count: int = 0) -> dict[str, Any]:
+    contents: dict[str, Any] = {
+        "role": _safe_surface_atom("instance_role", kind),
+        "upstream_count": upstream_count,
+        "downstream_count": downstream_count,
+    }
+    if kind == "candidate":
+        contents.update({
+            "kind": _safe_surface_atom("candidate_kind", row.get("kind")),
+            "status": _safe_surface_atom("candidate_status", row.get("status")),
+            "pressure": row.get("pressure"),
+            "summary": _safe_surface_text("candidate_summary", row.get("summary"), limit=180),
+            "event_count": len(row.get("event_ids") or []),
+            "correlation_count": len(row.get("correlation_keys") or []),
+        })
+    elif kind == "thread":
+        task = row.get("conscious_task") if isinstance(row.get("conscious_task"), dict) else {}
+        contents.update({
+            "status": _safe_surface_atom("thread_status", row.get("status")),
+            "title": _safe_surface_text("thread_title", task.get("title") or row.get("title"), limit=160),
+            "request_type": _safe_surface_atom("request_type", task.get("request_type")),
+            "interaction_ref_count": len(row.get("interaction_refs") or []),
+        })
+    elif kind == "action":
+        contents.update({
+            "status": _safe_surface_atom("action_status", row.get("status")),
+            "intent": _safe_surface_atom("action_intent", row.get("intent")),
+            "title": _safe_surface_text("action_title", row.get("title"), limit=160),
+            "attachment_count": len(row.get("attachments") or []),
+        })
+    elif kind == "outbox":
+        contents.update({
+            "status": _safe_surface_atom("outbox_status", row.get("status")),
+            "request_type": _safe_surface_atom("request_type", row.get("request_type")),
+            "surface": _safe_surface_atom("surface", row.get("surface")),
+            "delivery_mode": _safe_surface_atom("delivery_mode", row.get("delivery_mode")),
+            "message_chars": len(str(row.get("message_preview") or "")),
+            "media_ref_count": len(row.get("media_refs") or []),
+        })
+    return contents
 
 
 def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
@@ -2175,6 +2382,14 @@ def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
         "upstream": upstream,
         "downstream": downstream,
         "influences": [],
+        "contents": _topology_node_contents(
+            root,
+            node_id,
+            node,
+            overlay,
+            upstream_count=len(upstream),
+            downstream_count=len(downstream),
+        ),
         "config_refs": [{"kind": "sensor_registry", "ref": node_id, "version": built["config_version"]}],
         "timestamps": {},
         "evidence_refs": [],
@@ -2204,6 +2419,14 @@ def _trace_topology_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
         "upstream": [_trace_compact_ref(edge["from"], "topology_node", "configured_source")],
         "downstream": [_trace_compact_ref(edge["to"], "topology_node", "configured_target")],
         "influences": [],
+        "contents": {
+            "role": "configured_edge",
+            "kind": _safe_surface_atom("edge_kind", edge.get("kind")),
+            "status": _safe_surface_atom("edge_status", edge.get("status")),
+            "enabled": edge.get("enabled") if isinstance(edge.get("enabled"), bool) else None,
+            "upstream_count": 1,
+            "downstream_count": 1,
+        },
         "config_refs": [{"kind": "topology_edges", "ref": edge_id, "version": built["config_version"]}],
         "timestamps": {},
         "evidence_refs": [],
@@ -2305,6 +2528,7 @@ def _trace_candidate(root: Path, candidate_node_id: str) -> dict[str, Any] | Non
         "upstream": upstream[:24],
         "downstream": downstream[:24],
         "influences": _safe_trace_ref_list("correlation", target.get("correlation_keys") or [], limit=8),
+        "contents": _instance_contents("candidate", target, upstream_count=len(upstream[:24]), downstream_count=len(downstream[:24])),
         "config_refs": [],
         "timestamps": {
             "created_at": target.get("created_at"),
@@ -2352,6 +2576,7 @@ def _trace_thread(root: Path, thread_node_id: str) -> dict[str, Any] | None:
         "upstream": upstream,
         "downstream": downstream,
         "influences": [],
+        "contents": _instance_contents("thread", target, upstream_count=len(upstream), downstream_count=len(downstream)),
         "config_refs": [],
         "timestamps": {
             "created_at": target.get("created_at"),
@@ -2408,6 +2633,7 @@ def _trace_action(root: Path, action_node_id: str) -> dict[str, Any] | None:
         "upstream": upstream,
         "downstream": downstream,
         "influences": [],
+        "contents": _instance_contents("action", target, upstream_count=len(upstream), downstream_count=len(downstream)),
         "config_refs": [],
         "timestamps": {"updated_at": target.get("updated_at") or target.get("ts")},
         "evidence_refs": [],
@@ -2464,6 +2690,7 @@ def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
         "upstream": upstream,
         "downstream": [],
         "influences": [],
+        "contents": _instance_contents("outbox", target, upstream_count=len(upstream), downstream_count=0),
         "config_refs": [],
         "timestamps": {"created_at": target.get("created_at"), "updated_at": target.get("updated_at")},
         "evidence_refs": [],
@@ -2525,6 +2752,7 @@ async def trace(node_id: str | None = None, edge_id: str | None = None, instance
             "upstream": [],
             "downstream": [],
             "influences": [],
+            "contents": {},
             "config_refs": [],
             "timestamps": {},
             "evidence_refs": [],
@@ -2776,6 +3004,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     metrics_data = _metrics_snapshot()
     live_turn_metrics = _live_turn_metrics(decisions)
     live_turn_review_metrics = _live_turn_review_metrics(decisions)
+    conscious_reachout_metrics = _conscious_reachout_metrics(decisions)
     attention_footprint = _attention_footprint(counts, metrics=metrics_data)
 
     return {
@@ -2802,6 +3031,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "attention_footprint": attention_footprint,
         "live_turn_metrics": live_turn_metrics,
         "live_turn_review_metrics": live_turn_review_metrics,
+        "conscious_reachout_metrics": conscious_reachout_metrics,
         "health": _health(
             counts,
             len(visible_threads),

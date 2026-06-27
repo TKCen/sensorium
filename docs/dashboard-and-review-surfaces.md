@@ -20,8 +20,8 @@ The dashboard FastAPI router exposes only GET/HEAD-safe routes. The expected rou
 | `/snapshot` | `GET` | Whole-profile overview: counts, attention footprint, health, config summary, freshness, traces, artifacts, actions, outbox, metrics |
 | `/graph` | `GET` | Compact candidate/receipt graph links for settlement and lineage review |
 | `/topology` | `GET` | Config-derived flow DAG topology: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges |
-| `/runtime-status` | `GET` | Closed-vocabulary runtime status overlay for topology nodes plus bounded active instance nodes |
-| `/trace` | `GET` | On-demand compact provenance for selected topology/runtime nodes or configured edges |
+| `/runtime-status` | `GET` | Closed-vocabulary runtime status overlay for topology nodes, bounded active instance nodes, and compact current relation edges derived from signal/event/origin/attachment lineage |
+| `/trace` | `GET` | On-demand compact provenance and content-detail projection for selected topology/runtime nodes or configured edges |
 | `/metrics` | `GET` | Efficiency and pressure metrics loaded from the metrics sidecar |
 | `/registry` | `GET` | Compact sensor/inner-life block and edge registry projection |
 | `/probe-audit` | `GET` | Compact run-state/probe audit projection |
@@ -92,10 +92,10 @@ Graph and explanation routes expose why a candidate surfaced and how settlement 
 The primary dashboard graph is the Flow DAG. It is deliberately split across three compact GET-only contracts:
 
 - `/topology` answers **what can happen** from config-derived organs/pathways: sensors, processors, queues, gates, reviews, routers, receipts, sinks, and configured edges. Edge IDs must be stable and collision-safe for parallel edges, and labels are display text only after the dashboard label/path/secret projection boundary.
-- `/runtime-status` answers **what is happening now** by overlaying a closed status vocabulary (`active`, `quiet`, `degraded`, `error`, `processing`, `waiting`, `reviewing`, `blocked`, `held`, `settled`, `stale`) onto topology nodes and bounded active instance nodes. Unknown/free-form runtime states must not pass through.
-- `/trace` answers **where this selected thing came from** for a node or edge. It may expose compact upstream/downstream refs, influences, config refs, timestamps, evidence refs, and limitations. If a relation cannot be honestly derived, return an empty bounded list plus a limitation note rather than fabricating causality.
+- `/runtime-status` answers **what is happening now** by overlaying a closed status vocabulary (`active`, `quiet`, `degraded`, `error`, `processing`, `waiting`, `reviewing`, `blocked`, `held`, `settled`, `stale`) onto topology nodes and bounded active instance nodes. It may also expose bounded dashed runtime relation edges when they come from explicit compact lineage fields (signal/event links, origin candidate/thread refs, or action attachments). Unknown/free-form runtime states must not pass through; runtime edges are evidence of current relation, not a complete traversal log.
+- `/trace` answers **where this selected thing came from and what compact content it carries** for a node or edge. It may expose compact upstream/downstream refs, influences, safe content-detail fields, config refs, timestamps, evidence refs, and limitations. If a relation cannot be honestly derived, return an empty bounded list plus a limitation note rather than fabricating causality.
 
-The Flow DAG UI should keep node cards compact enough to scan in the DAG itself. Detailed interpretation belongs in the selected-node/edge trace rail: purpose/detail text, role, origin, status source, configured/enabled state, pressure/freshness when present, relationship counts, compact refs, timestamps, and honest limitation notes. The older `/snapshot`/`/graph` lane projection can remain as a debug/fallback view, but it is not the primary model for the human-facing flow graph.
+The Flow DAG UI should keep node cards compact enough to scan in the DAG itself. Detailed interpretation belongs in the selected-node/edge trace rail: purpose/detail text, role, origin, status source, configured/enabled state, safe content fields, pressure/freshness when present, relationship counts, compact refs, timestamps, and honest limitation notes. The older `/snapshot`/`/graph` lane projection can remain as a debug/fallback view, but it is not the primary model for the human-facing flow graph.
 
 ### Metrics (`/metrics`, `/snapshot.metrics`)
 
