@@ -9,6 +9,7 @@ unresolved residue.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from .schemas import new_id, truncate_text, utc_now_iso
@@ -136,7 +137,18 @@ def should_ingest_live_residue(intent: dict[str, Any]) -> tuple[bool, str]:
 
 
 def _receipt_ts(receipt: dict[str, Any]) -> str:
-    return str(receipt.get("ts") or receipt.get("created_at") or "")
+    raw = receipt.get("ts") or receipt.get("created_at") or ""
+    if not isinstance(raw, str):
+        return ""
+    value = raw.strip()
+    if not value or len(value) > 40 or "T" not in value:
+        return ""
+    parse_value = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        datetime.fromisoformat(parse_value)
+    except ValueError:
+        return ""
+    return value
 
 
 def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 500) -> dict[str, Any]:
@@ -153,8 +165,8 @@ def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 5
         row for row in decisions
         if isinstance(row, dict) and row.get("type") == LIVE_TURN_RECEIPT_TYPE
     ][-bounded_limit:]
-    ingested = [r for r in receipts if bool(r.get("ingested"))]
-    skipped = [r for r in receipts if not bool(r.get("ingested"))]
+    ingested = [r for r in receipts if _safe_bool(r.get("ingested"), False)]
+    skipped = [r for r in receipts if not _safe_bool(r.get("ingested"), False)]
 
     def enum_value(receipt: dict[str, Any], key: str, allowed: frozenset[str], default: str) -> str:
         value = receipt.get(key)
@@ -174,12 +186,12 @@ def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 5
     recent = [
         {
             "ts": _receipt_ts(r),
-            "ingested": bool(r.get("ingested")),
+            "ingested": _safe_bool(r.get("ingested"), False),
             "residue": enum_value(r, "residue", RESIDUE_KINDS, "unknown"),
             "foreground_resolution": enum_value(r, "foreground_resolution", FOREGROUND_RESOLUTIONS, "unknown"),
             "durable_capture": enum_value(r, "durable_capture", DURABLE_CAPTURES, "unknown"),
             "skipped_reason": skipped_reason(r),
-            "background_action_allowed": bool(r.get("background_action_allowed")),
+            "background_action_allowed": _safe_bool(r.get("background_action_allowed"), False),
         }
         for r in sorted(receipts, key=_receipt_ts, reverse=True)[:12]
     ]
@@ -196,7 +208,7 @@ def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 5
         "foreground_resolution_breakdown": dict(resolution_counter),
         "durable_capture_breakdown": dict(durable_counter),
         "skipped_reason_breakdown": dict(skipped_counter),
-        "background_action_allowed_count": sum(1 for r in receipts if bool(r.get("background_action_allowed"))),
+        "background_action_allowed_count": sum(1 for r in receipts if _safe_bool(r.get("background_action_allowed"), False)),
         "latest_ts": max((_receipt_ts(r) for r in receipts), default=""),
         "recent": recent,
     }

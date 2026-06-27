@@ -134,3 +134,64 @@ def test_live_turn_receipt_metrics_collapses_unknown_scalars():
     assert metrics["durable_capture_breakdown"] == {"unknown": 1}
     assert metrics["skipped_reason_breakdown"] == {"other": 1}
     assert metrics["recent"][0]["skipped_reason"] == "other"
+
+
+def test_live_turn_receipt_metrics_normalizes_persisted_boolean_strings():
+    metrics = live_turn_receipt_metrics([
+        {
+            "type": "live_turn.ingest_decision",
+            "ts": "2026-06-27T10:00:00Z",
+            "foreground_resolution": "full",
+            "residue": "none",
+            "durable_capture": "docs",
+            "ingested": "false",
+            "background_action_allowed": "false",
+            "skipped_reason": "foreground_owned_no_residue",
+        },
+        {
+            "type": "live_turn.ingest_decision",
+            "ts": "2026-06-27T10:01:00Z",
+            "foreground_resolution": "partial",
+            "residue": "watch",
+            "durable_capture": "none",
+            "ingested": "true",
+            "background_action_allowed": "true",
+        },
+    ])
+
+    assert metrics["ingested_count"] == 1
+    assert metrics["skipped_count"] == 1
+    assert metrics["foreground_owned_no_residue_count"] == 1
+    assert metrics["background_action_allowed_count"] == 1
+    assert metrics["recent"][0]["ingested"] is True
+    assert metrics["recent"][0]["background_action_allowed"] is True
+    assert metrics["recent"][1]["ingested"] is False
+    assert metrics["recent"][1]["background_action_allowed"] is False
+
+
+def test_live_turn_receipt_metrics_sanitizes_invalid_timestamps():
+    metrics = live_turn_receipt_metrics([
+        {
+            "type": "live_turn.ingest_decision",
+            "ts": "RAW_TRANSCRIPT_BODY_DO_NOT_LEAK",
+            "foreground_resolution": "full",
+            "residue": "none",
+            "durable_capture": "docs",
+            "ingested": False,
+            "skipped_reason": "foreground_owned_no_residue",
+        },
+        {
+            "type": "live_turn.ingest_decision",
+            "created_at": "2026-06-27T10:01:00Z",
+            "foreground_resolution": "partial",
+            "residue": "watch",
+            "durable_capture": "none",
+            "ingested": True,
+        },
+    ])
+
+    serialized = repr(metrics)
+    assert "RAW_TRANSCRIPT_BODY_DO_NOT_LEAK" not in serialized
+    assert metrics["latest_ts"] == "2026-06-27T10:01:00Z"
+    assert metrics["recent"][0]["ts"] == "2026-06-27T10:01:00Z"
+    assert metrics["recent"][1]["ts"] == ""
