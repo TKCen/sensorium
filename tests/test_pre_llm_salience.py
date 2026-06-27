@@ -36,7 +36,7 @@ class TestSalienceContextForLl:
 
     def test_contains_sensorium_label(self):
         ctx = salience_context_for_llm()
-        assert "Sensorium Salience Hook" in ctx
+        assert "Sensorium Salience Hook ✨" in ctx
 
     def test_mentions_example_signal_kinds_without_boundary_language(self):
         ctx = salience_context_for_llm()

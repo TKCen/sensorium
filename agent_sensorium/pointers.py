@@ -105,8 +105,8 @@ def select_attention_pointer(
         action_count = count_active_actions_for_thread(store, thread.get("id", ""))
         invitation = f"I have something for you: {title}."
         if action_count:
-            invitation += f" ({action_count} prepared action{'s' if action_count != 1 else ''}.)"
-        invitation += " Say ‘take it up’ if you want me to open it."
+            invitation += f" There {'is' if action_count == 1 else 'are'} {action_count} prepared action{'s' if action_count != 1 else ''} ready for review."
+        invitation += ' Say "take it up" if you want me to open it. 🧵'
         pointer = {
             "action": "pointer_available",
             "pointer_type": "thread",
@@ -138,7 +138,7 @@ def select_attention_pointer(
         title = truncate_text(candidate.get("summary", "") or "Sensorium salience", int(cfg.get("max_title_chars", 96)))
         invitation = (
             f"I have something for you: {title}. "
-            "Say ‘open it’ or ‘take it up’ if you want me to inspect the attention inbox."
+            'Say "open it" or "take it up" if you want me to look into it. ✨'
         )
         return {
             "action": "pointer_available",
@@ -229,7 +229,7 @@ def pointer_context_for_llm(pointer: dict) -> str:
     if pointer.get("pointer_type") == "candidate":
         candidate_id = pointer.get("candidate_id")
         return (
-            "[Sensorium Pointer]\n"
+            "[Sensorium Pointer 🧵]\n"
             f"Candidate salience: {candidate_id} — {title}\n"
             f"Human-facing doorway: {pointer.get('invitation')}\n"
             "Internal instruction: If the user says “open it”, “take it up”, "
@@ -241,7 +241,7 @@ def pointer_context_for_llm(pointer: dict) -> str:
 
     thread_id = pointer.get("thread_id")
     return (
-        "[Sensorium Pointer]\n"
+        "[Sensorium Pointer 🧵]\n"
         f"Conscious thread: {thread_id} — {title}\n"
         f"Human-facing doorway: {pointer.get('invitation')}\n"
         "Internal instruction: If the user says “open it”, “take it up”, "

@@ -91,7 +91,7 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
         state_dir=str(tmp_path),
     )
     assert first is not None
-    assert "[Sensorium Pointer]" in first["context"]
+    assert "[Sensorium Pointer 🧵]" in first["context"]
     assert "Conscious thread: sth_testpointer" in first["context"]
     assert "If the user says" in first["context"]
     assert "sensorium(action=\"open\"" in first["context"]
@@ -121,7 +121,7 @@ def test_pointer_context_is_door_handle_not_capsule():
     pointer = {
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "I have something for you: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": 'I have something for you: A small title. Say "take it up" if you want me to open it. 🧵',
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
@@ -150,7 +150,7 @@ def test_candidate_pointer_context_uses_status_not_thread_open():
         "candidate_id": "cand_x",
         "title": "Live salience",
         "surface": "discord",
-        "invitation": "I have something for you: Live salience.",
+        "invitation": 'I have something for you: Live salience. Say "open it" or "take it up" if you want me to look into it. ✨',
     }
     context = pointer_context_for_llm(pointer)
     assert "Candidate salience: cand_x" in context

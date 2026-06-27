@@ -56,7 +56,7 @@ def salience_context_for_llm() -> str:
     Kept to a single short paragraph — small enough that it does not dominate
     the context window.
     """
-    return "[Sensorium Salience Hook]\n" + SALIENT_CUE_HINT
+    return "[Sensorium Salience Hook ✨]\n" + SALIENT_CUE_HINT
 
 
 def handle_salience_pre_llm(
