@@ -159,22 +159,7 @@ class SensoriumStore:
         _fsync_parent(path)
 
     def read_dampener_effects(self, limit: int | None = None) -> list[dict]:
-        path = self._root / "inner_life" / "dampeners.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_jsonl_from_path(self._root / "inner_life" / "dampeners.jsonl", limit)
 
     def append_blocker_effect(self, effect: dict) -> None:
         """Append-only audit trace of a blocker_effect record (inner_life/blockers.jsonl)."""
@@ -187,22 +172,7 @@ class SensoriumStore:
         _fsync_parent(path)
 
     def read_blocker_effects(self, limit: int | None = None) -> list[dict]:
-        path = self._root / "inner_life" / "blockers.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_jsonl_from_path(self._root / "inner_life" / "blockers.jsonl", limit)
 
     def read_sensor_policy(self) -> dict:
         path = self._root / "sensors" / "policy.json"
@@ -237,12 +207,66 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
-    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+    def count_jsonl(self, name: str) -> int:
+        """Count the number of entries in a JSONL file without parsing it."""
         path = self._resolve(name)
         if not path.exists():
+            return 0
+        count = 0
+        with open(path, "rb") as f:
+            while True:
+                buffer = f.read(65536)
+                if not buffer:
+                    break
+                count += buffer.count(b"\n")
+        return count
+
+    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        return self._read_jsonl_from_path(self._resolve(name), limit)
+
+    def _read_jsonl_from_path(self, path: Path, limit: int | None = None) -> list[dict]:
+        """Read JSONL rows from a path, with optimized tail read if limit is set."""
+        if not path.exists():
             return []
+
+        if limit is not None and limit > 0:
+            # Optimized tail read: binary seek from the end
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                file_size = f.tell()
+                if file_size == 0:
+                    return []
+
+                buffer = b""
+                pos = file_size
+                # Read chunks from the end until we have enough lines
+                while pos > 0:
+                    read_size = min(pos, 65536)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                    buffer = chunk + buffer
+                    if buffer.count(b"\n") > limit:
+                        break
+
+                raw_lines = buffer.splitlines()
+                # Use only the requested number of lines from the end
+                raw_lines = raw_lines[-limit:]
+
+                results = []
+                for line in raw_lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        results.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                return results
+
+        # Full read for no limit or negative limit
         results: list[dict] = []
-        with open(path) as f:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -251,8 +275,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def write_state(self, obj: dict) -> None:
