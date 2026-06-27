@@ -15,6 +15,7 @@ from typing import Any
 from .schemas import new_id, truncate_text, utc_now_iso
 
 LIVE_TURN_RECEIPT_TYPE = "live_turn.ingest_decision"
+LIVE_TURN_REVIEW_RECEIPT_TYPE = "live_turn.review_decision"
 FOREGROUND_RESOLUTIONS = frozenset({"full", "partial", "none", "explicit_no_action"})
 RESIDUE_KINDS = frozenset({"none", "watch", "later_review", "pattern_pressure"})
 DURABLE_CAPTURES = frozenset({"none", "memory", "skill", "docs", "task", "artifact"})
@@ -33,6 +34,13 @@ TURN_REVIEW_DECISIONS = frozenset({
     "skill_candidate",
     "docs_candidate",
     "followup_review_needed",
+})
+TURN_REVIEW_REASONS = frozenset({
+    "explicit_no_action",
+    "sensorium_already_ingested",
+    "salience_captured_elsewhere",
+    "salience_cue_without_capture",
+    "no_salience_cue",
 })
 
 
@@ -209,6 +217,98 @@ def live_turn_receipt_metrics(decisions: list[dict[str, Any]], *, limit: int = 5
         "durable_capture_breakdown": dict(durable_counter),
         "skipped_reason_breakdown": dict(skipped_counter),
         "background_action_allowed_count": sum(1 for r in receipts if _safe_bool(r.get("background_action_allowed"), False)),
+        "latest_ts": max((_receipt_ts(r) for r in receipts), default=""),
+        "recent": recent,
+    }
+
+
+def _safe_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(0, min(value, 100_000))
+    if isinstance(value, str) and value.strip().isdigit():
+        return max(0, min(int(value.strip()), 100_000))
+    return 0
+
+
+def build_turn_review_receipt(*, review: dict[str, Any]) -> dict[str, Any]:
+    """Build a transcript-free receipt for a bounded live-turn review result.
+
+    This receipt intentionally stores only closed-vocabulary review posture and
+    input sizes. It is a pending-review lane, not a full transcript ingest and
+    not autonomous permission to create Sensorium signals.
+    """
+
+    raw_inputs = review.get("inputs")
+    inputs: dict[str, Any] = raw_inputs if isinstance(raw_inputs, dict) else {}
+    decision = _safe_enum(review.get("decision"), TURN_REVIEW_DECISIONS, "followup_review_needed")
+    reason = _safe_enum(review.get("reason"), TURN_REVIEW_REASONS, "unknown")
+    return {
+        "id": new_id("ltrev"),
+        "type": LIVE_TURN_REVIEW_RECEIPT_TYPE,
+        "ts": utc_now_iso(),
+        "decision": decision,
+        "reason": reason,
+        "pending_review": decision != "no_action",
+        "has_salience_cue": _safe_bool(review.get("has_salience_cue"), False),
+        "durable_capture_seen": _safe_bool(review.get("durable_capture_seen"), False),
+        "input_counts": {
+            "user_chars": _safe_count(inputs.get("user_chars")),
+            "assistant_chars": _safe_count(inputs.get("assistant_chars")),
+            "tool_action_count": _safe_count(inputs.get("tool_action_count")),
+        },
+        "background_action_allowed": False,
+    }
+
+
+def live_turn_review_metrics(decisions: list[dict[str, Any]], *, limit: int = 500) -> dict[str, Any]:
+    """Return transcript-free metrics for bounded live-turn review receipts."""
+
+    bounded_limit = max(1, min(int(limit or 500), 5000))
+    receipts = [
+        row for row in decisions
+        if isinstance(row, dict) and row.get("type") == LIVE_TURN_REVIEW_RECEIPT_TYPE
+    ][-bounded_limit:]
+
+    def decision_value(receipt: dict[str, Any]) -> str:
+        value = receipt.get("decision")
+        return value if isinstance(value, str) and value in TURN_REVIEW_DECISIONS else "unknown"
+
+    def reason_value(receipt: dict[str, Any]) -> str:
+        value = receipt.get("reason")
+        return value if isinstance(value, str) and value in TURN_REVIEW_REASONS else "unknown"
+
+    def is_pending(receipt: dict[str, Any]) -> bool:
+        return _safe_bool(receipt.get("pending_review"), decision_value(receipt) != "no_action")
+
+    decision_counter = Counter(decision_value(r) for r in receipts)
+    reason_counter = Counter(reason_value(r) for r in receipts)
+    pending = [r for r in receipts if is_pending(r)]
+
+    recent = [
+        {
+            "ts": _receipt_ts(r),
+            "decision": decision_value(r),
+            "reason": reason_value(r),
+            "pending_review": is_pending(r),
+            "has_salience_cue": _safe_bool(r.get("has_salience_cue"), False),
+            "durable_capture_seen": _safe_bool(r.get("durable_capture_seen"), False),
+            "background_action_allowed": _safe_bool(r.get("background_action_allowed"), False),
+        }
+        for r in sorted(receipts, key=_receipt_ts, reverse=True)[:12]
+    ]
+
+    return {
+        "receipt_type": LIVE_TURN_REVIEW_RECEIPT_TYPE,
+        "window_limit": bounded_limit,
+        "receipt_count": len(receipts),
+        "pending_review_count": len(pending),
+        "no_action_count": decision_counter.get("no_action", 0),
+        "salience_cue_count": sum(1 for r in receipts if _safe_bool(r.get("has_salience_cue"), False)),
+        "durable_capture_seen_count": sum(1 for r in receipts if _safe_bool(r.get("durable_capture_seen"), False)),
+        "decision_breakdown": dict(decision_counter),
+        "reason_breakdown": dict(reason_counter),
         "latest_ts": max((_receipt_ts(r) for r in receipts), default=""),
         "recent": recent,
     }

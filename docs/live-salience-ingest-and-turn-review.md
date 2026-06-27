@@ -219,6 +219,32 @@ Projection privacy contract:
 - unknown scalar values collapse to `unknown` / `other`, never to the persisted string;
 - the dashboard may show aggregate live-turn counts and the closed-vocabulary recent timeline, but not raw receipt text.
 
+The pending review lane uses `live_turn.review_decision` receipts. These are produced by bounded turn-review probes and expose only closed-vocabulary posture plus input sizes:
+
+```json
+{
+  "receipt_type": "live_turn.review_decision",
+  "receipt_count": 2,
+  "pending_review_count": 1,
+  "no_action_count": 1,
+  "decision_breakdown": {"sensorium_residue_candidate": 1, "no_action": 1},
+  "reason_breakdown": {"salience_cue_without_capture": 1, "salience_captured_elsewhere": 1},
+  "recent": [
+    {
+      "ts": "2026-06-27T10:01:00Z",
+      "decision": "sensorium_residue_candidate",
+      "reason": "salience_cue_without_capture",
+      "pending_review": true,
+      "has_salience_cue": true,
+      "durable_capture_seen": false,
+      "background_action_allowed": false
+    }
+  ]
+}
+```
+
+A pending review receipt is not a signal, not a task, and not permission for autonomous outbound action. It is the safe intermediate surface for possible starvation: foreground can inspect the count/posture, then deliberately decide whether to open a Sensorium signal, durable memory/skill/docs capture, or no action.
+
 ## Monitoring metrics
 
 Do not judge the gate by raw signal counts alone. Track balance:
@@ -339,7 +365,9 @@ Implemented core shape:
 
 - `review_turn_for_residue(...)` in `agent_sensorium/live_turn.py` is a deterministic, write-free helper over bounded turn snippets and action booleans.
 - It returns `no_action` for already-captured/documented/Sensorium-ingested salience and `sensorium_residue_candidate` for uncaptured salience cues.
-- It does not install a scheduler, read transcripts, or write Sensorium state; those deployment choices belong in instance scripts/config.
+- `build_turn_review_receipt(...)` turns review results into transcript-free `live_turn.review_decision` receipts.
+- `scripts/sensorium_live_turn_review.py` provides a manual bounded probe and optional receipt append path; it does not read full sessions or create signals.
+- It does not install a scheduler, read transcripts, or write Sensorium state unless the manual `--append-receipt` flag is used; automatic deployment choices belong in instance scripts/config.
 
 ### Slice 4 — balance dashboard/metrics
 
@@ -353,6 +381,12 @@ Acceptance:
 dashboard/API can show recent live-turn ingest count, duplicate/settled count,
 and reviewer-found missed residue without exposing raw transcripts
 ```
+
+Implemented core shape:
+
+- `/snapshot` exposes `live_turn_metrics` for ingest receipts and `live_turn_review_metrics` for pending bounded-review receipts.
+- Dashboard priority metrics include both live-turn receipt balance and turn-review pending count.
+- Both projections collapse unknown persisted scalars and sanitize invalid timestamps before rendering.
 
 ## Non-goals
 

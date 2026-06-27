@@ -887,10 +887,25 @@ def test_snapshot_exposes_live_turn_metrics_without_receipt_text(tmp_path, monke
             "ingested": True,
         },
     )
+    _append_jsonl(
+        root,
+        "decisions.jsonl",
+        {
+            "type": "live_turn.review_decision",
+            "ts": f"hostile timestamp {marker}",
+            "summary": f"private review {marker}",
+            "decision": "sensorium_residue_candidate",
+            "reason": "salience_cue_without_capture",
+            "pending_review": "true",
+            "has_salience_cue": "true",
+            "durable_capture_seen": "false",
+        },
+    )
 
     payload = _snapshot(api)
     metrics = payload["live_turn_metrics"]
-    serialized = json.dumps(metrics, sort_keys=True)
+    review_metrics = payload["live_turn_review_metrics"]
+    serialized = json.dumps({"ingest": metrics, "review": review_metrics}, sort_keys=True)
 
     assert marker not in serialized
     assert metrics["receipt_count"] == 2
@@ -900,3 +915,8 @@ def test_snapshot_exposes_live_turn_metrics_without_receipt_text(tmp_path, monke
     assert metrics["background_action_allowed_count"] == 1
     assert metrics["residue_breakdown"] == {"none": 1, "watch": 1}
     assert metrics["recent"][0]["residue"] == "watch"
+    assert review_metrics["receipt_count"] == 1
+    assert review_metrics["pending_review_count"] == 1
+    assert review_metrics["decision_breakdown"] == {"sensorium_residue_candidate": 1}
+    assert review_metrics["reason_breakdown"] == {"salience_cue_without_capture": 1}
+    assert review_metrics["recent"][0]["ts"] == ""

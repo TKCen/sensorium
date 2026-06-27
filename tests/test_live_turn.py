@@ -1,7 +1,9 @@
 """Tests for live-turn salience receipts and cheap residue review."""
 
 from agent_sensorium.live_turn import (
+    build_turn_review_receipt,
     live_turn_receipt_metrics,
+    live_turn_review_metrics,
     normalize_live_turn_intent,
     review_turn_for_residue,
     should_ingest_live_residue,
@@ -195,3 +197,74 @@ def test_live_turn_receipt_metrics_sanitizes_invalid_timestamps():
     assert metrics["latest_ts"] == "2026-06-27T10:01:00Z"
     assert metrics["recent"][0]["ts"] == "2026-06-27T10:01:00Z"
     assert metrics["recent"][1]["ts"] == ""
+
+
+def test_turn_review_receipt_records_pending_posture_without_text():
+    review = review_turn_for_residue(
+        user_text="SECRET_RAW_TRANSCRIPT says this matters and should be watched later.",
+        assistant_text="I missed the capture.",
+    )
+
+    receipt = build_turn_review_receipt(review=review)
+
+    serialized = repr(receipt)
+    assert "SECRET_RAW_TRANSCRIPT" not in serialized
+    assert receipt["type"] == "live_turn.review_decision"
+    assert receipt["decision"] == "sensorium_residue_candidate"
+    assert receipt["reason"] == "salience_cue_without_capture"
+    assert receipt["pending_review"] is True
+    assert receipt["has_salience_cue"] is True
+    assert receipt["background_action_allowed"] is False
+    assert receipt["input_counts"]["user_chars"] > 0
+
+
+def test_live_turn_review_metrics_counts_pending_without_raw_text_leakage():
+    marker = "RAW_TRANSCRIPT_BODY_DO_NOT_LEAK"
+    metrics = live_turn_review_metrics([
+        {
+            "type": "live_turn.review_decision",
+            "ts": marker,
+            "summary": f"private {marker}",
+            "decision": "sensorium_residue_candidate",
+            "reason": "salience_cue_without_capture",
+            "pending_review": "true",
+            "has_salience_cue": "true",
+            "durable_capture_seen": "false",
+        },
+        {
+            "type": "live_turn.review_decision",
+            "ts": "2026-06-27T10:01:00Z",
+            "decision": "no_action",
+            "reason": "salience_captured_elsewhere",
+            "pending_review": "false",
+            "has_salience_cue": True,
+            "durable_capture_seen": True,
+        },
+        {
+            "type": "live_turn.review_decision",
+            "ts": "2026-06-27T10:02:00Z",
+            "decision": "SECRET_DECISION",
+            "reason": "SECRET_REASON",
+            "pending_review": "true",
+        },
+    ])
+
+    serialized = repr(metrics)
+    assert marker not in serialized
+    assert "SECRET" not in serialized
+    assert metrics["receipt_count"] == 3
+    assert metrics["pending_review_count"] == 2
+    assert metrics["no_action_count"] == 1
+    assert metrics["salience_cue_count"] == 2
+    assert metrics["durable_capture_seen_count"] == 1
+    assert metrics["decision_breakdown"] == {
+        "sensorium_residue_candidate": 1,
+        "no_action": 1,
+        "unknown": 1,
+    }
+    assert metrics["reason_breakdown"] == {
+        "salience_cue_without_capture": 1,
+        "salience_captured_elsewhere": 1,
+        "unknown": 1,
+    }
+    assert metrics["latest_ts"] == "2026-06-27T10:02:00Z"
