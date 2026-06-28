@@ -1,0 +1,3 @@
+## 2025-05-14 - [Visual Cues for Attention Substrate]
+**Learning:** In a pull-based attention system, users and LLM agents benefit from visual anchors to distinguish between different tiers of promoted salience (threads vs. candidates). Standardizing on emojis (🧵 for threads, ✨ for salience) and intuitive conversational triggers ("look into it", "open it up") improves cognitive mapping.
+**Action:** Use 🧵 as the visual cue for Conscious Thread Capsules and ✨ for raw Salience/Candidates in invitations and context headers. Use standard double quotes for suggested phrases to ensure cross-platform consistency.

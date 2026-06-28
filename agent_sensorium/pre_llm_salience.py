@@ -34,11 +34,11 @@ def _example_kind_csv() -> str:
 
 
 SALIENT_CUE_HINT = (
-    "When your user says something like 'that's wrong', 'this matters', "
-    "'I care about this', 'interesting idea', 'note this', or presses a salience "
+    'When your user says something like "that\'s wrong", "this matters", '
+    '"I care about this", "interesting idea", "note this", or presses a salience '
     "key — handle the live turn normally first. Do not ingest merely because "
     "the turn is important if you are answering, acting on, retaining, or patching "
-    "it now. Only call sensorium(action='ingest') for unresolved residue: "
+    'it now. Only call sensorium(action="ingest") for unresolved residue: '
     "something important to you or your user that the foreground turn will not "
     "settle and should persist as a compact signal, not a task. If the foreground "
     "session owns or resolves it, skip ingest. Do not duplicate foreground work. "
@@ -56,7 +56,7 @@ def salience_context_for_llm() -> str:
     Kept to a single short paragraph — small enough that it does not dominate
     the context window.
     """
-    return "[Sensorium Salience Hook]\n" + SALIENT_CUE_HINT
+    return "[✨ Sensorium Salience Hook]\n" + SALIENT_CUE_HINT
 
 
 def handle_salience_pre_llm(

@@ -36,7 +36,7 @@ class TestSalienceContextForLl:
 
     def test_contains_sensorium_label(self):
         ctx = salience_context_for_llm()
-        assert "Sensorium Salience Hook" in ctx
+        assert "[✨ Sensorium Salience Hook]" in ctx
 
     def test_mentions_example_signal_kinds_without_boundary_language(self):
         ctx = salience_context_for_llm()
@@ -56,7 +56,7 @@ class TestSalienceContextForLl:
 
     def test_mentions_compact_sensorium_ingest(self):
         ctx = salience_context_for_llm()
-        assert "sensorium(action='ingest')" in ctx
+        assert 'sensorium(action="ingest")' in ctx
         assert "sensorium_ingest_signal" not in ctx
 
     def test_uses_generic_user_language(self):
@@ -90,7 +90,7 @@ class TestHandleSaliencePreLl:
         )
         assert result is not None
         assert "context" in result
-        assert "sensorium(action='ingest')" in result["context"]
+        assert 'sensorium(action="ingest")' in result["context"]
         assert "sensorium_ingest_signal" not in result["context"]
 
     def test_returns_context_with_salience_policy_disabled(self, tmp_state_dir):
@@ -106,7 +106,7 @@ class TestHandleSaliencePreLl:
             platform="local",
         )
         assert result is not None
-        assert "sensorium(action='ingest')" in result["context"]
+        assert 'sensorium(action="ingest")' in result["context"]
         assert "sensorium_ingest_signal" not in result["context"]
 
     def test_does_not_crash_on_missing_config(self, tmp_state_dir):
