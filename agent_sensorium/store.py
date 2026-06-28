@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from collections import deque
 from pathlib import Path
 
 _STATE_NAMES = {
@@ -160,21 +161,7 @@ class SensoriumStore:
 
     def read_dampener_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "dampeners.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_jsonl_path(path, limit=limit)
 
     def append_blocker_effect(self, effect: dict) -> None:
         """Append-only audit trace of a blocker_effect record (inner_life/blockers.jsonl)."""
@@ -188,21 +175,7 @@ class SensoriumStore:
 
     def read_blocker_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "blockers.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_jsonl_path(path, limit=limit)
 
     def read_sensor_policy(self) -> dict:
         path = self._root / "sensors" / "policy.json"
@@ -237,22 +210,58 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
-    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+    def count_jsonl(self, name: str) -> int:
+        """Efficiently count lines in a JSONL file without parsing or full load."""
         path = self._resolve(name)
         if not path.exists():
+            return 0
+        count = 0
+        with open(path, "rb") as f:
+            buf_size = 1024 * 1024
+            buf = f.read(buf_size)
+            while buf:
+                count += buf.count(b"\n")
+                buf = f.read(buf_size)
+        return count
+
+    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        return self._read_jsonl_path(self._resolve(name), limit=limit)
+
+    def _read_jsonl_path(self, path: Path, limit: int | None = None) -> list[dict]:
+        """Internal helper to read JSONL from a Path with optional trailing limit."""
+        if not path.exists():
             return []
+        if limit is not None and limit <= 0:
+            return []
+
+        if limit is not None:
+            # Use deque to efficiently keep only the last N lines in memory
+            lines = deque(maxlen=limit)
+            with open(path, "r") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped:
+                        lines.append(stripped)
+
+            results = []
+            for line in lines:
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return results
+
+        # Full read path
         results: list[dict] = []
-        with open(path) as f:
+        with open(path, "r") as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     continue
                 try:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
-                    continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
+                    continue
         return results
 
     def write_state(self, obj: dict) -> None:
