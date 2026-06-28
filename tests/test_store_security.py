@@ -1,7 +1,6 @@
 """Security tests for SensoriumStore."""
 
 import pytest
-from pathlib import Path
 from agent_sensorium.store import SensoriumStore
 
 def test_store_init_sanitizes_instance():
