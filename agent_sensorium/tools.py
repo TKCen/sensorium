@@ -56,6 +56,11 @@ from .artifacts import (
     store_artifact,
 )
 from .media_gifts import apply_media_gift_choice
+from .actuators import (
+    load_actuator_registry,
+    register_actuator,
+    run_actuator_prepare_artifact,
+)
 from .conscious import (
     claim_dormant_thread,
     complete_claim,
@@ -530,6 +535,57 @@ def handle_sensorium_sensor_config(
     return _ok(instance, {"action": action, "registry": registry})
 
 
+def handle_sensorium_actuator_config(
+    *,
+    action: str,
+    name: str = "",
+    entry: dict | None = None,
+    status: str = "active",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Runtime programmable actuator registry management.
+
+    Configuration-only: list/register/modify/pause/deprecate actuator specs. It
+    never runs scripts, emits signals, sends messages, or prepares artifacts.
+    """
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    action = str(action or "list").strip().lower()
+    try:
+        if action == "list":
+            registry = load_actuator_registry(store)
+        elif action in {"register", "modify", "pause", "deprecate"}:
+            effective_status = {"pause": "paused", "deprecate": "deprecated"}.get(action, status)
+            registry = register_actuator(store, name, entry=entry or {}, status=effective_status)
+        else:
+            return _err(instance, "Invalid action. Must be one of: list, register, modify, pause, deprecate")
+    except ValueError as e:
+        return _err(instance, str(e))
+    return _ok(instance, {"action": action, "registry": registry})
+
+
+def handle_sensorium_actuator_prepare(
+    *,
+    name: str,
+    request: dict | None = None,
+    config: dict | None = None,
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Run one hotloaded Conscious-gated actuator prepare action."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    result = run_actuator_prepare_artifact(
+        store,
+        name=name,
+        request=request or {},
+        config=config,
+    )
+    if result.get("success"):
+        return _ok(instance, result)
+    return _err(instance, result.get("error", "actuator_prepare_failed"))
+
+
 def handle_sensorium_profile(
     *,
     action: str = "list",
@@ -604,6 +660,8 @@ def handle_sensorium_ingest_signal(
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
+    if config is None:
+        config, _ = load_instance_config(state_dir=str(store.root))
 
     normalized = normalize_signal(signal)
     normalized["fingerprint"] = signal_fingerprint(normalized)
@@ -673,6 +731,8 @@ def handle_sensorium_ingest_event(
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
+    if config is None:
+        config, _ = load_instance_config(state_dir=str(store.root))
 
     incoming = dict(event)
     incoming.setdefault("source_signal_ids", [])
@@ -708,6 +768,8 @@ def handle_sensorium_dispatch_once(
     """
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
+    if config is None:
+        config, _ = load_instance_config(state_dir=str(store.root))
     result = _dispatch_once(store, dry_run=dry_run, config=config)
     return _ok(instance, result)
 

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "actuators": {
+    "demo_prepare_text_artifact": {
+      "name": "demo_prepare_text_artifact",
+      "status": "active",
+      "kind": "prepare_artifact",
+      "capability": "prepare_text_artifact",
+      "impl": {
+        "type": "script",
+        "command": [
+          "python3",
+          "~/.hermes/plugins/agent-sensorium/examples/demo_script_actuator.py"
+        ]
+      },
+      "script_roots": [
+        "~/.hermes/plugins/agent-sensorium/examples"
+      ],
+      "schedule": {
+        "timeout_seconds": 10
+      },
+      "caps": {
+        "max_stdout_bytes": 8192,
+        "max_stderr_bytes": 4096
+      },
+      "input_contract": {
+        "allowed_request_types": [
+          "PRIVATE_EXPRESSION",
+          "REACH_OUT",
+          "PREPARE_ARTIFACT"
+        ],
+        "requires_conscious_decision": true,
+        "max_message_chars": 1200
+      },
+      "output_contract": {
+        "artifact_kinds": [
+          "text"
+        ],
+        "delivery_authorized": false
+      }
+    }
+  }
+}

@@ -104,8 +104,10 @@ def run_script_sensor(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_stdout_bytes: int = DEFAULT_MAX_STDOUT_BYTES,
+    max_stderr_bytes: int = DEFAULT_MAX_STDERR_BYTES,
     cwd: str | None = None,
     env: dict | None = None,
+    stdin_text: str | None = None,
 ) -> dict:
     """Run a trusted local script sensor; never raises on script misbehavior.
 
@@ -132,6 +134,7 @@ def run_script_sensor(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             cwd=cwd,
             env=env,
             shell=False,
@@ -146,13 +149,25 @@ def run_script_sensor(
             "duration_seconds": round(time.monotonic() - started, 3),
         }
 
+    if stdin_text is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(stdin_text.encode("utf-8"))
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
     stdout_result: dict = {}
     stderr_result: dict = {}
     stdout_thread = threading.Thread(
         target=_read_capped, args=(proc.stdout, max_stdout_bytes, stdout_result), daemon=True
     )
     stderr_thread = threading.Thread(
-        target=_read_capped, args=(proc.stderr, DEFAULT_MAX_STDERR_BYTES, stderr_result), daemon=True
+        target=_read_capped, args=(proc.stderr, max_stderr_bytes, stderr_result), daemon=True
     )
     stdout_thread.start()
     stderr_thread.start()
@@ -198,7 +213,7 @@ def run_script_sensor(
         if stdout_result.get("exceeded"):
             cap_name, cap_value = "stdout", max_stdout_bytes
         else:
-            cap_name, cap_value = "stderr", DEFAULT_MAX_STDERR_BYTES
+            cap_name, cap_value = "stderr", max_stderr_bytes
         return {
             "ok": False,
             "signals": [],

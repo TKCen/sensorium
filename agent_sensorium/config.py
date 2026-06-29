@@ -15,6 +15,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from .gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
 from .schemas import SENSITIVITY_RANK, VALID_SENSITIVITIES, utc_now_iso
 
 DEFAULT_ATTENTION_POLICY: dict = {
@@ -95,9 +96,13 @@ SAFE_DEFAULTS: dict = {
     "allowed_surfaces": ["local"],
     "max_sensitivity": "private",
     "thresholds": {
+        "single_signal_strength": GATE_DEFAULT_CONFIG["thresholds"]["single_signal_strength"],
+        "important_kind_strength": GATE_DEFAULT_CONFIG["thresholds"]["important_kind_strength"],
+        "candidate_pressure": GATE_DEFAULT_CONFIG["thresholds"]["candidate_pressure"],
         "starvation_hours": 72,
         "expiring_window_hours": 24,
     },
+    "promote_kinds": list(GATE_DEFAULT_CONFIG["promote_kinds"]),
     "budgets": {},
     "thread_ttl_hours": 168,
     # Generic default actor for the deprecated background-conscious lease lane.
@@ -425,6 +430,7 @@ def _validate_config(raw: dict) -> dict:
         "allowed_surfaces": list(SAFE_DEFAULTS["allowed_surfaces"]),
         "max_sensitivity": SAFE_DEFAULTS["max_sensitivity"],
         "thresholds": dict(SAFE_DEFAULTS["thresholds"]),
+        "promote_kinds": list(SAFE_DEFAULTS["promote_kinds"]),
         "budgets": dict(SAFE_DEFAULTS["budgets"]),
         "thread_ttl_hours": SAFE_DEFAULTS["thread_ttl_hours"],
         "default_actor": SAFE_DEFAULTS["default_actor"],
@@ -466,9 +472,22 @@ def _validate_config(raw: dict) -> dict:
     if "thresholds" in raw:
         val = raw["thresholds"]
         if isinstance(val, dict):
-            for k in ("starvation_hours", "expiring_window_hours", "dispatch_pressure"):
+            for k in (
+                "single_signal_strength",
+                "important_kind_strength",
+                "candidate_pressure",
+                "starvation_hours",
+                "expiring_window_hours",
+                "dispatch_pressure",
+            ):
                 if k in val and isinstance(val[k], (int, float)) and val[k] > 0:
                     config["thresholds"][k] = val[k]
+    if "promote_kinds" in raw:
+        val = raw["promote_kinds"]
+        if isinstance(val, list) and all(isinstance(k, str) for k in val):
+            promote_kinds = sorted({k.strip() for k in val if k.strip()})
+            if promote_kinds:
+                config["promote_kinds"] = promote_kinds
     if "budgets" in raw:
         val = raw["budgets"]
         if isinstance(val, dict):

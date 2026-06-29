@@ -44,19 +44,21 @@ The pointer is a doorway only — capsule internals are not returned until `open
 
 ```
 Sensors → Signals → [Gate] → Events → Candidates → [Dispatcher] → Conscious Threads
+                                           Conscious choice → prepare-only Actuator → local Artifact
 ```
 
 1. **Sensors** emit compact signals (observations, corrections, artifacts).
-2. A deterministic **Gate** promotes strong signals to **Events** based on strength/kind thresholds.
+2. A deterministic **Gate** promotes strong signals to **Events** based on hot-loaded strength/kind thresholds.
 3. Events create **Candidates** with weighted pressure scores.
 4. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
 5. The **pre-LLM hook** injects a compact pointer when an eligible thread is available.
+6. Optional **actuators** are hot-reloadable, trusted local scripts that prepare artifacts only after a conscious decision ref; they never authorize delivery.
 
 ---
 
 ## Profiles
 
-A *profile* is a named runtime namespace (config + state) under the Sensorium state root `~/.hermes/agent-sensorium/<profile>/`. Each profile has its own `instance.config.json`, signal/event/candidate/thread state, and sensor registry.
+A *profile* is a named runtime namespace (config + state) under the Sensorium state root `~/.hermes/agent-sensorium/<profile>/`. Each profile has its own `instance.config.json`, signal/event/candidate/thread state, sensor registry, and optional actuator registry.
 
 The `default` profile is the portable fallback. Multiple profiles (e.g. `default`, `demo`) can coexist.
 
@@ -85,6 +87,8 @@ Load this toolset only when you need setup, configuration, or diagnostics. It is
 
 Config-only tool for the per-profile sensor registry (`sensors/registry.json`). Never runs sensors or performs external action.
 
+Sensor registries and profile config are hot-loaded by runners/tool handlers. Editing `instance.config.json` thresholds/`promote_kinds` or `sensors/registry.json` takes effect on the next call/tick; no gateway restart is needed unless you add plugin Python modules, hooks, dashboard routes, or model-visible tool schemas.
+
 | Action | Description |
 |--------|-------------|
 | `list` | List registered sensors for the active profile |
@@ -92,6 +96,20 @@ Config-only tool for the per-profile sensor registry (`sensors/registry.json`). 
 | `modify` | Update a registered sensor's config |
 | `pause` | Pause a sensor (stops tick ingestion) |
 | `deprecate` | Mark a sensor deprecated |
+
+### Prepare-only actuator registry
+
+Optional actuators live under `~/.hermes/agent-sensorium/<profile>/actuators/registry.json`. They are trusted local scripts that prepare local artifact records only after conscious review. They are intentionally not exposed through the live `sensorium` tool.
+
+Rules for agents/operators extending actuators:
+
+- Keep `impl.command` an argv list; never use shell strings.
+- Put scripts under an allowed local `script_roots` entry.
+- Keep `input_contract.requires_conscious_decision=true` unless a human explicitly designs a different internal-only lane.
+- Keep `output_contract.delivery_authorized=false`; delivery/outbound action belongs to a separate conscious/operator policy gate.
+- Do not echo private prompt/message text into receipts, stdout metadata, or dashboard fields.
+
+See `examples/demo-actuator-registry.json` and `examples/demo_script_actuator.py` for a generic prepare-only canary.
 
 ### Other admin tools
 
@@ -107,11 +125,12 @@ These are admin/CLI surfaces — never the live `sensorium` tool. Load `agent-se
 2. **Init demo** — `sensorium_profile(action="init", profile="demo")`
 3. **Set default** — `sensorium_profile(action="set_default", profile="demo")`
 4. **Show config** — `sensorium_profile(action="show", profile="demo")`
-5. **Register a sensor / pause it** —
+5. **Register or seed sensors/actuators** —
    ```python
    sensorium_sensor_config(action="register", name="runtime_heartbeat", defaults={"strength": 0.1, "surfaces": ["local"], "local_only": True})
    sensorium_sensor_config(action="pause", name="runtime_heartbeat")
    ```
+   Or seed generic examples from the CLI; this writes both `sensors/registry.json` and `actuators/registry.json` when `--apply` is passed.
 6. **Seed and tick** —
    ```bash
    python scripts/sensorium_demo_seed.py --instance demo --apply

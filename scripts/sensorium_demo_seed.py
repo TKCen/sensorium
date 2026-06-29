@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bootstrap a generic ``demo`` Sensorium profile with safe sensors.
+"""Bootstrap a generic ``demo`` Sensorium profile with safe sensors and actuators.
 
-A fresh install runs this once to seed a profile config plus a small generic
-sensor registry (from examples/demo-sensor-registry.json). It is dry-run by
+A fresh install runs this once to seed a profile config plus small generic
+sensor/actuator registries (from examples/demo-*.json). It is dry-run by
 default: it prints a plan and writes nothing unless ``--apply`` is given and
 ``--dry-run`` is not. Everything is deterministic and stdlib-only.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_sensorium.actuators import register_actuator
 from agent_sensorium.config import init_profile_config, profile_state_dir
 from agent_sensorium.sensors import load_sensor_registry, register_sensor_kind
 from agent_sensorium.store import SensoriumStore
@@ -35,6 +36,12 @@ def _load_registry(path: Path, errors: list[str]) -> dict:
         errors.append("registry_invalid: expected object")
         return {}
     return data
+
+
+def _registry_entries(raw: dict, key: str | None = None) -> dict:
+    if key and isinstance(raw.get(key), dict):
+        return raw[key]
+    return raw
 
 
 def _first_seed_signal(path: Path, errors: list[str]) -> dict | None:
@@ -59,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instance", default="demo")
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--registry", default=str(_REPO_ROOT / "examples" / "demo-sensor-registry.json"))
+    parser.add_argument("--actuator-registry", default=str(_REPO_ROOT / "examples" / "demo-actuator-registry.json"))
     parser.add_argument("--seed-signal", default=str(_REPO_ROOT / "examples" / "seed-signal.jsonl"))
     parser.add_argument("--apply", action="store_true", help="Perform writes")
     parser.add_argument("--dry-run", action="store_true", help="Force no writes (overrides --apply)")
@@ -69,8 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     apply = bool(args.apply and not args.dry_run)
     errors: list[str] = []
 
-    registry = _load_registry(Path(args.registry), errors)
-    sensor_names = sorted(registry)
+    sensor_registry = _registry_entries(_load_registry(Path(args.registry), errors))
+    sensor_names = sorted(sensor_registry)
+    actuator_registry = _registry_entries(_load_registry(Path(args.actuator_registry), errors), "actuators")
+    actuator_names = sorted(actuator_registry)
 
     profile: dict | str
     if args.state_dir:
@@ -95,10 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             profile = {"profile": args.instance, "state_dir": str(profile_state_dir(args.instance)), "planned": True}
 
-    if apply and registry:
+    if apply and sensor_registry:
         load_sensor_registry(store)  # seed from the target store, ignore process-global state
         for name in sensor_names:
-            entry = registry[name]
+            entry = sensor_registry[name]
             try:
                 register_sensor_kind(
                     name,
@@ -107,7 +117,23 @@ def main(argv: list[str] | None = None) -> int:
                     store=store,
                 )
             except Exception as exc:
-                errors.append(f"register[{name}]: {type(exc).__name__}")
+                errors.append(f"register_sensor[{name}]: {type(exc).__name__}")
+
+    if apply and actuator_registry:
+        for name in actuator_names:
+            entry = actuator_registry[name]
+            if not isinstance(entry, dict):
+                errors.append(f"register_actuator[{name}]: invalid_entry")
+                continue
+            try:
+                register_actuator(
+                    store,
+                    name,
+                    entry=entry,
+                    status=entry.get("status", "active"),
+                )
+            except Exception as exc:
+                errors.append(f"register_actuator[{name}]: {type(exc).__name__}")
 
     seed_signal: dict | None = None
     if args.ingest_seed:
@@ -130,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         "dry_run": not apply,
         "profile": profile,
         "sensors": sensor_names,
+        "actuators": actuator_names,
         "seed_signal": seed_signal,
         "errors": errors,
     }

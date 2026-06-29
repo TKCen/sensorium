@@ -135,6 +135,101 @@ python -m pytest tests -q
 python -m py_compile agent_sensorium/*.py scripts/*.py
 ```
 
+## Add a hot-reloadable prepare actuator
+
+Use this path when conscious review should prepare a local artifact (text/audio/image/video ref) through a trusted local script. Actuators are not sensors: they run only after a conscious decision and they never authorize delivery themselves.
+
+### 1. Define the actuator contract
+
+Write down:
+
+- `name`: stable registry name, e.g. `prepare_text_note`.
+- `kind`: currently `prepare_artifact`.
+- `capability`: short closed label, e.g. `prepare_text_artifact` or `tts_voice_note`.
+- `impl.command`: argv-list command. Never a shell string.
+- `script_roots`: local directories the script path may live under.
+- `input_contract.allowed_request_types`: e.g. `PRIVATE_EXPRESSION`, `REACH_OUT`, `PREPARE_ARTIFACT`.
+- `input_contract.requires_conscious_decision`: normally `true`.
+- `output_contract.artifact_kinds`: allowed artifact kinds.
+- `output_contract.delivery_authorized`: always `false` for generic prepare lanes.
+
+Example registry entry:
+
+```json
+{
+  "version": 1,
+  "actuators": {
+    "demo_prepare_text_artifact": {
+      "status": "active",
+      "kind": "prepare_artifact",
+      "capability": "prepare_text_artifact",
+      "impl": {
+        "type": "script",
+        "command": ["python3", "~/.hermes/plugins/agent-sensorium/examples/demo_script_actuator.py"]
+      },
+      "script_roots": ["~/.hermes/plugins/agent-sensorium/examples"],
+      "schedule": {"timeout_seconds": 10},
+      "caps": {"max_stdout_bytes": 8192, "max_stderr_bytes": 4096},
+      "input_contract": {
+        "allowed_request_types": ["PRIVATE_EXPRESSION", "REACH_OUT", "PREPARE_ARTIFACT"],
+        "requires_conscious_decision": true,
+        "max_message_chars": 1200
+      },
+      "output_contract": {
+        "artifact_kinds": ["text"],
+        "delivery_authorized": false
+      }
+    }
+  }
+}
+```
+
+### 2. Keep the script contract boring
+
+The script receives one compact JSON object on stdin. It emits one JSON object on stdout:
+
+```json
+{
+  "artifact": {
+    "kind": "text",
+    "ref_path": "artifact://demo/prepared-text-note",
+    "delivery_state": "prepared",
+    "intended_handoff_mode": "present_thread",
+    "sensitivity": "private",
+    "allowed_surfaces": ["local"]
+  },
+  "summary": "Prepared a local artifact reference.",
+  "delivery_authorized": false,
+  "outbound_delivery": false
+}
+```
+
+Do not print raw private prompts, secrets, tokens, command output, or stack traces. The runner bounds stdout/stderr and records sanitized error categories, but the script should still be written as if stdout is a public contract.
+
+### 3. Hot reload without gateway schema changes
+
+Actuator behavior lives in `~/.hermes/agent-sensorium/<profile>/actuators/registry.json` and trusted local scripts. The registry is read on every actuator run, so edits take effect on the next invocation. Adding or changing actuators does **not** require adding new Hermes tools or changing the live `sensorium` schema.
+
+Gateway/plugin restarts are still required for new Python modules, plugin hooks, dashboard routes, or model-visible tool schemas. Keep volatile actuator behavior in registries and scripts.
+
+### 4. Tests required
+
+At minimum:
+
+- registry config persists but does not run scripts;
+- registry edits hot-reload between runs;
+- missing `conscious_decision_ref` blocks before script execution;
+- script attempts to set `delivery_authorized` or `outbound_delivery` are rejected;
+- decisions/artifact receipts do not include raw private message text;
+- timeout, nonzero exit, malformed JSON, stdout cap, and stderr cap are sanitized.
+
+Run:
+
+```bash
+python -m pytest tests/test_actuators.py tests/test_script_sensor.py -q -o 'addopts='
+python -m pytest -q -o 'addopts='
+```
+
 ## Add a deeper Subconscious job
 
 Use this path when deterministic Events/Candidates exist and deeper reasoning is useful: clustering pressure themes, deciding whether a candidate deserves conscious review, summarizing repeated failures, or proposing a conscious task.
@@ -209,7 +304,8 @@ Before merging a new sensor or Subconscious job:
 - [ ] It has debounce, recovery, and cooldown semantics.
 - [ ] It declares global vs session-local scope.
 - [ ] It has tests for no-spam/no-raw/no-outbound.
-- [ ] It appears in probe inventory/audit.
+- [ ] Script actuators require conscious decision refs and never set `delivery_authorized` / `outbound_delivery` true.
+- [ ] It appears in probe inventory/audit when it is a sensor or scheduled probe.
 - [ ] It writes decision receipts for meaningful state changes.
 - [ ] Any new dashboard/API projection is read-only, compact-only, and covered by a hostile-value privacy smoke; see `dashboard-and-review-surfaces.md`.
 - [ ] It cannot self-amplify from its own feedback.
