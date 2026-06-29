@@ -96,6 +96,7 @@ class SensoriumStore:
         (self._root / "archive").mkdir(exist_ok=True)
         (self._root / "locks").mkdir(exist_ok=True)
         (self._root / "sensors").mkdir(exist_ok=True)
+        (self._root / "actuators").mkdir(exist_ok=True)
         (self._root / "inner_life").mkdir(exist_ok=True)
 
     def read_sensor_registry(self) -> dict:

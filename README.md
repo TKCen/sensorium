@@ -47,6 +47,7 @@ Core pieces:
 - **Gate and promotion pipeline (`gate.py`, `attention.py`, `threads.py`)** — normalizes salience, applies sensitivity/surface policy, and builds candidate/thread state.
 - **Pre-LLM hooks (`pointers.py`, `pre_llm_salience.py`)** — inject compact reminders/pointers before model calls without mutating state.
 - **Deterministic tick scripts (`scripts/sensorium_tick.py`)** — run heartbeat/pressure sensors, compaction, and thread service from cron or manual smoke tests.
+- **Hot-reload registries** — per-profile `sensors/registry.json` and optional `actuators/registry.json` let deployers add/tune trusted local script sensors and prepare-only actuators without changing the gateway schema.
 - **Admin tools** — inspect and manage profiles, sensors, attention inboxes, artifacts, policies, and diagnostics.
 - **Dashboard plugin (`dashboard/`)** — optional read-only FastAPI dashboard surface for attention, snapshots, graph/receipt traces, metrics, live-turn receipt balance, and inner-life sidecar audits. Dashboard routes are GET-only and project hostile legacy/corrupt values through compact safe labels before rendering.
 
@@ -137,7 +138,7 @@ Typical flow:
 
 1. **Install plugin snapshot** into `~/.hermes/plugins/agent-sensorium/` and restart/new-session Hermes so tools/hooks are discovered.
 2. **Initialize a profile** (`default`, `demo`, or deployment-specific) with `sensorium_profile` or `scripts/sensorium_demo_seed.py`.
-3. **Register or seed sensors** into that profile's `sensors/registry.json`.
+3. **Register or seed sensors and actuators** into that profile's `sensors/registry.json` and optional `actuators/registry.json`.
 4. **Run ticks deliberately** — manually, cron, or another operator-controlled scheduler. Ticks emit compact signals and receipts; they do not reach out by themselves.
 5. **Before LLM calls**, hooks may inject a compact pointer that something is waiting for review.
 6. **During normal conversation**, the agent only gets the live `sensorium` aperture: `status`, `ingest`, `open`, `update`.
@@ -168,6 +169,7 @@ A separate toolset for operator setup, diagnostics, and management. Load it only
 
 - **`sensorium_profile`** — profile lifecycle: `list`, `show`, `init`, `set_default`.
 - **`sensorium_sensor_config`** — sensor registry management: `list`, `register`, `modify`, `pause`, `deprecate`. Config-only; never runs sensors.
+- **Actuator registries** — optional prepare-only actuators live in `actuators/registry.json` and are managed by editing config or seeding examples; they are intentionally not exposed as live tools.
 - Granular ingest, thread service, subconscious advisory, artifact, attention-policy, and improvement tools for operator inspection and controlled intervention.
 
 ---
@@ -213,6 +215,8 @@ The plugin ships generic reusable code. Deployment-specific values are read from
 | `subconscious_profile` | `"subconscious_worker"` | Cheap reviewer profile name assigned intake by the bridge |
 | `tick_quiet_filename` | `"sensorium_tick_quiet.latest.json"` | Dashboard quiet-tick freshness file |
 | `tts` block | see below | Local TTS/talking-head sidecar (dormant until `sidecar_base`/`control_command` are set) |
+| `thresholds.single_signal_strength` / `important_kind_strength` / `candidate_pressure` / `dispatch_pressure` | gate defaults | Runtime hot-loaded salience and dispatch thresholds |
+| `promote_kinds` | gate defaults | Runtime hot-loaded event kinds that can promote at the important-kind threshold |
 
 Default `tts` block:
 ```json
@@ -228,6 +232,16 @@ Default `tts` block:
 
 See `docs/profiles-and-config.md` for the full profile model and config/code boundary reference. A fresh install can seed a generic `demo` profile with `python scripts/sensorium_demo_seed.py --instance demo --apply`. For a step-by-step walkthrough of sensors and tick see `docs/demo-sensors-and-tick.md`.
 
+### Hot-reload extension points
+
+Per-profile behavior is intentionally file-driven:
+
+- `instance.config.json` — thresholds, `promote_kinds`, surfaces, sensitivity, policy, and dormant sidecar config. Tool handlers load this at call time when no explicit config object is supplied.
+- `sensors/registry.json` — sensor definitions. Sensor runners re-read the registry per invocation.
+- `actuators/registry.json` — optional prepare-only trusted script actuators. The actuator runner re-reads the registry per invocation and requires a conscious decision ref before script execution.
+
+Changing these files does not require a gateway restart. Restart/new-session is still required for new plugin tools, hook registration, dashboard routes, or Python modules imported by the long-lived gateway process.
+
 ---
 
 ## Features
@@ -237,6 +251,7 @@ See `docs/profiles-and-config.md` for the full profile model and config/code bou
 - Dormant conscious thread capsules: high-salience topics held across sessions until reviewed
 - Surface/sensitivity/cooldown gating: each signal class carries a surface intersection policy before it can become visible
 - Policy-gated action preparation: local artifacts and handoff records remain inert until an operator or external system acts on them
+- Hot-reloadable profile config, sensor registries, and prepare-only actuator registries without changing the live gateway tool schema
 - Pull-based review: the agent (and operator) request status; nothing is pushed
 - **Safe admin and debug surfaces:** a separate admin toolset for read/diagnose/manage operations, intentionally hidden from the live agent surface
 - **Read-only dashboard review surfaces:** `/attention`, `/snapshot`, `/graph`, `/topology`, `/runtime-status`, `/trace`, `/metrics`, `/registry`, `/probe-audit`, `/dampeners`, `/blockers`, and `/explanation` expose compact status and traces without mutation routes

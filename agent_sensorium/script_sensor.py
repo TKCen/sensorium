@@ -62,6 +62,21 @@ def _read_capped(stream, cap: int, result: dict) -> None:
             pass
 
 
+def _write_stdin(stream, data: bytes, result: dict) -> None:
+    """Write stdin in a helper thread so timeout polling can still kill the child."""
+    try:
+        stream.write(data)
+        stream.flush()
+        result["ok"] = True
+    except (BrokenPipeError, OSError, ValueError):
+        result["ok"] = False
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def _parse_jsonl(text: str) -> tuple[list[dict], str | None]:
     signals: list[dict] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -104,8 +119,10 @@ def run_script_sensor(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_stdout_bytes: int = DEFAULT_MAX_STDOUT_BYTES,
+    max_stderr_bytes: int = DEFAULT_MAX_STDERR_BYTES,
     cwd: str | None = None,
     env: dict | None = None,
+    stdin_text: str | None = None,
 ) -> dict:
     """Run a trusted local script sensor; never raises on script misbehavior.
 
@@ -132,6 +149,7 @@ def run_script_sensor(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             cwd=cwd,
             env=env,
             shell=False,
@@ -148,14 +166,24 @@ def run_script_sensor(
 
     stdout_result: dict = {}
     stderr_result: dict = {}
+    stdin_result: dict = {}
     stdout_thread = threading.Thread(
         target=_read_capped, args=(proc.stdout, max_stdout_bytes, stdout_result), daemon=True
     )
     stderr_thread = threading.Thread(
-        target=_read_capped, args=(proc.stderr, DEFAULT_MAX_STDERR_BYTES, stderr_result), daemon=True
+        target=_read_capped, args=(proc.stderr, max_stderr_bytes, stderr_result), daemon=True
     )
+    stdin_thread: threading.Thread | None = None
+    if stdin_text is not None and proc.stdin is not None:
+        stdin_thread = threading.Thread(
+            target=_write_stdin,
+            args=(proc.stdin, stdin_text.encode("utf-8"), stdin_result),
+            daemon=True,
+        )
     stdout_thread.start()
     stderr_thread.start()
+    if stdin_thread is not None:
+        stdin_thread.start()
 
     deadline = started + timeout_seconds
     timed_out = False
@@ -165,7 +193,13 @@ def run_script_sensor(
         if stdout_result.get("exceeded") or stderr_result.get("exceeded"):
             bounds_exceeded = True
             break
-        if not stdout_thread.is_alive() and not stderr_thread.is_alive() and proc.poll() is not None:
+        stdin_done = stdin_thread is None or not stdin_thread.is_alive()
+        if (
+            stdin_done
+            and not stdout_thread.is_alive()
+            and not stderr_thread.is_alive()
+            and proc.poll() is not None
+        ):
             break
         if time.monotonic() > deadline:
             timed_out = True
@@ -174,6 +208,8 @@ def run_script_sensor(
     if timed_out or bounds_exceeded:
         proc.kill()
 
+    if stdin_thread is not None:
+        stdin_thread.join(timeout=_KILL_DRAIN_TIMEOUT_SECONDS)
     stdout_thread.join(timeout=_KILL_DRAIN_TIMEOUT_SECONDS)
     stderr_thread.join(timeout=_KILL_DRAIN_TIMEOUT_SECONDS)
     try:
@@ -198,7 +234,7 @@ def run_script_sensor(
         if stdout_result.get("exceeded"):
             cap_name, cap_value = "stdout", max_stdout_bytes
         else:
-            cap_name, cap_value = "stderr", DEFAULT_MAX_STDERR_BYTES
+            cap_name, cap_value = "stderr", max_stderr_bytes
         return {
             "ok": False,
             "signals": [],

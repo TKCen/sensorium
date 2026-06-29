@@ -21,11 +21,13 @@ class TestDemoSeedDryRun:
         assert result["applied"] is False
         assert result["dry_run"] is True
         assert result["sensors"]
+        assert result["actuators"]
         assert not (state_dir / "sensors" / "registry.json").exists()
+        assert not (state_dir / "actuators" / "registry.json").exists()
 
 
 class TestDemoSeedApply:
-    def test_apply_writes_registry_with_four_kinds(self, tmp_path, capsys):
+    def test_apply_writes_registries_with_generic_kinds(self, tmp_path, capsys):
         state_dir = tmp_path / "demo"
         rc = sensorium_demo_seed.main(["--apply", "--state-dir", str(state_dir), "--json"])
         assert rc == 0
@@ -42,3 +44,12 @@ class TestDemoSeedApply:
             "machine_network_pressure",
             "machine_process_pressure",
         }
+
+        actuator_registry_path = state_dir / "actuators" / "registry.json"
+        assert actuator_registry_path.exists()
+        actuator_registry = json.loads(actuator_registry_path.read_text())
+        assert set(actuator_registry["actuators"]) == {"demo_prepare_text_artifact"}
+        entry = actuator_registry["actuators"]["demo_prepare_text_artifact"]
+        assert entry["kind"] == "prepare_artifact"
+        assert entry["input_contract"]["requires_conscious_decision"] is True
+        assert entry["output_contract"]["delivery_authorized"] is False

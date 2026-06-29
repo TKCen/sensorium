@@ -40,6 +40,7 @@ A *profile* is a named runtime namespace under the Sensorium state root:
 Each profile has its own:
 - `instance.config.json` — deployment-specific configuration
 - `sensors/registry.json` — sensor registry
+- `actuators/registry.json` — prepare-only actuator registry (optional)
 - Signal, event, candidate, and thread state (`signals/`, `events/`, `candidates/`, `threads/`, `decisions/`)
 
 The `default` profile is the portable fallback. Multiple profiles (e.g. `default`, `demo`) can coexist and are addressed by name in admin and CLI surfaces.
@@ -97,9 +98,20 @@ The plugin ships generic reusable code with config seams. Deployment-specific va
   "allowed_surfaces": ["local", "dashboard"],
   "max_sensitivity": "private",
   "thresholds": {
+    "single_signal_strength": 0.75,
+    "important_kind_strength": 0.6,
+    "candidate_pressure": 0.65,
+    "dispatch_pressure": 0.5,
     "starvation_hours": 72,
     "expiring_window_hours": 24
   },
+  "promote_kinds": [
+    "design_decision",
+    "user_correction",
+    "artifact_created",
+    "unresolved_question",
+    "task_result"
+  ],
   "budgets": {
     "dispatch": {"capacity": 10, "window_seconds": 3600},
     "pointer": {"capacity": 12, "window_seconds": 3600}
@@ -151,7 +163,7 @@ Missing config fails safe: local-only surfaces, private sensitivity, default thr
 
 ---
 
-## Basic sensors and the demo seed
+## Basic sensors, actuators, and the demo seed
 
 ### Generic sensor kinds (`examples/demo-sensor-registry.json`)
 
@@ -168,16 +180,30 @@ Four sensor kinds ship with safe defaults. All are `local_only`, surfaces `["loc
 
 Pressure sensors are silent between transitions; the heartbeat always emits.
 
+### Generic actuator registry (`examples/demo-actuator-registry.json`)
+
+The demo actuator registry contains one prepare-only script actuator, `demo_prepare_text_artifact`. It illustrates the authority boundary rather than a production integration:
+
+- registry is read from `actuators/registry.json` at run time;
+- script command is an argv list, never a shell string;
+- script path must be under an allowed local root;
+- input must include a `conscious_decision_ref` before the script runs;
+- output may prepare a local artifact record only;
+- `delivery_authorized` and `outbound_delivery` stay false.
+
+Actuator registries are optional. If no actuator registry exists, Sensorium continues to work as a sensing/review substrate.
+
 ### `scripts/sensorium_demo_seed.py`
 
-Seeds a demo profile with a registry and optional signal. **Default behavior is a dry-run — no writes occur without `--apply`.**
+Seeds a demo profile with sensor and actuator registries plus an optional signal. **Default behavior is a dry-run — no writes occur without `--apply`.**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--instance` | `demo` | Profile name to seed |
 | `--state-dir` | resolved from profile | Explicit state directory override |
-| `--registry <path>` | `examples/demo-sensor-registry.json` | Registry file to import |
-| `--seed-signal <path>` | none | Optional signal JSON to ingest |
+| `--registry <path>` | `examples/demo-sensor-registry.json` | Sensor registry file to import |
+| `--actuator-registry <path>` | `examples/demo-actuator-registry.json` | Actuator registry file to import |
+| `--seed-signal <path>` | `examples/seed-signal.jsonl` | Optional signal JSONL to ingest when `--ingest-seed` is passed |
 | `--apply` | off | Perform writes (required to make changes) |
 | `--dry-run` | on | Force no writes (default without `--apply`) |
 | `--json` | off | Print result as JSON |
@@ -198,3 +224,5 @@ Opt-in flag. Emits a compact deterministic `runtime_heartbeat` signal during the
 - `docs/examples/demo-instance-config.json` — sample `instance.config.json` with all current fields and generic defaults.
 - `docs/examples/demo-policy-card.md` — sample policy card showing the boundary between reusable core and deployment-specific policy.
 - `examples/demo-sensor-registry.json` — sample sensor registry with 4 generic sensor kinds and safe defaults.
+- `examples/demo-actuator-registry.json` — sample prepare-only actuator registry with conscious-gated script execution.
+- `examples/demo_script_sensor.py` / `examples/demo_script_actuator.py` — stdlib-only canaries for trusted local script contracts.

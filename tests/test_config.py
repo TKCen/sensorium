@@ -6,14 +6,22 @@ import os
 import pytest
 
 from agent_sensorium.config import (
+    SAFE_DEFAULTS,
     apply_sensitivity_policy,
     apply_surface_policy,
     load_instance_config,
     manage_attention_policy_config,
     resolve_config_path,
 )
+from agent_sensorium.gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
 from agent_sensorium.store import SensoriumStore
-from agent_sensorium.tools import handle_sensorium_attention_policy_manage, handle_sensorium_improvement_collect, handle_sensorium_status
+from agent_sensorium.tools import (
+    handle_sensorium_attention_policy_manage,
+    handle_sensorium_dispatch_once,
+    handle_sensorium_improvement_collect,
+    handle_sensorium_ingest_signal,
+    handle_sensorium_status,
+)
 
 
 @pytest.fixture
@@ -66,8 +74,18 @@ class TestConfigLoading:
 
     def test_safe_defaults_thresholds_present(self):
         config, _ = load_instance_config()
+        assert config["thresholds"]["single_signal_strength"] == 0.75
+        assert config["thresholds"]["important_kind_strength"] == 0.6
+        assert config["thresholds"]["candidate_pressure"] == 0.65
         assert config["thresholds"]["starvation_hours"] == 72
         assert config["thresholds"]["expiring_window_hours"] == 24
+        assert "relational_salience" in config["promote_kinds"]
+
+    def test_safe_defaults_thresholds_and_promote_kinds_match_gate_defaults(self):
+        assert SAFE_DEFAULTS["thresholds"]["single_signal_strength"] == GATE_DEFAULT_CONFIG["thresholds"]["single_signal_strength"]
+        assert SAFE_DEFAULTS["thresholds"]["important_kind_strength"] == GATE_DEFAULT_CONFIG["thresholds"]["important_kind_strength"]
+        assert SAFE_DEFAULTS["thresholds"]["candidate_pressure"] == GATE_DEFAULT_CONFIG["thresholds"]["candidate_pressure"]
+        assert SAFE_DEFAULTS["promote_kinds"] == GATE_DEFAULT_CONFIG["promote_kinds"]
 
     def test_safe_defaults_attention_policy_present(self):
         config, _ = load_instance_config()
@@ -163,10 +181,120 @@ class TestConfigLoading:
 
     def test_custom_thresholds_loaded(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
-        cfg.write_text(json.dumps({"thresholds": {"starvation_hours": 48}}))
+        cfg.write_text(json.dumps({
+            "thresholds": {
+                "single_signal_strength": 0.9,
+                "important_kind_strength": 0.4,
+                "candidate_pressure": 0.5,
+                "starvation_hours": 48,
+            },
+            "promote_kinds": ["note", "", "note"],
+        }))
         config, _ = load_instance_config(config_path=str(cfg))
+        assert config["thresholds"]["single_signal_strength"] == 0.9
+        assert config["thresholds"]["important_kind_strength"] == 0.4
+        assert config["thresholds"]["candidate_pressure"] == 0.5
         assert config["thresholds"]["starvation_hours"] == 48
         assert config["thresholds"]["expiring_window_hours"] == 24
+        assert config["promote_kinds"] == ["note"]
+
+    def test_empty_promote_kinds_is_honored_as_override(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({"promote_kinds": []}))
+        config, _ = load_instance_config(config_path=str(cfg))
+        assert config["promote_kinds"] == []
+
+    def test_ingest_signal_hotloads_instance_promotion_config(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        cfg = state / "instance.config.json"
+        cfg.write_text(json.dumps({
+            "thresholds": {
+                "single_signal_strength": 0.99,
+                "important_kind_strength": 0.3,
+                "candidate_pressure": 0.4,
+            },
+            "promote_kinds": ["note"],
+        }))
+
+        first = json.loads(handle_sensorium_ingest_signal(
+            instance="test",
+            state_dir=str(state),
+            signal={
+                "sensor": "test",
+                "source": "manual",
+                "kind": "note",
+                "summary": "first note",
+                "strength_hint": 0.35,
+                "sensitivity": "private",
+                "allowed_surfaces": ["local"],
+                "correlation_keys": ["first-note"],
+            },
+        ))
+        assert first["data"]["promoted"] is True
+
+        cfg.write_text(json.dumps({
+            "thresholds": {
+                "single_signal_strength": 0.99,
+                "important_kind_strength": 0.9,
+                "candidate_pressure": 0.4,
+            },
+            "promote_kinds": ["other"],
+        }))
+
+        second = json.loads(handle_sensorium_ingest_signal(
+            instance="test",
+            state_dir=str(state),
+            signal={
+                "sensor": "test",
+                "source": "manual",
+                "kind": "note",
+                "summary": "second note",
+                "strength_hint": 0.35,
+                "sensitivity": "private",
+                "allowed_surfaces": ["local"],
+                "correlation_keys": ["second-note"],
+            },
+        ))
+        assert second["data"]["promoted"] is False
+
+    def test_dispatch_once_hotloads_instance_dispatch_threshold(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        cfg = state / "instance.config.json"
+        cfg.write_text(json.dumps({"thresholds": {"dispatch_pressure": 0.9}}))
+        store = SensoriumStore(instance="test", state_dir=str(state))
+        store.ensure_dirs()
+        store.append_jsonl("candidates", {
+            "id": "cand_hot_dispatch",
+            "status": "candidate",
+            "kind": "design_decision",
+            "pressure": 0.8,
+            "summary": "dispatch threshold hotload candidate",
+            "event_ids": ["evt_hot_dispatch"],
+            "correlation_keys": ["dispatch-hotload"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "created_at": "2026-06-29T07:00:00Z",
+            "updated_at": "2026-06-29T07:00:00Z",
+            "expires_at": "",
+        })
+
+        first = json.loads(handle_sensorium_dispatch_once(
+            instance="test",
+            state_dir=str(state),
+            dry_run=True,
+        ))
+        assert first["data"]["action"] == "no_candidate"
+
+        cfg.write_text(json.dumps({"thresholds": {"dispatch_pressure": 0.7}}))
+        second = json.loads(handle_sensorium_dispatch_once(
+            instance="test",
+            state_dir=str(state),
+            dry_run=True,
+        ))
+        assert second["data"]["action"] == "kanban_review_required"
+        assert second["data"]["candidate_id"] == "cand_hot_dispatch"
 
     def test_custom_attention_policy_loaded_and_sanitized(self, tmp_path):
         cfg = tmp_path / "instance.config.json"

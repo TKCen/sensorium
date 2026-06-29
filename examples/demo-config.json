@@ -1,21 +1,26 @@
 {
-  "instance": "demo",
+  "instance_name": "demo",
+  "allowed_surfaces": ["local", "dashboard"],
+  "max_sensitivity": "private",
   "thresholds": {
     "single_signal_strength": 0.75,
     "important_kind_strength": 0.6,
     "candidate_pressure": 0.65,
-    "dispatch_pressure": 0.5
+    "dispatch_pressure": 0.5,
+    "starvation_hours": 72,
+    "expiring_window_hours": 24
   },
   "promote_kinds": [
     "design_decision",
     "user_correction",
     "artifact_created",
     "unresolved_question",
-    "task_result"
+    "task_result",
+    "body_pressure",
+    "network_pressure",
+    "process_pressure"
   ],
   "thread_ttl_hours": 168,
-  "sensitivity_default": "private",
-  "allowed_surfaces_default": ["local", "dashboard"],
   "default_actor": "background_conscious",
   "subconscious_profile": "subconscious_worker",
   "tick_quiet_filename": "sensorium_tick_quiet.latest.json",

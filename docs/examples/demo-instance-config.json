@@ -4,9 +4,31 @@
   "allowed_surfaces": ["local", "dashboard"],
   "max_sensitivity": "private",
   "thresholds": {
+    "single_signal_strength": 0.75,
+    "important_kind_strength": 0.6,
+    "candidate_pressure": 0.65,
+    "dispatch_pressure": 0.5,
     "starvation_hours": 72,
     "expiring_window_hours": 24
   },
+  "promote_kinds": [
+    "design_decision",
+    "user_correction",
+    "explicit_correction",
+    "design_insight",
+    "relational_salience",
+    "creative_pull",
+    "durable_importance",
+    "artifact_created",
+    "unresolved_question",
+    "task_result",
+    "body_pressure",
+    "network_pressure",
+    "process_pressure",
+    "hindsight_pressure",
+    "kanban_pressure",
+    "tts_sidecar_pressure"
+  ],
   "budgets": {
     "dispatch": {"capacity": 10, "window_seconds": 3600},
     "pointer": {"capacity": 12, "window_seconds": 3600}
