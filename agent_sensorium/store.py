@@ -5,6 +5,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from .schemas import DEFAULT_STATE_ROOT, sanitize_profile_name
+
 _STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
     "events": "events.jsonl",
@@ -16,8 +18,6 @@ _STATE_NAMES = {
     "thread_actions": "thread_actions.jsonl",
     "artifacts": "artifacts.jsonl",
 }
-
-_DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
 
 
 def _fsync_parent(path: Path) -> None:
@@ -76,11 +76,11 @@ def atomic_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
 
 class SensoriumStore:
     def __init__(self, instance: str = "default", state_dir: str | None = None):
-        self.instance = instance
+        self.instance = sanitize_profile_name(instance)
         if state_dir:
             self._root = Path(state_dir)
         else:
-            self._root = Path(_DEFAULT_BASE) / instance
+            self._root = Path(DEFAULT_STATE_ROOT).expanduser() / self.instance
 
     @property
     def root(self) -> Path:
