@@ -117,10 +117,18 @@ def _sanitize_entry(name: str, raw: dict[str, Any]) -> dict[str, Any] | None:
     input_raw: dict[str, Any] = input_value if isinstance(input_value, dict) else {}
     output_value = raw.get("output_contract")
     output_raw: dict[str, Any] = output_value if isinstance(output_value, dict) else {}
-    allowed_request_types = [
-        t for t in _string_list(input_raw.get("allowed_request_types"), limit=16)
-        if t in _VALID_REQUEST_TYPES
-    ] or ["PRIVATE_EXPRESSION", "REACH_OUT", "PREPARE_ARTIFACT"]
+    if "allowed_request_types" in input_raw:
+        allowed_request_types = [
+            t for t in _string_list(input_raw.get("allowed_request_types"), limit=16)
+            if t in _VALID_REQUEST_TYPES
+        ]
+        if not allowed_request_types:
+            status = "paused"
+    else:
+        allowed_request_types = ["PRIVATE_EXPRESSION", "REACH_OUT", "PREPARE_ARTIFACT"]
+    requires_conscious_decision = input_raw.get("requires_conscious_decision", True)
+    if not isinstance(requires_conscious_decision, bool):
+        requires_conscious_decision = True
     return {
         "name": safe,
         "enabled": status == "active",
@@ -140,7 +148,7 @@ def _sanitize_entry(name: str, raw: dict[str, Any]) -> dict[str, Any] | None:
             "max_message_chars": _positive_int(
                 input_raw.get("max_message_chars"), _DEFAULT_MAX_MESSAGE_CHARS, hi=4000
             ),
-            "requires_conscious_decision": bool(input_raw.get("requires_conscious_decision", True)),
+            "requires_conscious_decision": requires_conscious_decision,
         },
         "output_contract": {
             "artifact_kinds": _string_list(output_raw.get("artifact_kinds"), limit=8) or ["audio", "text", "image", "video"],
@@ -166,6 +174,22 @@ def load_actuator_registry(store: SensoriumStore) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _merge_entry(existing: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(existing)
+    for key, value in patch.items():
+        if (
+            key in {"impl", "schedule", "caps", "input_contract", "output_contract"}
+            and isinstance(value, dict)
+            and isinstance(merged.get(key), dict)
+        ):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
 def register_actuator(
     store: SensoriumStore,
     name: str,
@@ -182,7 +206,7 @@ def register_actuator(
     existing = entries.get(safe)
     merged: dict[str, Any] = dict(existing if isinstance(existing, dict) else {})
     if entry:
-        merged.update(entry)
+        merged = _merge_entry(merged, entry)
     merged["status"] = {"pause": "paused", "deprecate": "deprecated"}.get(status, status)
     sanitized = _sanitize_entry(safe, merged)
     if sanitized is None:
@@ -205,19 +229,38 @@ def _allowed_script_roots(store: SensoriumStore, entry: dict[str, Any]) -> list[
     return resolved
 
 
-def _script_path_from_command(command: list[str]) -> Path | None:
+def _script_command_index(command: list[str]) -> int | None:
     if not command:
         return None
     first = Path(command[0]).name.lower()
-    idx = 1 if (first.startswith("python") and len(command) > 1) else 0
+    return 1 if (first.startswith("python") and len(command) > 1) else 0
+
+
+def _script_path_from_command(command: list[str]) -> Path | None:
+    idx = _script_command_index(command)
+    if idx is None:
+        return None
     try:
         return Path(command[idx]).expanduser().resolve()
     except OSError:
         return None
 
 
-def _execution_command(command: list[str]) -> list[str]:
-    return [os.path.expanduser(arg) if isinstance(arg, str) else arg for arg in command]
+def _execution_command(command: list[str], script_path: Path) -> list[str]:
+    expanded = [os.path.expanduser(arg) if isinstance(arg, str) else arg for arg in command]
+    idx = _script_command_index(command)
+    if idx is not None:
+        expanded[idx] = str(script_path)
+    return expanded
+
+
+def _script_content_hash(script_path: Path | None) -> str:
+    if script_path is None:
+        return ""
+    try:
+        return hashlib.sha256(script_path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "unreadable"
 
 
 def _safe_ref(value: Any, *, prefix: str = "ref", max_len: int = 120) -> str:
@@ -270,6 +313,9 @@ def run_actuator_prepare_artifact(
         return _actuator_denied(store, now, safe, "unsupported_actuator_kind")
     if not _script_allowed(store, entry):
         return _actuator_denied(store, now, safe, "script_path_not_allowed")
+    script_path = _script_path_from_command(entry["impl"]["command"])
+    if script_path is None:
+        return _actuator_denied(store, now, safe, "script_path_not_allowed")
 
     request = request if isinstance(request, dict) else {}
     request_type = str(request.get("request_type") or "").strip()
@@ -303,7 +349,7 @@ def run_actuator_prepare_artifact(
         "SENSORIUM_NOW": now,
     })
     run = run_script_sensor(
-        _execution_command(entry["impl"]["command"]),
+        _execution_command(entry["impl"]["command"], script_path),
         env=env,
         timeout_seconds=float(entry["schedule"]["timeout_seconds"]),
         max_stdout_bytes=int(entry["caps"]["max_stdout_bytes"]),
@@ -313,10 +359,13 @@ def run_actuator_prepare_artifact(
     if not run.get("ok"):
         return _actuator_denied(store, now, safe, str(run.get("error") or "script_failed"), extra={"duration_seconds": run.get("duration_seconds")})
 
-    signals = run.get("signals") if isinstance(run.get("signals"), list) else []
-    result = signals[0] if signals and isinstance(signals[0], dict) else {}
-    if result.get("delivery_authorized") or result.get("outbound_delivery"):
+    raw_signals = run.get("signals")
+    signals: list[Any] = raw_signals if isinstance(raw_signals, list) else []
+    if any(isinstance(item, dict) and (item.get("delivery_authorized") or item.get("outbound_delivery")) for item in signals):
         return _actuator_denied(store, now, safe, "direct_delivery_not_allowed")
+    if len(signals) != 1 or not isinstance(signals[0], dict):
+        return _actuator_denied(store, now, safe, "invalid_script_result_count")
+    result: dict[str, Any] = dict(signals[0])
     artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
     artifact_kind = str(artifact.get("kind") or "").strip()
     if artifact_kind not in set(entry["output_contract"].get("artifact_kinds") or []):
@@ -325,6 +374,7 @@ def run_actuator_prepare_artifact(
     if not ref_path:
         return _actuator_denied(store, now, safe, "missing_artifact_ref")
 
+    script_hash = _script_content_hash(script_path)
     artifact_result = store_artifact(
         store,
         kind=artifact_kind,
@@ -334,7 +384,7 @@ def run_actuator_prepare_artifact(
             "actuator": safe,
             "capability": entry.get("capability", safe),
             "config_hash": _hash_obj(entry),
-            "script_hash": _hash_obj(entry.get("impl", {}).get("command") or []),
+            "script_hash": script_hash,
         },
         why_created=truncate_text(str(result.get("summary") or artifact.get("why_created") or "Actuator prepared artifact."), 300),
         intended_handoff_mode=str(artifact.get("intended_handoff_mode") or "present_thread"),
@@ -362,7 +412,7 @@ def run_actuator_prepare_artifact(
         "delivery_authorized": False,
         "outbound_delivery": False,
         "config_hash": _hash_obj(entry),
-        "script_hash": _hash_obj(entry.get("impl", {}).get("command") or []),
+        "script_hash": script_hash,
         "duration_seconds": run.get("duration_seconds"),
     }
     store.append_jsonl("decisions", receipt)
