@@ -216,6 +216,20 @@ def _script_path_from_command(command: list[str]) -> Path | None:
         return None
 
 
+def _execution_command(command: list[str]) -> list[str]:
+    return [os.path.expanduser(arg) if isinstance(arg, str) else arg for arg in command]
+
+
+def _safe_ref(value: Any, *, prefix: str = "ref", max_len: int = 120) -> str:
+    text = str(value or "").strip()
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:/#@+-")
+    if text and len(text) <= max_len and all(ch in allowed for ch in text):
+        return text
+    if not text:
+        return ""
+    return f"{prefix}_{_hash_obj(text)}"
+
+
 def _script_allowed(store: SensoriumStore, entry: dict[str, Any]) -> bool:
     command = entry.get("impl", {}).get("command") or []
     script_path = _script_path_from_command(command)
@@ -262,7 +276,7 @@ def run_actuator_prepare_artifact(
     contract = entry["input_contract"]
     if request_type not in contract["allowed_request_types"]:
         return _actuator_denied(store, now, safe, "request_type_not_allowed")
-    decision_ref = str(request.get("conscious_decision_ref") or request.get("decision_ref") or "").strip()
+    decision_ref = _safe_ref(request.get("conscious_decision_ref") or request.get("decision_ref"), prefix="decision")
     if contract.get("requires_conscious_decision") and not decision_ref:
         return _actuator_denied(store, now, safe, "missing_conscious_decision_ref")
 
@@ -289,7 +303,7 @@ def run_actuator_prepare_artifact(
         "SENSORIUM_NOW": now,
     })
     run = run_script_sensor(
-        entry["impl"]["command"],
+        _execution_command(entry["impl"]["command"]),
         env=env,
         timeout_seconds=float(entry["schedule"]["timeout_seconds"]),
         max_stdout_bytes=int(entry["caps"]["max_stdout_bytes"]),

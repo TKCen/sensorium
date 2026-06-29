@@ -198,6 +198,12 @@ class TestConfigLoading:
         assert config["thresholds"]["expiring_window_hours"] == 24
         assert config["promote_kinds"] == ["note"]
 
+    def test_empty_promote_kinds_is_honored_as_override(self, tmp_path):
+        cfg = tmp_path / "instance.config.json"
+        cfg.write_text(json.dumps({"promote_kinds": []}))
+        config, _ = load_instance_config(config_path=str(cfg))
+        assert config["promote_kinds"] == []
+
     def test_ingest_signal_hotloads_instance_promotion_config(self, tmp_path):
         state = tmp_path / "state"
         state.mkdir()

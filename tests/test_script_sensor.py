@@ -53,6 +53,16 @@ class TestJsonAndJsonl:
         assert result["ok"] is True
         assert result["signals"] == [{"seen": "from-stdin"}]
 
+    def test_stdin_write_respects_timeout_when_child_never_reads(self):
+        result = run_script_sensor(
+            _py("import time; time.sleep(5)"),
+            stdin_text="x" * (4 * 1024 * 1024),
+            timeout_seconds=0.2,
+        )
+        assert result["ok"] is False
+        assert "timeout" in result["error"]
+        assert result["duration_seconds"] < 4.0
+
     def test_json_array_of_objects(self):
         code = "import json; print(json.dumps([{'a': 1}, {'b': 2}]))"
         result = run_script_sensor(_py(code))

@@ -485,9 +485,7 @@ def _validate_config(raw: dict) -> dict:
     if "promote_kinds" in raw:
         val = raw["promote_kinds"]
         if isinstance(val, list) and all(isinstance(k, str) for k in val):
-            promote_kinds = sorted({k.strip() for k in val if k.strip()})
-            if promote_kinds:
-                config["promote_kinds"] = promote_kinds
+            config["promote_kinds"] = sorted({k.strip() for k in val if k.strip()})
     if "budgets" in raw:
         val = raw["budgets"]
         if isinstance(val, dict):

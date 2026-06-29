@@ -128,6 +128,29 @@ def test_actuator_prepare_hotloads_registry_between_runs(store, tmp_path):
     assert second["data"]["artifact"]["ref_path"].endswith("voice-b.mp3")
 
 
+def test_actuator_expands_user_paths_before_script_execution(store, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    scripts = home / "scripts"
+    scripts.mkdir(parents=True)
+    script = _write_script(scripts / "voice.py", "voice-home.mp3")
+    monkeypatch.setenv("HOME", str(home))
+    entry = _entry(script, scripts)
+    entry["impl"]["command"] = [sys.executable, "~/scripts/voice.py"]
+    entry["script_roots"] = ["~/scripts"]
+    handle_sensorium_actuator_config(
+        action="register",
+        name="voice_note",
+        entry=entry,
+        instance="test",
+        state_dir=str(store.root),
+    )
+
+    result = run_actuator_prepare_artifact(store, name="voice_note", request=_request())
+
+    assert result["success"] is True
+    assert result["data"]["artifact"]["ref_path"].endswith("voice-home.mp3")
+
+
 def test_actuator_requires_conscious_decision_before_script_runs(store, tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -195,3 +218,31 @@ def test_actuator_prepare_tool_does_not_copy_message_into_receipts(store, tmp_pa
     assert data["success"] is True
     assert data["data"]["data"]["receipt"]["outbound_delivery"] is False
     assert "private voice note text" not in serialized_decisions
+
+
+def test_actuator_bounds_malformed_decision_ref_before_receipt(store, tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = _write_script(scripts / "voice.py", "voice-a.mp3")
+    handle_sensorium_actuator_config(
+        action="register",
+        name="voice_note",
+        entry=_entry(script, scripts),
+        instance="test",
+        state_dir=str(store.root),
+    )
+    secret_ref = "full private decision note with sk-secret-token and raw prompt text" * 4
+
+    result = run_actuator_prepare_artifact(
+        store,
+        name="voice_note",
+        request=_request(conscious_decision_ref=secret_ref),
+    )
+    decisions = store.read_jsonl("decisions")
+    serialized_decisions = json.dumps(decisions)
+    receipt = result["data"]["receipt"]
+
+    assert result["success"] is True
+    assert receipt["conscious_decision_ref"].startswith("decision_")
+    assert secret_ref not in serialized_decisions
+    assert "sk-secret-token" not in serialized_decisions
