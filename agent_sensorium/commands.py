@@ -45,11 +45,11 @@ def _fmt_status(*, instance: str, state_dir: str | None) -> str:
     data = json.loads(raw)["data"]
     counts = data["counts"]
     lines = [
-        f"Sensorium [{instance}]",
-        f"  signals: {counts['signals']}  events: {counts['events']}",
-        f"  candidates: {counts['active_candidates']}/{counts['candidates']}"
+        f"🧠 Sensorium [{instance}]",
+        f"  📡 signals: {counts['signals']}  ☄️ events: {counts['events']}",
+        f"  ✨ candidates: {counts['active_candidates']}/{counts['candidates']}"
         f" ({counts.get('archived_candidates', 0)} archived)"
-        f"  threads: {counts['dormant_threads']}d {counts['held_threads']}h"
+        f"  🧵 threads: {counts['dormant_threads']}d {counts['held_threads']}h"
         f" {counts.get('closed_threads', 0)}c {counts.get('archived_threads', 0)}a",
     ]
     if data["top_candidates"]:
@@ -167,11 +167,11 @@ def _help() -> str:
         "Usage: /sensorium [subcommand]\n"
         "\n"
         "Subcommands:\n"
-        "  status         Compact status overview (default)\n"
-        "  threads        Top visible dormant/held threads\n"
-        "  pointer [surf] Show the active-session pointer for a surface\n"
-        "  open [id] [surf] Open a compact thread capsule if allowed on surface\n"
-        "  thread <id> <action> [reason] Update thread lifecycle/pin state\n"
-        "  compact        Archive expired items\n"
-        "  help           This message"
+        "  status         Compact status overview (default) 🧠\n"
+        "  threads        Top visible dormant/held threads 🧵\n"
+        "  pointer [surf] Show the active-session pointer for a surface 📡\n"
+        "  open [id] [surf] Open a compact thread capsule 🔓\n"
+        "  thread <id> <action> [reason] Update thread lifecycle/pin state ⚙️\n"
+        "  compact        Archive expired items 🧹\n"
+        "  help           This message ❓"
     )
