@@ -268,7 +268,7 @@ def runtime_heartbeat_sample(*, store) -> dict:
     counts: dict[str, int] = {}
     for name in ("signals", "events", "candidates", "threads"):
         try:
-            counts[name] = len(store.read_jsonl(name))
+            counts[name] = store.count_jsonl(name)
         except Exception:
             counts[name] = 0
 

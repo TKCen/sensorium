@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from collections import deque
 from pathlib import Path
 
 _STATE_NAMES = {
@@ -238,10 +239,53 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
+    def count_jsonl(self, name: str) -> int:
+        """Fast binary newline counter for large append-only files.
+
+        Returns an approximate count based on newline characters. If the file is
+        well-formed JSONL (one record per line, ending in newline), this is exact.
+        """
+        path = self._resolve(name)
+        if not path.exists():
+            return 0
+        count = 0
+        last_char = b""
+        with open(path, "rb") as f:
+            # Chunked binary read to avoid string decoding and JSON parsing overhead
+            while True:
+                chunk = f.read(131072)
+                if not chunk:
+                    break
+                count += chunk.count(b"\n")
+                last_char = chunk[-1:]
+        # Handle files that don't end in a newline
+        if last_char and last_char != b"\n":
+            count += 1
+        return count
+
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        """Read JSONL rows, with optimized trailing read if a limit is specified."""
         path = self._resolve(name)
         if not path.exists():
             return []
+
+        if limit is not None and limit > 0:
+            # Use deque to efficiently keep only the last N lines in memory
+            # before parsing JSON. For large files, this avoids O(N) json.loads().
+            with open(path) as f:
+                lines = deque(f, maxlen=limit)
+            results: list[dict] = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return results
+
+        # Full scan for no-limit reads
         results: list[dict] = []
         with open(path) as f:
             for line in f:
@@ -251,9 +295,7 @@ class SensoriumStore:
                 try:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
-                    continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
+                    continue
         return results
 
     def write_state(self, obj: dict) -> None:
