@@ -238,10 +238,41 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
+    def count_jsonl(self, name: str) -> int:
+        """Return the number of lines in a JSONL file using binary newline counting.
+
+        Much faster than read_jsonl() for just getting the count of signals or events.
+        """
+        path = self._resolve(name)
+        if not path.exists():
+            return 0
+        count = 0
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                count += chunk.count(b"\n")
+        return count
+
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
         path = self._resolve(name)
         if not path.exists():
             return []
+
+        # If we only need a few trailing rows, use deque to avoid parsing the whole file.
+        if limit is not None and limit > 0:
+            from collections import deque
+            with open(path) as f:
+                lines = deque(f, maxlen=limit)
+            results = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return results
+
         results: list[dict] = []
         with open(path) as f:
             for line in f:
@@ -252,8 +283,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def write_state(self, obj: dict) -> None:
