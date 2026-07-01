@@ -1,0 +1,4 @@
+## 2025-05-15 - Path Traversal in SensoriumStore
+**Vulnerability:** The `SensoriumStore` constructor accepted an `instance` string and joined it directly with a base path to form the state directory root. A malicious or accidental path-traversal string (e.g., `../../etc`) could escape the intended state root.
+**Learning:** Even internal mechanisms like local state stores need strict input validation if their naming parameters can originate from configuration or external requests (like the Dashboard API). SILENTLY stripping whitespace or dots can also lead to surprising directory merges; a fail-fast policy is safer.
+**Prevention:** Enforce strict validation at the earliest possible entry point (constructor/factory) and unify validation logic in a central schema layer to ensure consistency across the core library and external surfaces like APIs.
