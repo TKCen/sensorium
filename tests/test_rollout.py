@@ -40,6 +40,9 @@ def _make_fake_source(source_root: Path) -> None:
     (source_root / "live-scripts" / "sensorium_kanban_sensor_tick.py").write_text(
         "# kanban sensor tick\n"
     )
+    (source_root / "live-scripts" / "project_update_sensor.py").write_text(
+        "# project update sensor\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +204,31 @@ def test_no_backup_flag(tmp_path):
         assert not Path(result).exists(), (
             f"dry_run=True backup must not create a directory, but {result} exists"
         )
+
+
+def test_all_live_scripts_sync_to_runtime_scripts_target(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    _make_fake_source(source_root)
+
+    target_root = tmp_path / "hermes" / "plugins" / "agent-sensorium"
+    scripts_target = tmp_path / "hermes" / "scripts"
+
+    items = rollout.get_managed_items(source_root, target_root, scripts_target)
+    script_items = {
+        src.name: dst
+        for src, dst in items
+        if src.parent.name == "live-scripts" and dst.parent == scripts_target
+    }
+
+    assert script_items == {
+        "project_update_sensor.py": scripts_target / "project_update_sensor.py",
+        "sensorium_kanban_sensor_tick.py": scripts_target / "sensorium_kanban_sensor_tick.py",
+    }
+
+    rollout.do_sync(items, dry_run=False)
+    assert (scripts_target / "project_update_sensor.py").read_text() == "# project update sensor\n"
+    assert (scripts_target / "sensorium_kanban_sensor_tick.py").read_text() == "# kanban sensor tick\n"
 
 
 # ---------------------------------------------------------------------------
