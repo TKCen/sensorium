@@ -268,7 +268,7 @@ def runtime_heartbeat_sample(*, store) -> dict:
     counts: dict[str, int] = {}
     for name in ("signals", "events", "candidates", "threads"):
         try:
-            counts[name] = len(store.read_jsonl(name))
+            counts[name] = store.count_jsonl(name)
         except Exception:
             counts[name] = 0
 
@@ -304,9 +304,9 @@ def runtime_heartbeat_sample(*, store) -> dict:
 
     last_decision_age_seconds: float | None = None
     try:
-        decisions = store.read_jsonl("decisions")
+        decisions = store.read_jsonl("decisions", limit=1)
         if decisions:
-            last_ts = _parse_iso(decisions[-1].get("ts"))
+            last_ts = _parse_iso(decisions[0].get("ts"))
             if last_ts is not None:
                 last_decision_age_seconds = round((_utc_now() - last_ts).total_seconds(), 1)
     except Exception:
