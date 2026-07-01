@@ -8,7 +8,7 @@ Usage:
 Managed paths (relative to repo root → plugin install root):
   agent_sensorium/   dashboard/   scripts/   skills/   live-scripts/
   plugin.yaml   __init__.py   README.md   pyproject.toml
-  live-scripts/sensorium_kanban_sensor_tick.py → {scripts_target}/sensorium_kanban_sensor_tick.py
+  live-scripts/*.py → {scripts_target}/*.py
 """
 
 import argparse
@@ -93,9 +93,9 @@ _MANAGED_FILES = [
     "pyproject.toml",
 ]
 
-# Special mapping: (src_relative, dst_is_scripts_target, dst_filename)
-_LIVE_SCRIPT_SRC = "live-scripts/sensorium_kanban_sensor_tick.py"
-_LIVE_SCRIPT_DST = "sensorium_kanban_sensor_tick.py"
+# Special mappings: live scripts are kept in the plugin tree for source parity
+# and also copied into ~/.hermes/scripts for cron/runtime use.
+_LIVE_SCRIPT_GLOB = "*.py"
 
 _IGNORED_NAMES = {
     "__pycache__",
@@ -137,9 +137,12 @@ def get_managed_targets(target_root: Path, scripts_target: Path) -> list[Path]:
         dst_file = target_root / name
         if dst_file.exists() and dst_file.is_file():
             targets.append(dst_file)
-    live_dst = scripts_target / _LIVE_SCRIPT_DST
-    if live_dst.exists() and live_dst.is_file():
-        targets.append(live_dst)
+    live_scripts_dir = target_root / "live-scripts"
+    if live_scripts_dir.exists():
+        for live_src in sorted(live_scripts_dir.glob(_LIVE_SCRIPT_GLOB)):
+            live_dst = scripts_target / live_src.name
+            if live_dst.exists() and live_dst.is_file():
+                targets.append(live_dst)
     return targets
 
 
@@ -165,11 +168,13 @@ def get_managed_items(
             dst = target_root / name
             items.append((src, dst))
 
-    # Live script
-    live_src = source_root / _LIVE_SCRIPT_SRC
-    if live_src.exists() and live_src.is_file():
-        live_dst = scripts_target / _LIVE_SCRIPT_DST
-        items.append((live_src, live_dst))
+    # Live scripts: also install directly into ~/.hermes/scripts for cron/runtime use.
+    live_scripts_dir = source_root / "live-scripts"
+    if live_scripts_dir.exists() and live_scripts_dir.is_dir():
+        for live_src in sorted(live_scripts_dir.glob(_LIVE_SCRIPT_GLOB)):
+            if live_src.is_file() and not _is_ignored(live_src.relative_to(live_scripts_dir)):
+                live_dst = scripts_target / live_src.name
+                items.append((live_src, live_dst))
 
     return items
 
