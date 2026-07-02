@@ -1,0 +1,4 @@
+## 2026-02-24 - Unified Instance Name Sanitization
+**Vulnerability:** `SensoriumStore` was vulnerable to path traversal because it used the `instance` argument directly to construct filesystem paths without validation. Additionally, the dashboard API used a less strict regex-only validation compared to the configuration module.
+**Learning:** Security-critical input validation should be centralized in a low-level module (like `schemas.py`) to avoid circular dependencies and ensure consistency across the codebase. Recommending a "fail-fast" policy for leading/trailing whitespace (raising `ValueError`) is safer than silently stripping, as it alerts the caller to potentially malformed or malicious input.
+**Prevention:** Always validate parameters that influence filesystem paths using a centralized, strict sanitization function. Enforce these checks at the lowest possible level (e.g., in the constructor of the store object) to ensure all access patterns are protected.
