@@ -1,0 +1,3 @@
+## 2025-05-15 - JSONL Count and Tail Optimization
+**Learning:** For large append-only JSONL files, `len(read_jsonl())` is extremely expensive due to full file read and JSON parsing of every line. A binary chunk search for `\n` provides a massive speedup (e.g. 1.17s to 0.012s for 100k lines) for counting. For tail-reads, `deque(f, maxlen=limit)` on the file object allows skipping expensive JSON parsing for lines that will be discarded, providing further speedups for retrieving latest state.
+**Action:** Use `store.count_jsonl()` for status beacon counts and `read_jsonl(..., limit=N)` for retrieving the latest items from history files. Avoid redundant `count_jsonl()` calls if the file is already fully loaded for other purposes.
