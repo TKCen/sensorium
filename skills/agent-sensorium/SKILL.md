@@ -29,10 +29,10 @@ Do not dump full transcripts or raw messages. Keep `text` compact.
 The pre-LLM hook may inject a pointer like:
 
 ```
-I have something for you: <short title>. Say "take it up" to open it.
+🧵 I have something for you: <short title>. Say "take it up" to open it.
 ```
 
-That confident phrase is valid only when Sensorium has already produced a visible/openable pointer for the current surface. Do not improvise it before checking `sensorium(action="status")` or receiving a hook-provided pointer. If status shows no openable thread but you feel residual salience, use uncertainty phrasing instead, such as “I think I have something that might matter — want me to look?” or “I have some unsettled salience — want me to surface it?”
+That confident phrase is valid only when Sensorium has already produced a visible/openable pointer for the current surface. Do not improvise it before checking `sensorium(action="status")` or receiving a hook-provided pointer. If status shows no openable thread but you feel residual salience, use uncertainty phrasing instead, such as "I think I have something that might matter — want me to look?" or "I have some unsettled salience — want me to surface it?"
 
 When your user says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
 
