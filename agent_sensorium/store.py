@@ -1,5 +1,6 @@
 """JSONL-backed local state store for Agent Sensorium."""
 
+import collections
 import json
 import os
 import tempfile
@@ -238,10 +239,38 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
+    def count_jsonl(self, name: str) -> int:
+        """Fast binary newline counting for large JSONL files."""
+        path = self._resolve(name)
+        if not path.exists():
+            return 0
+        count = 0
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                count += chunk.count(b"\n")
+        return count
+
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        """Read JSONL records, optionally optimized for trailing reads with limit."""
         path = self._resolve(name)
         if not path.exists():
             return []
+
+        if limit is not None:
+            # Optimized tail read using deque to avoid parsing the entire file
+            with open(path) as f:
+                lines = collections.deque(f, maxlen=limit)
+            results: list[dict] = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return results
+
         results: list[dict] = []
         with open(path) as f:
             for line in f:
@@ -252,8 +281,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def write_state(self, obj: dict) -> None:
