@@ -121,7 +121,7 @@ def test_pointer_context_is_door_handle_not_capsule():
     pointer = {
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "I have something for you: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": "I have something for you: A small title. Say \"take it up\" if you want me to open it.",
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
