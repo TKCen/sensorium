@@ -106,7 +106,7 @@ def select_attention_pointer(
         invitation = f"I have something for you: {title}."
         if action_count:
             invitation += f" ({action_count} prepared action{'s' if action_count != 1 else ''}.)"
-        invitation += " Say ‘take it up’ if you want me to open it."
+        invitation += ' Say "take it up" if you want me to open it.'
         pointer = {
             "action": "pointer_available",
             "pointer_type": "thread",
@@ -138,7 +138,7 @@ def select_attention_pointer(
         title = truncate_text(candidate.get("summary", "") or "Sensorium salience", int(cfg.get("max_title_chars", 96)))
         invitation = (
             f"I have something for you: {title}. "
-            "Say ‘open it’ or ‘take it up’ if you want me to inspect the attention inbox."
+            'Say "open it" or "take it up" if you want me to inspect the attention inbox.'
         )
         return {
             "action": "pointer_available",
@@ -232,7 +232,7 @@ def pointer_context_for_llm(pointer: dict) -> str:
             "[Sensorium Pointer]\n"
             f"Candidate salience: {candidate_id} — {title}\n"
             f"Human-facing doorway: {pointer.get('invitation')}\n"
-            "Internal instruction: If the user says “open it”, “take it up”, "
+            "Internal instruction: If the user says \"open it\", \"take it up\", "
             "or similar, call "
             f"sensorium(action=\"status\", surface=\"{surface}\").\n"
             "Do not mark it reviewed merely because it was shown. Leave meaningful salience open "
@@ -244,7 +244,7 @@ def pointer_context_for_llm(pointer: dict) -> str:
         "[Sensorium Pointer]\n"
         f"Conscious thread: {thread_id} — {title}\n"
         f"Human-facing doorway: {pointer.get('invitation')}\n"
-        "Internal instruction: If the user says “open it”, “take it up”, "
+        "Internal instruction: If the user says \"open it\", \"take it up\", "
         "or similar, call "
         f"sensorium(action=\"open\", surface=\"{surface}\", id=\"{thread_id}\").\n"
         "Do not reveal capsule content unless opened. Do not include private capsule fields "
