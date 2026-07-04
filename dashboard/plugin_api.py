@@ -16,6 +16,8 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from agent_sensorium.schemas import sanitize_profile_name
+
 router = APIRouter()
 
 
@@ -53,7 +55,6 @@ DIRECT_DELIVERY_MODES = {"discord_channel_thread", "discord_dm_bound_session"}
 OPEN_OUTBOX_STATUSES = {"prepared", "failed"}
 TERMINAL_THREAD_STATUSES = {"closed", "archived"}
 
-_INSTANCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CANDIDATE_REF_LABEL_RE = re.compile(r"^candidate#[0-9a-f]{16}$")
 _RECEIPT_EVIDENCE_REF_TYPES = {
     "candidate",
@@ -77,16 +78,18 @@ def _resolve_instance(instance: str | None) -> tuple[str, Path] | None:
     """Resolve a request `instance` to (effective_instance, root), or None if invalid.
 
     Omitted instance and the legacy/default instance name both resolve to
-    DEFAULT_ROOT. Any other instance must be a plain name (letters, digits,
-    underscore, hyphen) — no path separators, dot-segments, blank/whitespace,
-    or hidden/dot names — so it can't escape DEFAULT_ROOT.parent via traversal.
+    DEFAULT_ROOT. Any other instance must be a safe profile name — no path
+    separators, dot-segments, blank/whitespace, or hidden/dot names — so it
+    can't escape DEFAULT_ROOT.parent via traversal.
     """
     effective_instance = instance if instance is not None else DEFAULT_INSTANCE
     if effective_instance in {"default", DEFAULT_INSTANCE}:
         return effective_instance, DEFAULT_ROOT
-    if not _INSTANCE_NAME_RE.fullmatch(effective_instance):
+    try:
+        safe = sanitize_profile_name(effective_instance)
+        return safe, DEFAULT_ROOT.parent / safe
+    except ValueError:
         return None
-    return effective_instance, DEFAULT_ROOT.parent / effective_instance
 
 
 def _now() -> str:
