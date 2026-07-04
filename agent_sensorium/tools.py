@@ -134,11 +134,14 @@ def handle_sensorium_status(
         config_path=config_path, state_dir=str(store.root),
     )
 
-    signals = store.read_jsonl("signals")
-    events = store.read_jsonl("events")
+    # Use fast O(n) binary counts for files we don't need to load fully
+    signal_count = store.count_jsonl("signals")
+    event_count = store.count_jsonl("events")
+    artifact_count = store.count_jsonl("artifacts")
+
+    # Load candidates and threads for filtering/sorting/top-N
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
-    artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
@@ -176,12 +179,12 @@ def handle_sensorium_status(
         "instance": instance,
         "state_dir": str(store.root),
         "counts": {
-            "signals": len(signals),
-            "events": len(events),
+            "signals": signal_count,
+            "events": event_count,
             "candidates": len(candidates),
             "active_candidates": len(active_candidates),
             "threads": len(threads),
-            "artifacts": len(artifacts),
+            "artifacts": artifact_count,
             "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
             "held_threads": len([t for t in threads if t.get("status") == "held"]),
             "closed_threads": len([t for t in threads if t.get("status") == "closed"]),

@@ -268,13 +268,15 @@ def runtime_heartbeat_sample(*, store) -> dict:
     counts: dict[str, int] = {}
     for name in ("signals", "events", "candidates", "threads"):
         try:
-            counts[name] = len(store.read_jsonl(name))
+            counts[name] = store.count_jsonl(name)
         except Exception:
             counts[name] = 0
 
     try:
         threads = store.read_jsonl("threads")
         pending_threads = sum(1 for t in threads if isinstance(t, dict) and t.get("status") == "dormant")
+        # Ensure 'threads' count is consistent with loaded threads if we just loaded it
+        counts["threads"] = len(threads)
     except Exception:
         pending_threads = 0
 
