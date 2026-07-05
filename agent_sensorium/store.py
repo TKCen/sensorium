@@ -1,5 +1,6 @@
 """JSONL-backed local state store for Agent Sensorium."""
 
+import collections
 import json
 import os
 import tempfile
@@ -238,22 +239,52 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
+    def count_jsonl(self, name: str) -> int:
+        """Fast O(N) line count using binary chunked reading (no JSON parsing)."""
+        path = self._resolve(name)
+        if not path.exists():
+            return 0
+        count = 0
+        last_char = b""
+        with open(path, "rb") as f:
+            # Use 1MB buffer for efficient counting of newlines
+            buf_size = 1024 * 1024
+            read_f = f.read
+            buf = read_f(buf_size)
+            while buf:
+                count += buf.count(b"\n")
+                last_char = buf[-1:]
+                buf = read_f(buf_size)
+        # Robust against missing trailing newline
+        if last_char and last_char != b"\n":
+            count += 1
+        return count
+
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
         path = self._resolve(name)
         if not path.exists():
             return []
         results: list[dict] = []
         with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
+            if limit is not None and limit > 0:
+                # Optimized tail read: only parse the last N lines
+                for line in collections.deque(f, maxlen=limit):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        results.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            else:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        results.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue  # skip corrupted lines
         return results
 
     def write_state(self, obj: dict) -> None:
