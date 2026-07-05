@@ -11,12 +11,16 @@ or allowed_surfaces beyond what the item already has.
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 
 from .gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
-from .schemas import SENSITIVITY_RANK, VALID_SENSITIVITIES, utc_now_iso
+from .schemas import (
+    SENSITIVITY_RANK,
+    VALID_SENSITIVITIES,
+    sanitize_profile_name,
+    utc_now_iso,
+)
 
 DEFAULT_ATTENTION_POLICY: dict = {
     "evidence_rules": {
@@ -257,36 +261,8 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
-# A Sensorium profile is a named runtime namespace (config + state) living in a
-# directory under the Sensorium state root. Internally the mechanism is the
-# "instance"; "profile" is the operator/agent-facing term. Profile names must be
-# safe directory names so they cannot traverse outside the state root.
-PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ACTIVE_PROFILE_MARKER = "active_profile.json"
 DEFAULT_STATE_ROOT = "~/.hermes/agent-sensorium"
-
-
-def sanitize_profile_name(name: str) -> str:
-    """Validate and return a safe profile (instance) name, else raise ValueError.
-
-    Rejects blank names, path traversal, separators, and leading dots so a
-    profile name can only ever address a direct child of the state root.
-    """
-    candidate = (name or "").strip()
-    if not candidate:
-        raise ValueError("profile name must not be blank")
-    if len(candidate) > 64:
-        raise ValueError("profile name must be at most 64 characters")
-    if candidate.startswith(".") or candidate in {".", ".."}:
-        raise ValueError(f"invalid profile name: {name!r}")
-    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
-        raise ValueError(f"invalid profile name: {name!r}")
-    if not PROFILE_NAME_RE.match(candidate):
-        raise ValueError(
-            "profile name may only contain letters, digits, '.', '_', '-': "
-            f"{name!r}"
-        )
-    return candidate
 
 
 def sensorium_state_root(base_dir: str | None = None) -> Path:
