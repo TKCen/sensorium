@@ -1,8 +1,10 @@
 """Pure helpers for IDs, timestamps, validation, and normalization."""
 
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SIGNAL_REQUIRED_FIELDS = {"sensor", "source", "kind", "summary"}
 VALID_SENSITIVITIES = {"local_only", "private", "public_safe"}
 VALID_SOURCES = {"manual", "hermes_session", "artifact", "feedback", "machine", "memory", "kanban"}
@@ -139,3 +141,26 @@ def intersect_allowed_surfaces(items: list[list[str]]) -> list[str]:
     for surfaces in items[1:]:
         result &= set(surfaces)
     return sorted(result)
+
+
+def sanitize_profile_name(name: str) -> str:
+    """Validate and return a safe profile (instance) name, else raise ValueError.
+
+    Rejects blank names, path traversal, separators, and leading dots so a
+    profile name can only ever address a direct child of the state root.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise ValueError("profile name must not be blank")
+    if len(candidate) > 64:
+        raise ValueError("profile name must be at most 64 characters")
+    if candidate.startswith(".") or candidate in {".", ".."}:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if not PROFILE_NAME_RE.match(candidate):
+        raise ValueError(
+            "profile name may only contain letters, digits, '.', '_', '-': "
+            f"{name!r}"
+        )
+    return candidate

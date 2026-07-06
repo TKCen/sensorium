@@ -12,6 +12,20 @@ def tmp_store(tmp_path):
     return store
 
 
+class TestConstructor:
+    def test_valid_instance(self):
+        store = SensoriumStore(instance="valid_name")
+        assert store.instance == "valid_name"
+
+    def test_invalid_instance_raises(self):
+        with pytest.raises(ValueError, match="invalid profile name"):
+            SensoriumStore(instance="../malicious")
+
+    def test_blank_instance_raises(self):
+        with pytest.raises(ValueError, match="must not be blank"):
+            SensoriumStore(instance=" ")
+
+
 class TestEnsureDirs:
     def test_creates_structure(self, tmp_path):
         store = SensoriumStore(instance="test", state_dir=str(tmp_path / "new"))
