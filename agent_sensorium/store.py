@@ -161,21 +161,7 @@ class SensoriumStore:
 
     def read_dampener_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "dampeners.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_path_jsonl(path, limit=limit)
 
     def append_blocker_effect(self, effect: dict) -> None:
         """Append-only audit trace of a blocker_effect record (inner_life/blockers.jsonl)."""
@@ -189,21 +175,7 @@ class SensoriumStore:
 
     def read_blocker_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "blockers.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_path_jsonl(path, limit=limit)
 
     def read_sensor_policy(self) -> dict:
         path = self._root / "sensors" / "policy.json"
@@ -238,22 +210,51 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
-    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+    def count_jsonl(self, name: str) -> int:
+        """Fast binary newline counting for large append-only JSONL files."""
         path = self._resolve(name)
         if not path.exists():
+            return 0
+        count = 0
+        last_char = None
+        with open(path, "rb") as f:
+            while True:
+                buf = f.read(1024 * 1024)
+                if not buf:
+                    break
+                count += buf.count(b"\n")
+                last_char = buf[-1]
+        # Robustness: count the last line if it doesn't end with a newline
+        if last_char is not None and last_char != 10:  # 10 is \n
+            count += 1
+        return count
+
+    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        return self._read_path_jsonl(self._resolve(name), limit=limit)
+
+    def _read_path_jsonl(self, path: Path, limit: int | None = None) -> list[dict]:
+        """Optimized trailing read to skip JSON parsing for unneeded lines."""
+        if not path.exists():
             return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
+
+        from collections import deque
+
+        with open(path, "r") as f:
+            # Use deque(maxlen) on the file object for efficient tail reading
+            if limit is not None:
+                lines = deque(f, maxlen=limit)
+            else:
+                lines = f
+
+            results: list[dict] = []
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
-                    continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
+                    continue
         return results
 
     def write_state(self, obj: dict) -> None:

@@ -134,20 +134,19 @@ def handle_sensorium_status(
         config_path=config_path, state_dir=str(store.root),
     )
 
-    signals = store.read_jsonl("signals")
-    events = store.read_jsonl("events")
+    signals_count = store.count_jsonl("signals")
+    events_count = store.count_jsonl("events")
+    artifacts_count = store.count_jsonl("artifacts")
+
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
-    artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
     active_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
 
-    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
-    visible_threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
-
     active_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
+    visible_threads = sorted(active_threads, key=lambda t: t.get("created_at", ""), reverse=True)
     now_ts = utc_now_iso()
     dirty_count = sum(1 for t in active_threads if t.get("dirty_since"))
     expiring_count = 0
@@ -176,12 +175,12 @@ def handle_sensorium_status(
         "instance": instance,
         "state_dir": str(store.root),
         "counts": {
-            "signals": len(signals),
-            "events": len(events),
+            "signals": signals_count,
+            "events": events_count,
             "candidates": len(candidates),
             "active_candidates": len(active_candidates),
             "threads": len(threads),
-            "artifacts": len(artifacts),
+            "artifacts": artifacts_count,
             "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
             "held_threads": len([t for t in threads if t.get("status") == "held"]),
             "closed_threads": len([t for t in threads if t.get("status") == "closed"]),

@@ -151,26 +151,33 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    """Optimized trailing read for plain JSONL files without full loading."""
     if not path.exists():
         return []
+
+    from collections import deque
+
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        with open(path, "r", errors="ignore") as f:
+            if limit is not None:
+                lines = deque(f, maxlen=limit)
+            else:
+                lines = f
+
+            rows: list[dict[str, Any]] = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        rows.append(value)
+                except Exception:
+                    continue
+            return rows
     except Exception:
         return []
-    if limit is not None:
-        lines = lines[-limit:]
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-    return rows
 
 
 def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
@@ -188,30 +195,37 @@ def _metrics_snapshot(limit: int = 144) -> dict[str, Any]:
 
 
 def _read_jsonl(root: Path, name: str, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
+    """Optimized trailing read for Sensorium JSONL states."""
     rel = STATE_NAMES[name]
     path = root / rel
     if not path.exists():
         return [], 0
+
+    from collections import deque
+
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        with open(path, "r", errors="ignore") as f:
+            if limit is not None:
+                lines = deque(f, maxlen=limit)
+            else:
+                lines = f
+
+            rows: list[dict[str, Any]] = []
+            bad = 0
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        rows.append(value)
+                except Exception:
+                    bad += 1
+                    continue
+            return rows, bad
     except Exception:
         return [], 0
-    if limit is not None:
-        lines = lines[-limit:]
-    rows: list[dict[str, Any]] = []
-    bad = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            bad += 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-    return rows, bad
 
 
 def _mtime(path: Path) -> str | None:
