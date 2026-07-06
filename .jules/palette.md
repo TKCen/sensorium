@@ -1,0 +1,3 @@
+## 2025-05-14 - Standardizing textual cues and quotes
+**Learning:** Standardizing quote style (from curly ‘ ’ or “ ” to straight " ") in agent invitations and context pointers improves copy-paste usability for operators and ensures consistent command parsing by LLMs. Emojis (🧠, 🧵, ✨) serve as effective visual anchors in text-only context injections, allowing operators to quickly distinguish between system-level metadata and human-facing invitations.
+**Action:** Always prefer straight quotes for executable commands or text-matching patterns in invitations. Use established project emojis as visual cues for different attention-pipeline stages (🧠 for Sensorium header, 🧵 for conscious threads, ✨ for candidate salience).
