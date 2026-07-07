@@ -1,6 +1,5 @@
 
 import pytest
-from pathlib import Path
 from agent_sensorium.store import SensoriumStore
 
 def test_sensorium_store_traversal_rejected():
