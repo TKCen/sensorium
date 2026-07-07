@@ -1,0 +1,3 @@
+## 2025-05-15 - Standardizing Quote Style and Visual Cues in Agent Invitations
+**Learning:** Standardizing quote style (from curly ‘ ’ or “ ” to straight " ") in CLI invitations and context pointers improves copy-paste usability and ensures consistent LLM command parsing. Using emojis (🧠, 🧵, ✨) as distinct visual cues helps humans quickly distinguish between system notifications and natural conversation.
+**Action:** Always prefer straight double quotes for commands in human-facing strings and use consistent emojis for specific system concepts (Brain for Sensorium, Thread for threads, Sparkles for salience).
