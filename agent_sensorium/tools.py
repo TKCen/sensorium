@@ -134,11 +134,8 @@ def handle_sensorium_status(
         config_path=config_path, state_dir=str(store.root),
     )
 
-    signals = store.read_jsonl("signals")
-    events = store.read_jsonl("events")
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
-    artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
@@ -176,12 +173,12 @@ def handle_sensorium_status(
         "instance": instance,
         "state_dir": str(store.root),
         "counts": {
-            "signals": len(signals),
-            "events": len(events),
+            "signals": store.count_jsonl("signals"),
+            "events": store.count_jsonl("events"),
             "candidates": len(candidates),
             "active_candidates": len(active_candidates),
             "threads": len(threads),
-            "artifacts": len(artifacts),
+            "artifacts": store.count_jsonl("artifacts"),
             "dormant_threads": len([t for t in threads if t.get("status") == "dormant"]),
             "held_threads": len([t for t in threads if t.get("status") == "held"]),
             "closed_threads": len([t for t in threads if t.get("status") == "closed"]),
@@ -216,9 +213,9 @@ def handle_sensorium_status(
         "ts": utc_now_iso(),
     }
 
-    decisions = store.read_jsonl("decisions")
+    decisions = store.read_jsonl("decisions", limit=1)
     if decisions:
-        latest = decisions[-1]
+        latest = decisions[0]
         data["latest_decision"] = {
             "ts": latest.get("ts"),
             "type": latest.get("type"),
