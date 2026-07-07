@@ -16,9 +16,9 @@ from agent_sensorium.config import (
     load_instance_config,
     profile_state_dir,
     read_active_profile,
-    sanitize_profile_name,
     write_active_profile,
 )
+from agent_sensorium.schemas import sanitize_profile_name
 from agent_sensorium.tools import handle_sensorium_profile
 
 
