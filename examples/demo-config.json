@@ -22,7 +22,7 @@
   ],
   "thread_ttl_hours": 168,
   "default_actor": "background_conscious",
-  "subconscious_profile": "subconscious_worker",
+  "subconscious_profile": "serasubconscious",
   "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
   "tts": {
     "base_url": "http://127.0.0.1:8892/v1",

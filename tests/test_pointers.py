@@ -5,6 +5,7 @@ import json
 from agent_sensorium.pointers import (
     handle_pointer_pre_llm,
     pointer_context_for_llm,
+    record_pointer_presented,
     select_attention_pointer,
 )
 from agent_sensorium.schemas import truncate_text
@@ -64,6 +65,15 @@ def _write_config(state_dir, surfaces=None, max_sensitivity="private"):
     path.write_text(json.dumps(config))
 
 
+def _messages_for_user_turn(turn_index: int, text: str) -> list[dict]:
+    messages: list[dict] = []
+    for idx in range(1, turn_index + 1):
+        messages.append({"role": "user", "content": text if idx == turn_index else f"earlier turn {idx}"})
+        if idx != turn_index:
+            messages.append({"role": "assistant", "content": f"assistant reply {idx}"})
+    return messages
+
+
 def test_pointer_requires_allowed_surface(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
@@ -92,12 +102,16 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
     )
     assert first is not None
     assert "[Sensorium Pointer]" in first["context"]
-    assert "Conscious thread: sth_testpointer" in first["context"]
+    assert "Pointer type: thread — sth_testpointer" in first["context"]
     assert "If the user says" in first["context"]
     assert "sensorium(action=\"open\"" in first["context"]
     assert "surface=\"discord\"" in first["context"]
     assert "id=\"sth_testpointer\"" in first["context"]
     assert "Do not reveal capsule content unless opened" in first["context"]
+    # Honest copy: a thread pointer must say so explicitly; never claim a
+    # thread exists for a candidate pointer.
+    assert "conscious thread waiting" in first["context"].lower()
+    assert "NOT an openable thread" not in first["context"]
 
     receipts = store.read_jsonl("decisions")
     assert len(receipts) == 1
@@ -111,7 +125,7 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
         state_dir=str(tmp_path),
     )
     assert second is not None
-    assert "Conscious thread: sth_testpointer" in second["context"]
+    assert "Pointer type: thread — sth_testpointer" in second["context"]
 
     receipts = store.read_jsonl("decisions")
     assert len(receipts) == 2
@@ -119,9 +133,10 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
 
 def test_pointer_context_is_door_handle_not_capsule():
     pointer = {
+        "pointer_type": "thread",
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "I have something for you: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": "I have a conscious thread waiting: A small title. Say ‘take it up’ if you want me to open it.",
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
@@ -129,6 +144,9 @@ def test_pointer_context_is_door_handle_not_capsule():
     assert "take it up" in context
     assert "sensorium(action=\"open\"" in context
     assert "sth_x" in context
+    # Honest wording: thread pointer must NOT be confused with candidate.
+    assert "Pointer type: thread" in context
+    assert "NOT an openable thread" not in context
 
 
 def test_candidate_fallback_pointer_when_no_threads(tmp_path):
@@ -141,22 +159,30 @@ def test_candidate_fallback_pointer_when_no_threads(tmp_path):
     assert pointer["action"] == "pointer_available"
     assert pointer["pointer_type"] == "candidate"
     assert pointer["candidate_id"] == "cand_livepointer"
-    assert "I have something for you" in pointer["invitation"]
+    assert "I have a salience candidate" in pointer["invitation"]
+    # Honest copy: the candidate pointer must never claim to be a thread.
+    assert "not an openable thread" in pointer["invitation"].lower()
 
 
-def test_candidate_pointer_context_uses_status_not_thread_open():
+def test_candidate_pointer_context_uses_exact_candidate_open_not_rotating_status():
     pointer = {
         "pointer_type": "candidate",
         "candidate_id": "cand_x",
         "title": "Live salience",
         "surface": "discord",
-        "invitation": "I have something for you: Live salience.",
+        "invitation": "I have a salience candidate waiting (not an openable thread): Live salience.",
     }
     context = pointer_context_for_llm(pointer)
-    assert "Candidate salience: cand_x" in context
-    assert "sensorium(action=\"status\"" in context
-    assert "sensorium(action=\"open\"" not in context
+    assert "Pointer type: candidate" in context
+    assert "cand_x" in context
+    # Direction: use exact candidate id. Calling status after pointer receipt can
+    # rotate to a different candidate/residue and mismatch the doorway.
+    assert 'sensorium(action="open", surface="discord", id="cand_x")' in context
+    assert "do not switch to a different status pointer" in context
+    # Honest: the candidate context must not say it is a thread.
     assert "Do not mark it reviewed merely because it was shown" in context
+    assert "NOT an openable thread" in context
+    assert "no openable thread" in context
 
 
 def test_candidate_pointer_records_candidate_cooldown_receipt(tmp_path):
@@ -170,9 +196,11 @@ def test_candidate_pointer_records_candidate_cooldown_receipt(tmp_path):
         platform="discord",
         session_id="session-1",
         state_dir=str(tmp_path),
+        current_text="take a look",
     )
     assert first is not None
-    assert "Candidate salience: cand_livepointer" in first["context"]
+    assert "Pointer type: candidate" in first["context"]
+    assert "cand_livepointer" in first["context"]
 
     receipts = store.read_jsonl("decisions")
     assert len(receipts) == 1
@@ -252,6 +280,290 @@ def test_truncate_text_avoids_mid_word_guillotine():
     assert out.endswith("…")
     assert "continuit…" not in out
     assert len(out) <= 62
+
+
+def test_pointer_presented_receipt_keeps_subject_signature(tmp_path):
+    """A valid pointer receipt records the exact subject kind/id and displayed title."""
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
+
+    pointer = select_attention_pointer(store, surface="discord")
+    receipt = record_pointer_presented(store, pointer, session_id="s1", surface="discord")
+
+    assert receipt["type"] == "pointer.presented"
+    assert receipt["pointer_type"] == "candidate"
+    assert receipt["subject_kind"] == "candidate"
+    assert receipt["subject_id"] == "cand_livepointer"
+    assert receipt["presented_title"] == pointer["title"]
+
+
+def test_pointer_presented_guard_blocks_title_mismatch(tmp_path):
+    """Wrong displayed subject text writes a guard event instead of cooldown receipt."""
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
+
+    pointer = select_attention_pointer(store, surface="discord")
+    pointer["title"] = "Different residue from status rotation"
+    receipt = record_pointer_presented(store, pointer, session_id="s1", surface="discord")
+
+    assert receipt["type"] == "pointer.presented.guard"
+    assert receipt["outcome"] == "blocked"
+    assert receipt["reason"] == "candidate_title_mismatch"
+    assert receipt["subject_id"] == "cand_livepointer"
+    assert "Sebastian misses small private presents" in receipt["expected_title"]
+
+
+def test_pointer_presented_guard_blocks_saved_residue_without_settlement(tmp_path):
+    """A saved_residue pointer must point to a row with durable Kanban linkage."""
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(
+        status="archived",
+        allowed_surfaces=["discord"],
+        kanban_settlement={},
+    ))
+
+    pointer = {
+        "action": "pointer_available",
+        "pointer_type": "saved_residue",
+        "candidate_id": "cand_livepointer",
+        "title": "Sebastian misses small private presents and wants salience left open for later",
+        "surface": "discord",
+    }
+    receipt = record_pointer_presented(store, pointer, session_id="s1", surface="discord")
+
+    assert receipt["type"] == "pointer.presented.guard"
+    assert receipt["reason"] == "saved_residue_settlement_missing"
+
+
+def test_candidate_pointer_suppressed_before_render_when_not_relevant(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.82))
+
+    result = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+    )
+
+    assert result is None
+    receipts = store.read_jsonl("decisions")
+    assert len(receipts) == 1
+    assert receipts[0]["type"] == "pointer.suppressed"
+    assert receipts[0]["pointer_type"] == "candidate"
+    assert receipts[0]["reason"] == "relevance_gate"
+    assert receipts[0]["candidate_id"] == "cand_livepointer"
+
+
+def test_high_urgency_candidate_pointer_can_still_inject_without_user_text(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.96))
+
+    result = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+    )
+
+    assert result is not None
+    assert "Pointer type: candidate" in result["context"]
+    receipts = store.read_jsonl("decisions")
+    assert receipts[-1]["type"] == "pointer.presented"
+    assert receipts[-1]["foreground_turn_index"] == 1
+
+
+def test_saved_residue_pointer_requires_explicit_pathway_or_relevance(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(
+        allowed_surfaces=["discord"],
+        status="archived",
+        pressure=0.61,
+        kanban_settlement={
+            "decision": "SAVE",
+            "intake_task_id": "kt_saved_1",
+            "review_task_id": "kt_saved_review_1",
+            "settled_at": "2026-06-10T05:41:00Z",
+            "reason_label": "saved-residue-test",
+        },
+    ))
+
+    blocked = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+    )
+    assert blocked is None
+
+    opened = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-b",
+        state_dir=str(tmp_path),
+        current_text="please check saved residue",
+        config={"cooldown_minutes": 0},
+    )
+    assert opened is not None
+    assert "Pointer type: saved_residue" in opened["context"]
+
+
+def test_candidate_pointer_min_turn_gap_uses_user_turn_index_not_pointer_count(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.96))
+
+    turn_1 = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+    assert turn_1 is not None
+
+    turn_2 = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(2, "another general check-in"),
+    )
+    assert turn_2 is None
+
+    turn_4 = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(4, "Sebastian private presents still matter"),
+    )
+    assert turn_4 is not None
+    assert "Pointer type: candidate" in turn_4["context"]
+
+    receipts = store.read_jsonl("decisions")
+    assert [r["type"] for r in receipts] == [
+        "pointer.presented",
+        "pointer.suppressed",
+        "pointer.presented",
+    ]
+    assert receipts[0]["foreground_turn_index"] == 1
+    assert receipts[1]["reason"] == "min_turn_gap"
+    assert receipts[1]["foreground_turn_index"] == 2
+    assert receipts[2]["foreground_turn_index"] == 4
+
+
+def test_max_cards_per_turn_counts_only_same_foreground_turn(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.96))
+
+    turn_1 = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0, "min_turn_gap": 0},
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+    assert turn_1 is not None
+
+    turn_1_retry = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0, "min_turn_gap": 0},
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+    assert turn_1_retry is None
+
+    turn_2 = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0, "min_turn_gap": 0},
+        messages=_messages_for_user_turn(2, "general check-in again"),
+    )
+    assert turn_2 is not None
+
+    receipts = store.read_jsonl("decisions")
+    assert [r["type"] for r in receipts] == [
+        "pointer.presented",
+        "pointer.suppressed",
+        "pointer.presented",
+    ]
+    assert receipts[1]["reason"] == "max_cards_per_turn"
+    assert receipts[1]["foreground_turn_index"] == 1
+    assert receipts[2]["foreground_turn_index"] == 2
+
+
+def test_explicit_request_bypass_still_works(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.4))
+
+    result = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        current_text="please take a look at the sensorium inbox",
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(1, "please take a look at the sensorium inbox"),
+    )
+
+    assert result is not None
+    assert "Pointer type: candidate" in result["context"]
+    receipts = store.read_jsonl("decisions")
+    assert receipts[-1]["type"] == "pointer.presented"
+
+
+def test_openable_thread_pointer_bypasses_non_openable_budget(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+
+    first = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+    second = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert "Pointer type: thread" in second["context"]
+    receipts = store.read_jsonl("decisions")
+    assert [r["type"] for r in receipts] == ["pointer.presented", "pointer.presented"]
 
 
 class TestPointerPolicyUnification:

@@ -126,7 +126,7 @@ These fields have safe generic defaults and are dormant until configured:
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `default_actor` | `"background_conscious"` | Actor identifier for the deprecated background-conscious lease lane |
-| `subconscious_profile` | `"subconscious_worker"` | The cheap reviewer profile name the bridge assigns intake to |
+| `subconscious_profile` | `"serasubconscious"` | The Hermes profile name the bridge assigns intake to (must be a real dispatcher profile) |
 | `tick_quiet_filename` | `"sensorium_tick_quiet.latest.json"` | Dashboard quiet-tick freshness file name |
 | `tts` | see below | Local TTS/talking-head sidecar config — dormant until `sidecar_base`/`control_command` are set |
 

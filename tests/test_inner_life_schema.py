@@ -8,6 +8,7 @@ from agent_sensorium.inner_life import (
     InnerLifeValidationError,
     load_block_registry_v2,
     load_inner_life_config,
+    signal_inbox_lineage_violations,
     validate_edge_registry,
     validate_policy,
 )
@@ -295,7 +296,7 @@ def test_store_sidecars_load_with_validation(tmp_path):
             "version": 2,
             "blocks": {
                 "sensor_a": {"type": "sensor", "enabled": True},
-                "review_a": {"type": "consciousness_review", "enabled": True},
+                "signal_inbox": {"type": "aggregator", "enabled": True},
             },
         }
     )
@@ -306,8 +307,8 @@ def test_store_sidecars_load_with_validation(tmp_path):
                 {
                     "id": "edge_a",
                     "from": "sensor_a",
-                    "to": "review_a",
-                    "kind": "opens_review",
+                    "to": "signal_inbox",
+                    "kind": "emits",
                 }
             ],
         }
@@ -316,8 +317,72 @@ def test_store_sidecars_load_with_validation(tmp_path):
 
     loaded = load_inner_life_config(store)
     assert loaded["registry"]["blocks"]["sensor_a"]["type"] == "sensor"
-    assert loaded["edges"]["edges"][0]["kind"] == "opens_review"
+    assert loaded["edges"]["edges"][0]["kind"] == "emits"
     assert loaded["policy"]["caps"]["max_graph_nodes"] == 10
+
+
+def test_enabled_emitting_sensors_require_signal_inbox_lineage():
+    registry = load_block_registry_v2(
+        {
+            "version": 2,
+            "blocks": {
+                "provider_budget": {"type": "sensor", "enabled": True},
+                "signal_inbox": {"type": "aggregator", "enabled": True},
+                "non_emitting_probe": {"type": "sensor", "enabled": True, "emits_signals": False},
+                "paused_sensor": {"type": "sensor", "enabled": False},
+            },
+        }
+    )
+    edges = validate_edge_registry(
+        {
+            "version": 1,
+            "edges": [
+                {
+                    "id": "non_emitting_probe_internal_edge",
+                    "from": "non_emitting_probe",
+                    "to": "provider_budget",
+                    "kind": "routes_to",
+                    "enabled": True,
+                }
+            ],
+        },
+        known_blocks=set(registry["blocks"]),
+    )
+
+    violations = signal_inbox_lineage_violations(registry, edges)
+
+    assert violations == [
+        {
+            "sensor": "provider_budget",
+            "reason": "missing_signal_inbox_lineage",
+            "required_target": "signal_inbox",
+        }
+    ]
+
+
+def test_enabled_emitting_sensors_accept_indirect_signal_inbox_lineage():
+    registry = load_block_registry_v2(
+        {
+            "version": 2,
+            "blocks": {
+                "provider_budget": {"type": "sensor", "enabled": True},
+                "budget_normalizer": {"type": "normalizer", "enabled": True},
+                "signal_inbox": {"type": "aggregator", "enabled": True},
+            },
+        }
+    )
+    edges = validate_edge_registry(
+        {
+            "version": 1,
+            "edges": [
+                {"id": "budget_to_normalizer", "from": "provider_budget", "to": "budget_normalizer", "kind": "emits"},
+                {"id": "normalizer_to_inbox", "from": "budget_normalizer", "to": "signal_inbox", "kind": "aggregates_into"},
+            ],
+        },
+        known_blocks=set(registry["blocks"]),
+    )
+
+    assert signal_inbox_lineage_violations(registry, edges) == []
 
 
 def test_runtime_sensor_registry_can_read_v2_sensor_blocks(tmp_path):

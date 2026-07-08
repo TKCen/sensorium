@@ -70,6 +70,33 @@ def test_topology_exposes_configured_nodes_with_zero_runtime_history(tmp_path, m
     assert data["meta"]["privacy"] == "compact_only"
 
 
+def test_topology_flags_enabled_sensor_missing_signal_inbox_lineage(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(
+        root,
+        blocks={
+            "provider_budget": {"type": "sensor", "status": "active", "enabled": True},
+            "signal_inbox": {"type": "aggregator", "status": "active", "enabled": True},
+        },
+        edges=[],
+    )
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.topology(instance="demo"))
+
+    lineage = data["meta"]["signal_inbox_lineage"]
+    assert lineage["ok"] is False
+    assert lineage["violation_count"] == 1
+    assert lineage["violations"] == [
+        {
+            "sensor": "provider_budget",
+            "node_id": "sensor:provider_budget",
+            "reason": "missing_signal_inbox_lineage",
+            "required_target": "signal_inbox",
+        }
+    ]
+
+
 def test_topology_config_version_changes_with_fixture_content(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     _write_registry(root, blocks={"runtime_heartbeat": {"type": "sensor", "status": "active"}}, edges=[])

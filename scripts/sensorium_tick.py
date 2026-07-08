@@ -37,6 +37,7 @@ from agent_sensorium.sensors import (
     classify_machine_network_pressure,
     classify_machine_process_pressure,
     classify_media_capacity,
+    classify_provider_budget_pressure,
     classify_tts_sidecar_pressure,
     codex_usage_sample,
     hindsight_pressure_sample,
@@ -45,6 +46,7 @@ from agent_sensorium.sensors import (
     machine_network_pressure_sample,
     machine_process_pressure_sample,
     media_capacity_sample,
+    provider_budget_sample,
     runtime_heartbeat_sample,
     tts_sidecar_pressure_sample,
 )
@@ -98,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tts-sidecar-pressure", action="store_true", help="Sample Chatterbox TTS timeout/liveness cue signals")
     parser.add_argument("--media-capacity", action="store_true", help="Sample almost-idle local media gift capacity")
     parser.add_argument("--codex-usage", action="store_true", help="Sample Codex/OpenAI subscription usage pressure")
+    parser.add_argument("--provider-budget", action="store_true", help="Sample paid-stack provider subscription budget pressure")
     parser.add_argument(
         "--heartbeat", action="store_true",
         help="Emit a compact deterministic runtime heartbeat signal (state-dir/registry/pending health)",
@@ -169,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         "tts_sidecar_pressure": args.tts_sidecar_pressure,
         "media_capacity": args.media_capacity,
         "codex_usage": args.codex_usage,
+        "provider_budget": args.provider_budget,
         "heartbeat": args.heartbeat,
     }
     selected_sensors: set[str] = {name for name, enabled in legacy_flag_names.items() if enabled}
@@ -195,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "tts_sidecar_pressure": (tts_sidecar_pressure_sample, classify_tts_sidecar_pressure),
         "media_capacity": (media_capacity_sample, classify_media_capacity),
         "codex_usage": (codex_usage_sample, classify_codex_usage_pressure),
+        "provider_budget": (provider_budget_sample, classify_provider_budget_pressure),
     }
 
     try:

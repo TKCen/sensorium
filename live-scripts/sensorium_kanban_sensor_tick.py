@@ -37,7 +37,10 @@ INSTANCE = (
     or "default"
 )
 BOARD = os.environ.get("SENSORIUM_KANBAN_BOARD", "sensorium")
-PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "subconscious_worker")
+# Default to the real `serasubconscious` Hermes profile so newly minted intake
+# rows are claimable by the dispatcher. Override with SENSORIUM_SUBCONSCIOUS_PROFILE
+# only when running against a deployment-specific reviewer profile.
+PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "serasubconscious")
 
 # Resolve the package root without hardcoding a private checkout path. Prefer the
 # repository copy that ships alongside this script (``<repo>/agent_sensorium``);
@@ -546,7 +549,12 @@ def _active_reviews(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _active_conscious(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    active_status = {"ready", "running", "todo", "blocked"}
+    # Only executable Conscious rows should pause new
+    # Subconscious batch creation. Blocked Conscious rows are often deliberate
+    # holds, manual gates, or legacy backlog; ``todo`` rows are usually
+    # dependency-gated children. Counting either here starves fresh
+    # sensor:intake review indefinitely.
+    active_status = {"ready", "running"}
     return [
         t
         for t in tasks

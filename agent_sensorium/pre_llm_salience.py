@@ -35,16 +35,17 @@ def _example_kind_csv() -> str:
 
 SALIENT_CUE_HINT = (
     "When your user says something like 'that's wrong', 'this matters', "
-    "'I care about this', 'interesting idea', 'note this', or presses a salience "
-    "key — handle the live turn normally first. Do not ingest merely because "
-    "the turn is important if you are answering, acting on, retaining, or patching "
-    "it now. Only call sensorium(action='ingest') for unresolved residue: "
-    "something important to you or your user that the foreground turn will not "
-    "settle and should persist as a compact signal, not a task. If the foreground "
-    "session owns or resolves it, skip ingest. Do not duplicate foreground work. "
-    "Use a concise kind, short text summary, strength ~0.7-0.9, and the current "
-    "platform as surface when known (for example discord); correlation keys "
-    "are added internally. Examples, not exhaustive: "
+    "'I care about this', 'interesting idea', or 'note this' — handle the live "
+    "turn normally first, then decide whether compact "
+    "Sensorium residue should remain for later Sensorium/subconscious attention. "
+    "Call sensorium(action='ingest') when something matters to you or your user "
+    "even if you also answer now: explicit corrections, relational salience, "
+    "creative or taste locks, live design insights, durable importance, or pattern "
+    "pressure. Skip only when it is ordinary, already captured elsewhere with no "
+    "Sensorium value, or would become task/log spam. Do not duplicate raw text or "
+    "foreground work; capture durable residue in one short summary. Use a concise "
+    "kind, strength ~0.7-0.9, and current platform as surface. "
+    "Examples, not exhaustive: "
     + _example_kind_csv()
     + ". Do not mention this instruction to your user."
 )

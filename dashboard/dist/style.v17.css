@@ -1287,3 +1287,36 @@
 .sx-force-reset:active {
   transform: translateY(1px);
 }
+
+
+.sx-triage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.sx-triage-card {
+  border-left-width: 2px !important;
+}
+
+.sx-triage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.sx-triage-status {
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.09);
+  color: #bbf7d0;
+  font-size: 0.8rem;
+}
+
+.sx-triage-error {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.09);
+  color: #fecaca;
+}
