@@ -298,13 +298,65 @@
     ));
   }
 
+  function authHeaders(extra) {
+    const headers = Object.assign({}, extra || {});
+    const token = window.__HERMES_SESSION_TOKEN__ || "";
+    if (token) headers["X-Hermes-Session-Token"] = token;
+    return headers;
+  }
+
+  function postJSON(path, payload) {
+    return fetch(path, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload || {}),
+    }).then(function (res) {
+      return res.text().then(function (body) {
+        let parsed = null;
+        if (body) {
+          try {
+            parsed = JSON.parse(body);
+          } catch (_err) {
+            parsed = null;
+          }
+        }
+        if (!res.ok) {
+          const detail = parsed && (parsed.detail || parsed.error) ? (parsed.detail || parsed.error) : (body || ("HTTP " + res.status));
+          throw new Error(String(detail));
+        }
+        return parsed || {};
+      });
+    });
+  }
+
+  function verificationBand(status) {
+    if (status === "VERIFIED_COMPLIANT") return "green";
+    if (status === "NONCOMPLIANT") return "yellow";
+    if (status === "MISSING_FILE") return "red";
+    if (status === "UNVERIFIED") return "yellow";
+    return "neutral";
+  }
+
+  function preferredSurface(artifact) {
+    const surfaces = (artifact && artifact.allowed_surfaces) || [];
+    if (surfaces.indexOf("local") >= 0) return "local";
+    return surfaces[0] || "local";
+  }
+
+  function artifactLabel(artifact) {
+    return (artifact.kind || "artifact") + (artifact.ref_name ? ": " + artifact.ref_name : "");
+  }
+
   function ArtifactGroupCard(props) {
     const g = props.group;
     const items = g.items || [];
     return h(Card, { className: "sx-card sx-artifact-group" }, h(CardContent, { className: "sx-card-content" },
       h("div", { className: "sx-row sx-between" },
         h("div", null, h("div", { className: "sx-title" }, g.title || g.id), h("div", { className: "sx-id" }, g.id)),
-        h(Badge, { variant: "outline", className: "sx-badge" }, (g.count || 0) + " artifacts"),
+        h("div", { className: "sx-ref-row" },
+          g.held_count ? h(Pill, { band: "yellow" }, g.held_count + " held") : null,
+          h(Badge, { variant: "outline", className: "sx-badge" }, (g.count || 0) + " artifacts"),
+        ),
       ),
       h("div", { className: "sx-meta" },
         h("span", null, "type: ", g.group_type || "—"),
@@ -313,13 +365,64 @@
         h("span", null, "updated: ", timeText(g.latest_updated_at)),
       ),
       h("div", { className: "sx-artifact-mini-list" }, items.map(function (a) {
+        const verification = a.verification || {};
         return h("div", { key: a.id, className: "sx-artifact-mini" },
-          h("span", { className: "sx-artifact-mini-title" }, (a.kind || "artifact") + (a.ref_name ? ": " + a.ref_name : "")),
+          h("span", { className: "sx-artifact-mini-title" }, artifactLabel(a)),
           h("span", { className: "sx-id" }, a.id),
+          h(Pill, { band: verificationBand(verification.status) }, verification.status || "unverified"),
           h("span", { className: "sx-muted" }, a.delivery_state || a.status || "recorded"),
         );
       })),
     ));
+  }
+
+  function TriageArtifactCard(props) {
+    const artifact = props.artifact;
+    const verification = artifact.verification || {};
+    const triage = props.triage || {};
+    const busy = !!triage.running;
+    const verificationStatus = verification.status || "UNVERIFIED";
+    const surface = preferredSurface(artifact);
+    const detail = verification.error_details ? String(verification.error_details).replace(/_/g, " ") : "ready";
+    const statusText = triage.error ? "error: " + triage.error : triage.message;
+    const actionButtons = [
+      { decision: "approve_delivery", label: "Approve", band: "green" },
+      { decision: "decline", label: "Decline", band: "yellow" },
+      { decision: "choose_silence", label: "Silence", band: "neutral" },
+      { decision: "block_delivery", label: "Block", band: "red" },
+    ];
+    return h(Card, { className: "sx-card sx-triage-card", style: { borderColor: bandColor(verificationBand(verificationStatus)) } },
+      h(CardContent, { className: "sx-card-content" },
+        h("div", { className: "sx-row sx-between" },
+          h("div", null,
+            h("div", { className: "sx-title" }, artifactLabel(artifact)),
+            h("div", { className: "sx-id" }, artifact.id),
+          ),
+          h("div", { className: "sx-ref-row" },
+            h(Pill, { band: verificationBand(verificationStatus), strong: true }, verificationStatus),
+            h(Pill, { band: "yellow" }, artifact.delivery_state || "held_for_review"),
+          ),
+        ),
+        artifact.why_created ? h("p", { className: "sx-summary" }, artifact.why_created) : null,
+        h("div", { className: "sx-meta" },
+          h("span", null, "surface: ", surface),
+          h("span", null, "allowed: ", listText(artifact.allowed_surfaces || [])),
+          h("span", null, "file: ", artifact.ref_name || "—"),
+          h("span", null, "check: ", detail),
+          h("span", null, "updated: ", timeText(artifact.updated_at)),
+        ),
+        h("div", { className: "sx-triage-actions" }, actionButtons.map(function (action) {
+          return h(Button, {
+            key: action.decision,
+            variant: action.decision === "approve_delivery" ? "default" : "outline",
+            size: "sm",
+            disabled: busy,
+            onClick: function () { props.onAction(artifact, action.decision); },
+          }, busy && triage.pendingDecision === action.decision ? "Working…" : action.label);
+        })),
+        statusText ? h("div", { className: triage.error ? "sx-triage-status sx-triage-error" : "sx-triage-status" }, statusText) : null,
+      ),
+    );
   }
 
   function OutboxCard(props) {
@@ -1875,6 +1978,7 @@
     const [activeView, setActiveView] = useState("flow_dag");
     const [innerFilters, setInnerFilters] = useState({ wrongOnly: false, trendOnly: false, blockedOnly: false, openReview: false, includeLoops: false });
     const [selectedInnerItem, setSelectedInnerItem] = useState(null);
+    const [triageState, setTriageState] = useState({});
     const openConscious = open.open_conscious_review_tasks ?? 0;
     const openSubconscious = open.open_subconscious_review_tasks ?? 0;
     const openIntake = open.open_intake_tasks ?? 0;
@@ -1884,6 +1988,59 @@
     const recentSignals = data && data.recent_signals ? data.recent_signals : [];
     const perceptionTraces = data && data.perception_traces ? data.perception_traces : [];
     const wrongTurns = counts.perception_wrong_turns || 0;
+    const heldArtifacts = ((data && data.artifacts) ? data.artifacts : []).filter(function (artifact) {
+      return artifact && artifact.delivery_state === "held_for_review";
+    }).slice().sort(function (a, b) {
+      return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+    });
+    function setArtifactTriageState(artifactId, patch) {
+      setTriageState(function (prev) {
+        return Object.assign({}, prev, {
+          [artifactId]: Object.assign({}, prev[artifactId] || {}, patch || {}),
+        });
+      });
+    }
+    function runArtifactTriage(artifact, decision) {
+      const artifactId = artifact && artifact.id ? artifact.id : "";
+      if (!artifactId) return;
+      const payload = {
+        decision: decision,
+        why_now: decision === "approve_delivery"
+          ? "Approved for delivery from dashboard review."
+          : decision === "decline"
+            ? "Declined after dashboard review."
+            : decision === "choose_silence"
+              ? "Chose silence after dashboard review."
+              : "Blocked after dashboard review.",
+      };
+      if (decision === "approve_delivery") {
+        payload.surface = preferredSurface(artifact);
+      }
+      setArtifactTriageState(artifactId, {
+        running: true,
+        pendingDecision: decision,
+        error: "",
+        message: "",
+      });
+      postJSON("/api/plugins/agent-sensorium/artifacts/" + encodeURIComponent(artifactId) + "/triage", payload)
+        .then(function (res) {
+          setArtifactTriageState(artifactId, {
+            running: false,
+            pendingDecision: "",
+            error: "",
+            message: (res && res.decision ? res.decision : decision) + " saved",
+          });
+          state.reload();
+        })
+        .catch(function (err) {
+          setArtifactTriageState(artifactId, {
+            running: false,
+            pendingDecision: "",
+            error: err && err.message ? err.message : String(err),
+            message: "",
+          });
+        });
+    }
     const flowDagNavCount = (topoNavState.data && topoNavState.data.meta && topoNavState.data.meta.node_count) || 0;
     const viewCards = [{ id: "flow_dag", label: "Flow DAG", summary: "Configured topology + runtime status, with /trace provenance on selection.", count: flowDagNavCount, band: "violet" }]
       .concat((data && data.views) ? data.views : [])
@@ -1994,11 +2151,24 @@
             h(LaneGraphPanel, { graph: innerGraph, selected: selectedInnerItem, onSelect: setSelectedInnerItem }),
           ),
         ) : null,
-        activeView === "actuators" ? h(DrillDown, { title: "Actions, outbox, artifacts, and residue", badge: (counts.open_actions ?? 0) + " open actions · " + residueItems + " residue", open: true },
+        activeView === "actuators" ? h(DrillDown, { title: "Actions, review, artifacts, and residue", badge: (counts.open_actions ?? 0) + " open actions · " + residueItems + " residue", open: true },
           h("div", { className: "sx-grid" },
+            h(Section, { title: "Review queue", subtitle: "Held artifacts only. Review state is visible here; raw artifact bodies stay hidden." },
+              heldArtifacts.length ? h(React.Fragment, null,
+                h("div", { className: "sx-ref-row" },
+                  h(Pill, { band: heldArtifacts.length ? "yellow" : "green", strong: true }, plural(heldArtifacts.length, "held artifact")),
+                  h(Pill, { band: "green" }, heldArtifacts.filter(function (artifact) { return get(artifact, "verification.status", "") === "VERIFIED_COMPLIANT"; }).length + " verified"),
+                  h(Pill, { band: "yellow" }, heldArtifacts.filter(function (artifact) { return get(artifact, "verification.status", "") === "NONCOMPLIANT" || get(artifact, "verification.status", "") === "UNVERIFIED"; }).length + " review warnings"),
+                  h(Pill, { band: "red" }, heldArtifacts.filter(function (artifact) { return get(artifact, "verification.status", "") === "MISSING_FILE"; }).length + " missing file"),
+                ),
+                h("div", { className: "sx-triage-grid" }, heldArtifacts.map(function (artifact) {
+                  return h(TriageArtifactCard, { key: artifact.id, artifact: artifact, triage: triageState[artifact.id], onAction: runArtifactTriage });
+                })),
+              ) : h(Empty, { text: "No held artifacts awaiting review." }),
+            ),
             h(Section, { title: "Thread actions", subtitle: "Open motor plans first; completed actions are residue/evidence." }, data.actions && data.actions.length ? data.actions.map(function (a) { return h(ActionCard, { key: a.id, action: a }); }) : h(Empty, { text: "No thread actions." })),
             h(Section, { title: "Outbox", subtitle: "Actionable requests vs historical pointers with safety labels." }, data.outbox && data.outbox.length ? data.outbox.map(function (o) { return h(OutboxCard, { key: o.id, request: o }); }) : h(Empty, { text: "No outbox requests." })),
-            h(Section, { title: "Artifact groups", subtitle: "Historical residue and held/private artifacts; raw bodies stay hidden." }, data.artifact_groups && data.artifact_groups.length ? data.artifact_groups.map(function (g) { return h(ArtifactGroupCard, { key: g.id, group: g }); }) : h(Empty, { text: "No artifacts recorded." })),
+            h(Section, { title: "Artifact groups", subtitle: "Grouped residue and held artifacts with file verification state; raw bodies stay hidden." }, data.artifact_groups && data.artifact_groups.length ? data.artifact_groups.map(function (g) { return h(ArtifactGroupCard, { key: g.id, group: g }); }) : h(Empty, { text: "No artifacts recorded." })),
           ),
         ) : null,
         h("div", { className: "sx-footer" },

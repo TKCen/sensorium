@@ -6,7 +6,7 @@
   if (!SDK || !PLUGINS) return;
 
   const { React } = SDK;
-  const { useEffect, useState } = SDK.hooks;
+  const { useEffect, useState, useRef } = SDK.hooks;
   const { Card, CardContent, Badge, Button } = SDK.components;
   const h = React.createElement;
 
@@ -539,25 +539,6 @@
     return label || humanizeAtom(node.id) || "unnamed node";
   }
 
-  function flowNodeForm(node) {
-    if (!node) return "structure";
-    if (node.origin === "instance") return "live";
-    const label = String(node.label || node.id || "").toLowerCase();
-    const kind = String(node.kind || "").toLowerCase();
-    if (kind === "sensor" || kind === "emitter") return "sensor";
-    if (label.indexOf("inbox") >= 0 || label.indexOf("gate") >= 0 || label.indexOf("bridge") >= 0 || kind === "router" || kind === "receipt") return "persistent";
-    if (kind === "review" || kind === "memory" || kind === "worker") return "processor";
-    return "structure";
-  }
-
-  const FLOW_NODE_FORM_LABELS = {
-    sensor: "sensor",
-    persistent: "persistent",
-    processor: "processor",
-    structure: "structure",
-    live: "live item",
-  };
-
   function findFlowNodeId(nodes, needles, preferredKind) {
     const lowerNeedles = needles.map(function (n) { return String(n).toLowerCase(); });
     const list = Array.from(nodes.values ? nodes.values() : nodes);
@@ -692,120 +673,641 @@
     };
   }
 
-  function flowDagLayout(graph) {
-    const byKind = {};
-    (graph.nodes || []).forEach(function (n) {
-      const kind = FLOW_DAG_COLUMN_ORDER.indexOf(n.kind) >= 0 ? n.kind : "unknown";
-      byKind[kind] = byKind[kind] || [];
-      byKind[kind].push(n);
-    });
-    Object.keys(byKind).forEach(function (kind) { byKind[kind].sort(flowNodeSort); });
-    const cols = FLOW_DAG_COLUMN_ORDER.filter(function (k) { return byKind[k] && byKind[k].length; });
-    const width = Math.max(720, FLOW_DAG_LEFT * 2 + cols.length * FLOW_DAG_NODE_WIDTH + Math.max(0, cols.length - 1) * FLOW_DAG_COL_GAP);
-    const maxRows = Math.max.apply(null, cols.map(function (k) { return byKind[k].length; }).concat([1]));
-    const height = Math.max(360, FLOW_DAG_TOP + maxRows * (FLOW_DAG_NODE_HEIGHT + FLOW_DAG_ROW_GAP) + 30);
-    const positions = {};
-    const positioned = [];
-    cols.forEach(function (kind, ci) {
-      const x = FLOW_DAG_LEFT + ci * (FLOW_DAG_NODE_WIDTH + FLOW_DAG_COL_GAP);
-      (byKind[kind] || []).forEach(function (node, ri) {
-        const y = FLOW_DAG_TOP + ri * (FLOW_DAG_NODE_HEIGHT + FLOW_DAG_ROW_GAP);
-        const item = Object.assign({}, node, { x: x, y: y, w: FLOW_DAG_NODE_WIDTH, h: FLOW_DAG_NODE_HEIGHT, col: kind });
-        positioned.push(item);
-        positions[node.id] = { x: x, y: y, w: FLOW_DAG_NODE_WIDTH, h: FLOW_DAG_NODE_HEIGHT, col: kind };
-      });
-    });
-    return { cols: cols, nodes: positioned, positions: positions, width: width, height: height };
+  function flowKindBand(kind) {
+    const map = {
+      sensor: "violet",
+      emitter: "violet",
+      processor: "green",
+      queue: "yellow",
+      gate: "yellow",
+      review: "violet",
+      router: "green",
+      candidate: "yellow",
+      thread: "violet",
+      action: "green",
+      outbox: "green",
+      receipt: "green",
+      sink: "neutral",
+      unknown: "neutral",
+    };
+    return map[kind] || "neutral";
   }
 
-  function FlowDagNode(props) {
+  function flowHash(value) {
+    const text = String(value || "");
+    let hsh = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+      hsh ^= text.charCodeAt(i);
+      hsh = Math.imul(hsh, 16777619);
+    }
+    return (hsh >>> 0) / 4294967295;
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function flowForceLayout(graph) {
+    const rawNodes = (graph.nodes || []).slice().sort(flowNodeSort);
+    const rawEdges = graph.edges || [];
+    const width = 1080;
+    const height = 660;
+    const marginX = 76;
+    const marginY = 64;
+    const nodeW = 136;
+    const nodeH = 58;
+    const order = FLOW_DAG_COLUMN_ORDER;
+    const stageIndex = {};
+    order.forEach(function (kind, i) { stageIndex[kind] = i; });
+    const maxStage = Math.max(1, order.length - 1);
+    const nodes = rawNodes.map(function (node, i) {
+      const kind = order.indexOf(node.kind) >= 0 ? node.kind : "unknown";
+      const stage = stageIndex[kind] ?? maxStage;
+      const targetX = marginX + (width - marginX * 2) * (stage / maxStage);
+      const h1 = flowHash(node.id + ":x");
+      const h2 = flowHash(node.id + ":y");
+      const sourceish = kind === "sensor" || kind === "emitter";
+      const sinkish = kind === "sink" || kind === "receipt" || kind === "outbox";
+      return Object.assign({}, node, {
+        x: sourceish ? marginX : sinkish ? width - marginX : clamp(targetX + (h1 - 0.5) * 92, marginX, width - marginX),
+        y: clamp(marginY + h2 * (height - marginY * 2), marginY, height - marginY),
+        vx: 0,
+        vy: 0,
+        w: nodeW,
+        h: nodeH,
+        stage: stage,
+        sourceish: sourceish,
+        sinkish: sinkish,
+      });
+    });
+    const byId = {};
+    nodes.forEach(function (n, i) { byId[n.id] = i; });
+    const links = rawEdges.map(function (edge) {
+      const a = byId[edge.from];
+      const b = byId[edge.to];
+      if (a === undefined || b === undefined) return null;
+      return { edge: edge, a: a, b: b, projection: !!edge.projection, observed: !!edge.observed };
+    }).filter(Boolean);
+
+    const targetYByStage = {};
+    nodes.forEach(function (node) {
+      targetYByStage[node.stage] = targetYByStage[node.stage] || [];
+      targetYByStage[node.stage].push(node);
+    });
+    Object.keys(targetYByStage).forEach(function (stage) {
+      const list = targetYByStage[stage].sort(flowNodeSort);
+      list.forEach(function (node, i) {
+        node.targetY = height * 0.5 + (i - (list.length - 1) / 2) * Math.min(62, Math.max(34, 460 / Math.max(1, list.length)));
+      });
+    });
+
+    for (let step = 0; step < 180; step += 1) {
+      nodes.forEach(function (n) {
+        const stageTargetX = marginX + (width - marginX * 2) * (n.stage / maxStage);
+        const tx = n.sourceish ? marginX : n.sinkish ? width - marginX : stageTargetX;
+        n.vx += (tx - n.x) * (n.sourceish || n.sinkish ? 0.075 : 0.025);
+        n.vy += ((n.targetY || height / 2) - n.y) * 0.012;
+      });
+      links.forEach(function (l) {
+        const a = nodes[l.a];
+        const b = nodes[l.b];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        const ideal = l.projection ? 150 : 118;
+        const force = (dist - ideal) * (l.projection ? 0.006 : 0.011);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        if (!a.sourceish) { a.vx += fx; a.vy += fy; }
+        if (!b.sinkish) { b.vx -= fx; b.vy -= fy; }
+      });
+      for (let i = 0; i < nodes.length; i += 1) {
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist2 = Math.max(64, dx * dx + dy * dy);
+          const dist = Math.sqrt(dist2);
+          const min = (a.stage === b.stage ? 78 : 58);
+          const force = Math.min(4.4, (min * min) / dist2) * 0.64;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          if (!a.sourceish) { a.vx -= fx; a.vy -= fy; }
+          if (!b.sourceish) { b.vx += fx; b.vy += fy; }
+        }
+      }
+      nodes.forEach(function (n) {
+        n.vx *= 0.72;
+        n.vy *= 0.72;
+        n.x = clamp(n.x + n.vx, marginX, width - marginX);
+        n.y = clamp(n.y + n.vy, marginY, height - marginY);
+      });
+    }
+    const positions = {};
+    nodes.forEach(function (n) { positions[n.id] = n; });
+    const lanes = [
+      { key: "sense", x: marginX, label: "SENSE" },
+      { key: "middle", x: width / 2, label: "METABOLIZE" },
+      { key: "surface", x: width - marginX, label: "SURFACE / RECEIPTS" },
+    ];
+    return { nodes: nodes, edges: rawEdges, links: links, positions: positions, width: width, height: height, lanes: lanes, nodeW: nodeW, nodeH: nodeH };
+  }
+
+  function forceEdgePath(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+    const sx = a.x + (dx / dist) * (a.w * 0.55);
+    const sy = a.y + (dy / dist) * (a.h * 0.44);
+    const tx = b.x - (dx / dist) * (b.w * 0.55);
+    const ty = b.y - (dy / dist) * (b.h * 0.44);
+    const curve = clamp(Math.abs(dx) * 0.18 + Math.abs(dy) * 0.08, 24, 96);
+    const c1x = sx + curve;
+    const c2x = tx - curve;
+    return "M" + sx.toFixed(1) + " " + sy.toFixed(1) + " C" + c1x.toFixed(1) + " " + sy.toFixed(1) + "," + c2x.toFixed(1) + " " + ty.toFixed(1) + "," + tx.toFixed(1) + " " + ty.toFixed(1);
+  }
+
+  function FlowForceNode(props) {
     const node = props.node;
     const active = props.selected && props.selected.id === node.id && props.selected.selType === "node";
     const band = flowStatusBand(node.status);
+    const kindBand = flowKindBand(node.kind);
     const displayLabel = flowNodeDisplayLabel(node);
-    const detail = flowNodeDetail(node);
-    const form = flowNodeForm(node);
-    const stateBits = [node.status || "unknown"];
-    if (node.origin === "topology" && node.configured_status === "disabled") stateBits.push("disabled");
-    if (node.pressure !== null && node.pressure !== undefined) stateBits.push("p " + Number(node.pressure).toFixed(2));
-    if (node.freshness) stateBits.push(node.freshness);
-    if (node.status_source) stateBits.push(node.status_source);
-    return h("button", {
-      type: "button",
-      className: "sx-flow-node sx-flow-node-form-" + form + (active ? " sx-flow-node-active" : "") + (node.origin === "topology" ? " sx-flow-node-topology" : " sx-flow-node-instance") + (node.attention ? " sx-flow-node-attention" : ""),
-      style: { left: node.x + "px", top: node.y + "px", borderColor: bandColor(band) },
-      onClick: function () { props.onSelect({ id: node.id, selType: "node", kind: node.kind }); },
-      title: displayLabel + " — " + detail + " — " + (node.status || "unknown") + " — " + (FLOW_NODE_FORM_LABELS[form] || form),
+    const typeLabel = (FLOW_DAG_COLUMN_LABELS[node.kind] || node.kind || "node").toUpperCase();
+    const r = node.kind === "sensor" ? 8.5 : node.kind === "candidate" ? 9.5 : node.kind === "receipt" || node.kind === "sink" ? 8 : 7.5;
+    const labelOffset = node.x > 860 ? -12 : 12;
+    const labelAnchor = node.x > 860 ? "end" : "start";
+    return h("g", {
+      className: "sx-force-node sx-force-dot-node" + (active ? " sx-force-node-active" : "") + (node.status === "active" || node.status === "processing" || node.status === "reviewing" ? " sx-force-node-live" : ""),
+      transform: "translate(" + node.x.toFixed(1) + " " + node.y.toFixed(1) + ")",
+      onClick: function (event) { event.stopPropagation(); props.onSelect({ id: node.id, selType: "node", kind: node.kind }); },
+      role: "button",
+      tabIndex: 0,
+      "aria-label": displayLabel,
     },
-      h("span", { className: "sx-flow-node-form-mark", "aria-hidden": "true" }),
-      h("span", { className: "sx-flow-node-topline" },
-        h("span", { className: "sx-flow-node-kind" }, FLOW_DAG_COLUMN_LABELS[node.kind] || node.kind),
-        h("span", { className: "sx-flow-node-origin" }, FLOW_NODE_FORM_LABELS[form] || form),
-      ),
-      h("span", { className: "sx-flow-node-label" }, compactId(displayLabel, 46)),
-      h("span", { className: "sx-flow-node-state" }, h("span", { className: "sx-flow-state-dot", style: { background: bandColor(band) } }), compactId(stateBits.join(" · "), 62)),
-      h("span", { className: "sx-flow-node-id" }, compactId(node.id, 38)),
+      h("title", null, displayLabel + " — " + typeLabel + " — " + (node.status || "unknown")),
+      h("circle", { className: "sx-force-node-halo", cx: 0, cy: 0, r: active ? 22 : 16, fill: bandColor(band), opacity: active ? 0.22 : 0.09 }),
+      h("circle", { className: "sx-force-node-ring", cx: 0, cy: 0, r: r + 4, fill: "rgba(5,8,18,0.82)", stroke: bandColor(kindBand), strokeWidth: active ? 2.6 : 1.6 }),
+      h("circle", { className: "sx-force-live-dot", cx: 0, cy: 0, r: r, fill: bandColor(band), stroke: active ? "#e0e7ff" : "rgba(255,255,255,0.32)", strokeWidth: active ? 2.2 : 1.1 }),
+      h("text", { className: "sx-force-node-type", x: labelOffset, y: -8, textAnchor: labelAnchor }, typeLabel),
+      h("text", { className: "sx-force-node-label", x: labelOffset, y: 8, textAnchor: labelAnchor }, compactId(displayLabel, 30)),
     );
   }
 
-  function flowEdgePath(a, b) {
-    const x1 = a.x + a.w;
-    const y1 = a.y + a.h / 2;
-    const x2 = b.x;
-    const y2 = b.y + b.h / 2;
-    if (x2 <= x1 + 8) {
-      const lift = Math.max(28, Math.abs(y2 - y1) * 0.35 + 24);
-      const midX = Math.max(x1 + 32, x2 + 32);
-      return "M" + x1 + " " + y1 + " C" + midX + " " + y1 + "," + midX + " " + (y2 - lift) + "," + (x2 + 4) + " " + y2;
+  function FlowContextPopover(props) {
+    const selected = props.selected;
+    const layout = props.layout;
+    const graph = props.graph;
+    if (!selected || !layout) return null;
+    const positions = layout.positions || {};
+    let anchor = positions[selected.id];
+    if (!anchor && selected.selType === "edge") {
+      const a = positions[selected.from];
+      const b = positions[selected.to];
+      if (a && b) anchor = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     }
-    const bend = Math.min(120, Math.max(44, (x2 - x1) * 0.45));
-    return "M" + x1 + " " + y1 + " C" + (x1 + bend) + " " + y1 + "," + (x2 - bend) + " " + y2 + "," + x2 + " " + y2;
+    if (!anchor) return null;
+    const left = (anchor.x / layout.width * 100).toFixed(2) + "%";
+    const top = (anchor.y / layout.height * 100).toFixed(2) + "%";
+    const tx = anchor.x > layout.width * 0.64 ? "-100%" : "18px";
+    const ty = anchor.y > layout.height * 0.58 ? "-100%" : "18px";
+    return h("div", {
+      className: "sx-force-popover",
+      style: { left: left, top: top, transform: "translate(" + tx + ", " + ty + ")" },
+    },
+      h("button", { className: "sx-force-popover-close", type: "button", onClick: function () { props.onSelect(null); }, "aria-label": "Close trace card" }, "×"),
+      h(TraceDetailRail, { selected: selected, trace: props.trace, graph: graph }),
+    );
+  }
+
+  const FORCE_GRAPH_SCRIPT = "/dashboard-plugins/agent-sensorium/dist/force-graph.min.js";
+  let forceGraphLibraryPromise = null;
+
+  function ensureForceGraphLibrary() {
+    if (window.ForceGraph) return Promise.resolve(window.ForceGraph);
+    if (forceGraphLibraryPromise) return forceGraphLibraryPromise;
+    forceGraphLibraryPromise = new Promise(function (resolve, reject) {
+      const existing = document.querySelector('script[data-sx-force-graph="1"]');
+      if (existing) {
+        existing.addEventListener("load", function () { resolve(window.ForceGraph); }, { once: true });
+        existing.addEventListener("error", reject, { once: true });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = FORCE_GRAPH_SCRIPT;
+      script.async = true;
+      script.dataset.sxForceGraph = "1";
+      script.onload = function () { window.ForceGraph ? resolve(window.ForceGraph) : reject(new Error("ForceGraph did not register")); };
+      script.onerror = function () { reject(new Error("Failed to load force-graph library")); };
+      document.head.appendChild(script);
+    });
+    return forceGraphLibraryPromise;
+  }
+
+  function flowGraphNodeRadius(node) {
+    if (node.kind === "sensor") return 5.2;
+    if (node.kind === "candidate") return 6.2;
+    if (node.kind === "receipt" || node.kind === "sink") return 5.0;
+    if (node.kind === "outbox" || node.kind === "action") return 5.7;
+    return 5.4;
+  }
+
+  function normalizeEndpointId(value) {
+    return value && typeof value === "object" ? value.id : value;
+  }
+
+  function requestForceGraphRedraw(fg) {
+    if (!fg) return;
+    if (typeof fg.resumeAnimation === "function") {
+      fg.resumeAnimation();
+      return;
+    }
+    if (typeof fg.d3ReheatSimulation === "function") {
+      fg.d3ReheatSimulation();
+    }
+  }
+
+  function flowGraphBucket(nodeOrKind) {
+    const kind = typeof nodeOrKind === "string" ? nodeOrKind : (nodeOrKind && nodeOrKind.kind);
+    const id = typeof nodeOrKind === "string" ? "" : String((nodeOrKind && nodeOrKind.id) || "");
+    if (kind === "sensor" || kind === "emitter") return 0;
+    if (kind === "processor") return 1;
+    if (kind === "queue") return 2;
+    if (kind === "gate") return 3;
+    if (kind === "router" && /attention_inbox/.test(id)) return 4;
+    if (kind === "review" || kind === "candidate" || kind === "thread") return 5;
+    if (kind === "router" || kind === "action" || kind === "outbox") return 6;
+    if (kind === "receipt" || kind === "sink") return 7;
+    return 4;
+  }
+
+  function buildForceGraphData(graph, width, height, positionStore) {
+    const rawNodes = ((graph && graph.nodes) || []).slice().sort(flowNodeSort);
+    const bucketMap = {};
+    rawNodes.forEach(function (node) {
+      const bucket = flowGraphBucket(node.kind);
+      bucketMap[bucket] = bucketMap[bucket] || [];
+      bucketMap[bucket].push(node);
+    });
+    const padX = 72;
+    const padY = 58;
+    const usableW = Math.max(1, width - padX * 2);
+    const usableH = Math.max(1, height - padY * 2);
+    const nodes = rawNodes.map(function (n) {
+      const saved = positionStore[n.id];
+      const bucket = flowGraphBucket(n.kind);
+      const list = bucketMap[bucket] || [n];
+      const index = Math.max(0, list.findIndex(function (item) { return item.id === n.id; }));
+      let columnCount = 1;
+      if (bucket === 0 && list.length > 10) columnCount = 2;
+      if (bucket === 4 && list.length > 5) columnCount = 2;
+      const col = columnCount > 1 ? index % columnCount : 0;
+      const row = columnCount > 1 ? Math.floor(index / columnCount) : index;
+      const rowCount = Math.max(1, Math.ceil(list.length / columnCount));
+      const bucketX = (-width / 2) + padX + usableW * (bucket / 7);
+      const colOffset = columnCount === 1 ? 0 : (col - (columnCount - 1) / 2) * Math.min(86, usableW * 0.08);
+      const yStep = rowCount <= 1 ? 0 : usableH / (rowCount - 1);
+      const yJitter = (flowHash(n.id + ":stable-y") - 0.5) * Math.min(18, Math.max(0, yStep * 0.22));
+      const xJitter = bucket === 0 || bucket === 7 ? 0 : (flowHash(n.id + ":stable-x") - 0.5) * 34;
+      const targetX = clamp(bucketX + colOffset + xJitter, (-width / 2) + padX, (width / 2) - padX);
+      const targetY = clamp((-height / 2) + padY + (rowCount <= 1 ? usableH / 2 : row * yStep) + yJitter, (-height / 2) + padY, (height / 2) - padY);
+      const x = saved ? saved.x : targetX;
+      const y = saved ? saved.y : targetY;
+      const node = Object.assign({}, n, {
+        x: x,
+        y: y,
+        fx: saved && saved.fixed ? saved.fx : undefined,
+        fy: saved && saved.fixed ? saved.fy : undefined,
+        val: Math.pow(flowGraphNodeRadius(n), 2),
+        stage: bucket,
+        targetX: targetX,
+        targetY: targetY,
+        sourceish: bucket === 0,
+        sinkish: bucket === 7 || bucket === 6,
+      });
+      return node;
+    });
+    const nodeIds = new Set(nodes.map(function (node) { return node.id; }));
+    const links = ((graph && graph.edges) || []).filter(function (edge) {
+      return edge && nodeIds.has(edge.from) && nodeIds.has(edge.to);
+    }).map(function (edge) {
+      return Object.assign({}, edge, {
+        source: edge.from,
+        target: edge.to,
+        label: compactId((edge.label || edge.kind || "edge"), 48),
+      });
+    });
+    const lanes = [
+      { key: "sense", x: (-width / 2) + padX, label: "SENSE" },
+      { key: "middle", x: 0, label: "METABOLIZE" },
+      { key: "surface", x: (width / 2) - padX, label: "SURFACE / RECEIPTS" },
+    ];
+    return { nodes: nodes, links: links, lanes: lanes, width: width, height: height };
+  }
+
+  function makeFlowBoundsForce(width, height, padding) {
+    let nodes = [];
+    function force() {
+      nodes.forEach(function (node) {
+        const r = flowGraphNodeRadius(node) + padding;
+        const minX = (-width / 2) + r;
+        const maxX = (width / 2) - r;
+        const minY = (-height / 2) + r;
+        const maxY = (height / 2) - r;
+        if (node.x < minX) { node.x = minX; node.vx = Math.max(0, node.vx || 0) * 0.25; }
+        if (node.x > maxX) { node.x = maxX; node.vx = Math.min(0, node.vx || 0) * 0.25; }
+        if (node.y < minY) { node.y = minY; node.vy = Math.max(0, node.vy || 0) * 0.25; }
+        if (node.y > maxY) { node.y = maxY; node.vy = Math.min(0, node.vy || 0) * 0.25; }
+      });
+    }
+    force.initialize = function (_) { nodes = _ || []; };
+    return force;
+  }
+
+  function setFlowGraphForces(fg, width, height) {
+    try {
+      fg.d3AlphaDecay(0.018).d3VelocityDecay(0.34);
+      fg.d3Force("charge").strength(-115).distanceMax(230);
+      fg.d3Force("link").distance(function (link) { return link.projection ? 130 : 168; }).strength(function (link) { return link.projection ? 0.11 : 0.075; });
+      const xForce = fg.d3Force("x");
+      if (xForce && xForce.x) {
+        xForce.x(function (node) { return node.targetX || 0; })
+          .strength(function (node) { return node.sourceish ? 0.34 : (node.sinkish ? 0.28 : 0.14); });
+      }
+      const yForce = fg.d3Force("y");
+      if (yForce && yForce.y) {
+        yForce.y(function (node) { return node.targetY || 0; })
+          .strength(function (node) { return node.sourceish || node.sinkish ? 0.065 : 0.042; });
+      }
+      const collide = fg.d3Force("collide");
+      if (collide && collide.radius) collide.radius(function (node) { return flowGraphNodeRadius(node) + 15; }).strength(0.96).iterations(3);
+      fg.d3Force("bounds", makeFlowBoundsForce(width, height, 24));
+    } catch (err) {
+      console.warn("Sensorium force graph force tuning failed", err);
+    }
+  }
+
+  function drawForceNode(node, ctx, globalScale, selected, hovered) {
+    const active = selected && selected.selType === "node" && selected.id === node.id;
+    const hover = hovered && hovered.id === node.id;
+    const band = flowStatusBand(node.status);
+    const kindBand = flowKindBand(node.kind);
+    const r = flowGraphNodeRadius(node);
+    ctx.save();
+    ctx.globalAlpha = active ? 0.22 : hover ? 0.16 : 0.075;
+    ctx.fillStyle = bandColor(band);
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, active ? r + 14 : r + 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(5,8,18,0.86)";
+    ctx.strokeStyle = bandColor(kindBand);
+    ctx.lineWidth = active ? 2.3 / globalScale : 1.35 / globalScale;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r + 3.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = bandColor(band);
+    ctx.strokeStyle = active ? "#e0e7ff" : "rgba(255,255,255,0.34)";
+    ctx.lineWidth = active ? 2.0 / globalScale : 1.0 / globalScale;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (active || hover) {
+      const displayLabel = flowNodeDisplayLabel(node);
+      const typeLabel = (FLOW_DAG_COLUMN_LABELS[node.kind] || node.kind || "node").toUpperCase();
+      const fontSize = Math.max(8, 11 / globalScale);
+      const labelRight = node.x < 0;
+      const offset = labelRight ? r + 8 : -r - 8;
+      ctx.textAlign = labelRight ? "left" : "right";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 4 / globalScale;
+      ctx.strokeStyle = "rgba(5,8,18,0.93)";
+      ctx.fillStyle = "rgba(148,163,184,0.92)";
+      ctx.font = "800 " + Math.max(7, fontSize - 2) + "px Inter, system-ui, sans-serif";
+      ctx.strokeText(typeLabel, node.x + offset, node.y - 7 / globalScale);
+      ctx.fillText(typeLabel, node.x + offset, node.y - 7 / globalScale);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "650 " + fontSize + "px Inter, system-ui, sans-serif";
+      ctx.strokeText(compactId(displayLabel, 34), node.x + offset, node.y + 7 / globalScale);
+      ctx.fillText(compactId(displayLabel, 34), node.x + offset, node.y + 7 / globalScale);
+    }
+    ctx.restore();
+  }
+
+  function FlowGraphPopover(props) {
+    const selected = props.selected;
+    const anchor = props.anchor;
+    if (!selected || !anchor) return null;
+    const left = Math.max(12, Math.min(anchor.x, props.width - 12));
+    const top = Math.max(12, Math.min(anchor.y, props.height - 12));
+    const tx = anchor.x > props.width * 0.62 ? "calc(-100% - 18px)" : "18px";
+    const ty = anchor.y > props.height * 0.56 ? "calc(-100% - 18px)" : "18px";
+    return h("div", {
+      className: "sx-force-popover sx-force-popover-soft",
+      style: { left: left + "px", top: top + "px", transform: "translate(" + tx + ", " + ty + ")" },
+    },
+      h("button", { className: "sx-force-popover-close", type: "button", onClick: function () { props.onSelect(null); }, "aria-label": "Close trace card" }, "×"),
+      h(TraceDetailRail, { selected: selected, trace: props.trace, graph: props.graph }),
+    );
   }
 
   function FlowDagCanvas(props) {
-    const layout = flowDagLayout(props.graph || { nodes: [], edges: [] });
-    const positions = layout.positions;
+    const hostRef = useRef(null);
+    const fgRef = useRef(null);
+    const selectedRef = useRef(props.selected);
+    const hoveredRef = useRef(null);
+    const graphDataRef = useRef({ nodes: [], links: [] });
+    const positionStoreRef = useRef({});
+    const [ready, setReady] = useState(!!window.ForceGraph);
+    const [error, setError] = useState("");
+    const [size, setSize] = useState({ width: 1080, height: 680 });
+    const [popoverAnchor, setPopoverAnchor] = useState(null);
+    const [resetNonce, setResetNonce] = useState(0);
+
+    function resetForceGraphLayout() {
+      positionStoreRef.current = {};
+      props.onSelect(null);
+      setPopoverAnchor(null);
+      const fg = fgRef.current;
+      if (fg) {
+        const data = buildForceGraphData(props.graph || { nodes: [], edges: [] }, size.width, size.height, {});
+        graphDataRef.current = data;
+        fg.graphData({ nodes: data.nodes, links: data.links });
+        setFlowGraphForces(fg, size.width, size.height);
+        if (typeof fg.centerAt === "function") fg.centerAt(0, 0, 220);
+        if (typeof fg.zoom === "function") fg.zoom(1, 220);
+        if (typeof fg.d3ReheatSimulation === "function") fg.d3ReheatSimulation();
+        requestForceGraphRedraw(fg);
+      }
+      setResetNonce(function (value) { return value + 1; });
+    }
+
     const edges = (props.graph && props.graph.edges) || [];
     const projectionCount = edges.filter(function (edge) { return edge && edge.projection; }).length;
-    return h("div", { className: "sx-flow-map-wrap" },
-      h("div", { className: "sx-flow-map-canvas", style: { minWidth: layout.width + "px", height: layout.height + "px" } },
-        h("svg", { className: "sx-flow-map-svg", viewBox: "0 0 " + layout.width + " " + layout.height, preserveAspectRatio: "xMinYMin meet", "aria-hidden": "true" },
-          h("defs", null,
-            h("marker", { id: "sx-flow-arrow", markerWidth: "10", markerHeight: "10", refX: "8", refY: "4", orient: "auto", markerUnits: "strokeWidth" },
-              h("path", { d: "M0,0 L0,8 L9,4 z", fill: "rgba(130,143,255,0.9)" }),
-            ),
-          ),
-          layout.cols.map(function (kind, i) {
-            const x = FLOW_DAG_LEFT + i * (FLOW_DAG_NODE_WIDTH + FLOW_DAG_COL_GAP);
-            return h("g", { key: "col-" + kind },
-              h("rect", { className: "sx-flow-col-band", x: x - 8, y: 48, width: FLOW_DAG_NODE_WIDTH + 16, height: Math.max(120, layout.height - 58), rx: 14 }),
-              h("text", { x: x + FLOW_DAG_NODE_WIDTH / 2, y: 28, className: "sx-flow-col-label", textAnchor: "middle" }, FLOW_DAG_COLUMN_LABELS[kind] || kind),
-              h("text", { x: x + FLOW_DAG_NODE_WIDTH / 2, y: 43, className: "sx-flow-col-sub", textAnchor: "middle" }, kind),
-            );
-          }),
-          edges.map(function (edge) {
-            const a = positions[edge.from];
-            const b = positions[edge.to];
-            if (!a || !b) return null;
-            const active = props.selected && props.selected.selType === "edge" && props.selected.id === edge.id;
-            return h("path", {
-              key: edge.id,
-              d: flowEdgePath(a, b),
-              className: "sx-flow-edge" + (edge.projection ? " sx-flow-edge-projection" : " sx-flow-edge-configured") + (active ? " sx-flow-edge-active" : ""),
-              markerEnd: "url(#sx-flow-arrow)",
-              onClick: function () { props.onSelect({ id: edge.id, selType: "edge", kind: edge.kind, from: edge.from, to: edge.to }); },
-            });
-          }),
-        ),
-        layout.nodes.map(function (node) { return h(FlowDagNode, { key: node.id, node: node, selected: props.selected, onSelect: props.onSelect }); }),
+    const configuredCount = edges.filter(function (edge) { return !edge.projection; }).length;
+
+    useEffect(function () {
+      let mounted = true;
+      ensureForceGraphLibrary().then(function () {
+        if (mounted) { setReady(true); setError(""); }
+      }).catch(function (err) {
+        if (mounted) setError(err && err.message ? err.message : String(err));
+      });
+      return function () { mounted = false; };
+    }, []);
+
+    useEffect(function () {
+      const el = hostRef.current;
+      if (!el) return undefined;
+      function measure() {
+        const rect = el.getBoundingClientRect();
+        setSize({ width: Math.max(720, Math.round(rect.width || 1080)), height: Math.max(540, Math.round(rect.height || 680)) });
+      }
+      measure();
+      const ro = window.ResizeObserver ? new ResizeObserver(measure) : null;
+      if (ro) ro.observe(el);
+      window.addEventListener("resize", measure);
+      return function () { if (ro) ro.disconnect(); window.removeEventListener("resize", measure); };
+    }, []);
+
+    useEffect(function () {
+      selectedRef.current = props.selected;
+      if (!props.selected) setPopoverAnchor(null);
+      const fg = fgRef.current;
+      requestForceGraphRedraw(fg);
+    }, [props.selected && props.selected.id, props.selected && props.selected.selType]);
+
+    useEffect(function () {
+      if (!ready || !hostRef.current || !window.ForceGraph) return undefined;
+      if (fgRef.current) return undefined;
+      const fg = window.ForceGraph()(hostRef.current);
+      fgRef.current = fg;
+      fg.backgroundColor("rgba(0,0,0,0)")
+        .width(size.width)
+        .height(size.height)
+        .nodeId("id")
+        .nodeLabel(function (node) {
+          const typeLabel = (FLOW_DAG_COLUMN_LABELS[node.kind] || node.kind || "node").toUpperCase();
+          return flowNodeDisplayLabel(node) + " — " + typeLabel + " — " + (node.status || "unknown") + "<br/>drag to pin";
+        })
+        .nodeCanvasObjectMode(function () { return "replace"; })
+        .nodeCanvasObject(function (node, ctx, globalScale) { drawForceNode(node, ctx, globalScale, selectedRef.current, hoveredRef.current); })
+        .nodePointerAreaPaint(function (node, color, ctx) {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, flowGraphNodeRadius(node) + 13, 0, Math.PI * 2);
+          ctx.fill();
+        })
+        .linkColor(function (link) {
+          const active = selectedRef.current && selectedRef.current.selType === "edge" && selectedRef.current.id === link.id;
+          if (active) return "rgba(224,231,255,0.98)";
+          if (link.observed || link.runtime) return "rgba(130,143,255,0.88)";
+          return link.projection ? "rgba(234,179,8,0.72)" : "rgba(148,163,184,0.62)";
+        })
+        .linkWidth(function (link) {
+          const active = selectedRef.current && selectedRef.current.selType === "edge" && selectedRef.current.id === link.id;
+          return active ? 3.0 : (link.observed || link.runtime ? 2.1 : 1.45);
+        })
+        .linkDirectionalArrowLength(8.4)
+        .linkDirectionalArrowRelPos(0.925)
+        .linkDirectionalArrowColor(function (link) { return link.observed || link.runtime ? "rgba(191,219,254,0.96)" : (link.projection ? "rgba(250,204,21,0.84)" : "rgba(203,213,225,0.78)"); })
+        .linkDirectionalParticles(function (link) { return link.observed || link.runtime ? 2 : 0; })
+        .linkDirectionalParticleWidth(1.5)
+        .linkDirectionalParticleSpeed(0.006)
+        .linkCurvature(function (link) { return link.projection ? 0.24 : 0.08; })
+        .linkHoverPrecision(6)
+        .onNodeHover(function (node) { hoveredRef.current = node || null; requestForceGraphRedraw(fg); })
+        .onNodeClick(function (node) {
+          props.onSelect({ id: node.id, selType: "node", kind: node.kind });
+          setPopoverAnchor(typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(node.x, node.y) : { x: node.x + size.width / 2, y: node.y + size.height / 2 });
+        })
+        .onLinkClick(function (link) {
+          const sx = link.source && typeof link.source === "object" ? link.source.x : 0;
+          const sy = link.source && typeof link.source === "object" ? link.source.y : 0;
+          const tx = link.target && typeof link.target === "object" ? link.target.x : sx;
+          const ty = link.target && typeof link.target === "object" ? link.target.y : sy;
+          props.onSelect({ id: link.id, selType: "edge", kind: link.kind, from: normalizeEndpointId(link.source), to: normalizeEndpointId(link.target) });
+          const mx = (sx + tx) / 2;
+          const my = (sy + ty) / 2;
+          setPopoverAnchor(typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(mx, my) : { x: mx + size.width / 2, y: my + size.height / 2 });
+        })
+        .onBackgroundClick(function () { props.onSelect(null); setPopoverAnchor(null); })
+        .onNodeDrag(function (node) {
+          node.fx = node.x;
+          node.fy = node.y;
+          positionStoreRef.current[node.id] = { x: node.x, y: node.y, fx: node.x, fy: node.y, fixed: true };
+          if (selectedRef.current && selectedRef.current.selType === "node" && selectedRef.current.id === node.id) setPopoverAnchor(typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(node.x, node.y) : { x: node.x + size.width / 2, y: node.y + size.height / 2 });
+        })
+        .onNodeDragEnd(function (node) {
+          node.fx = node.x;
+          node.fy = node.y;
+          positionStoreRef.current[node.id] = { x: node.x, y: node.y, fx: node.x, fy: node.y, fixed: true };
+          setPopoverAnchor(typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(node.x, node.y) : { x: node.x + size.width / 2, y: node.y + size.height / 2 });
+        })
+        .cooldownTicks(Infinity)
+        .warmupTicks(28);
+      setFlowGraphForces(fg, size.width, size.height);
+      return function () {
+        try { fg.pauseAnimation(); } catch (_) {}
+        if (hostRef.current) hostRef.current.innerHTML = "";
+        fgRef.current = null;
+      };
+    }, [ready]);
+
+    useEffect(function () {
+      const fg = fgRef.current;
+      if (!fg) return;
+      const data = buildForceGraphData(props.graph || { nodes: [], edges: [] }, size.width, size.height, positionStoreRef.current);
+      graphDataRef.current = data;
+      fg.width(size.width).height(size.height).graphData({ nodes: data.nodes, links: data.links });
+      setFlowGraphForces(fg, size.width, size.height);
+      if (typeof fg.centerAt === "function") fg.centerAt(0, 0, 0);
+      if (typeof fg.zoom === "function") fg.zoom(1, 0);
+      if (typeof fg.d3ReheatSimulation === "function") fg.d3ReheatSimulation();
+      requestForceGraphRedraw(fg);
+    }, [ready, resetNonce, size.width, size.height, props.graph && props.graph.nodes && props.graph.nodes.length, props.graph && props.graph.edges && props.graph.edges.length]);
+
+    useEffect(function () {
+      if (!props.selected) return;
+      const data = graphDataRef.current || { nodes: [], links: [] };
+      if (props.selected.selType === "node") {
+        const node = data.nodes.find(function (n) { return n.id === props.selected.id; });
+        const fg = fgRef.current;
+        if (node) setPopoverAnchor(fg && typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(node.x || 0, node.y || 0) : { x: (node.x || 0) + size.width / 2, y: (node.y || 0) + size.height / 2 });
+      } else {
+        const link = data.links.find(function (l) { return l.id === props.selected.id; });
+        const sourceId = link ? normalizeEndpointId(link.source) : props.selected.from;
+        const targetId = link ? normalizeEndpointId(link.target) : props.selected.to;
+        const a = data.nodes.find(function (n) { return n.id === sourceId; });
+        const b = data.nodes.find(function (n) { return n.id === targetId; });
+        if (a && b) {
+          const fg = fgRef.current;
+          const mx = ((a.x || 0) + (b.x || 0)) / 2;
+          const my = ((a.y || 0) + (b.y || 0)) / 2;
+          setPopoverAnchor(fg && typeof fg.graph2ScreenCoords === "function" ? fg.graph2ScreenCoords(mx, my) : { x: mx + size.width / 2, y: my + size.height / 2 });
+        }
+      }
+    }, [props.selected && props.selected.id, props.selected && props.selected.selType, size.width, size.height]);
+
+    return h("div", { className: "sx-flow-map-wrap sx-force-map-wrap sx-forcegraph-wrap" },
+      h("div", { className: "sx-flow-map-canvas sx-force-map-canvas sx-forcegraph-canvas" },
+        h("div", { className: "sx-force-lane-overlay sx-force-lane-left" }, "SENSE"),
+        h("div", { className: "sx-force-lane-overlay sx-force-lane-mid" }, "METABOLIZE"),
+        h("div", { className: "sx-force-lane-overlay sx-force-lane-right" }, "SURFACE / RECEIPTS"),
+        h("div", { ref: hostRef, className: "sx-forcegraph-host", role: "img", "aria-label": "Interactive force graph. Drag nodes to reposition; click dots or arrows for trace details." }),
+        !ready && !error ? h("div", { className: "sx-forcegraph-loading" }, "Loading interactive force graph…") : null,
+        error ? h("div", { className: "sx-forcegraph-loading sx-forcegraph-error" }, error) : null,
+        h(FlowGraphPopover, { selected: props.selected, trace: props.trace, graph: props.graph, anchor: popoverAnchor, width: size.width, height: size.height, onSelect: props.onSelect }),
       ),
-      h("div", { className: "sx-map-caption" },
-        h(Pill, { band: "violet" }, "configured nodes " + layout.nodes.filter(function (n) { return n.origin === "topology"; }).length),
-        h(Pill, { band: "blue" }, "sensors " + layout.nodes.filter(function (n) { return flowNodeForm(n) === "sensor"; }).length),
-        h(Pill, { band: "green" }, "persistent structure " + layout.nodes.filter(function (n) { return flowNodeForm(n) === "persistent"; }).length),
-        h(Pill, { band: "yellow" }, "current items " + layout.nodes.filter(function (n) { return n.origin === "instance"; }).length),
-        h(Pill, { band: "green" }, "configured edges " + edges.filter(function (edge) { return !edge.projection; }).length),
-        h(Pill, null, "projection edges " + projectionCount + " (current-state overlay)"),
+      h("div", { className: "sx-force-legend sx-force-controls" },
+        h(Pill, { band: "violet" }, "continuous lane forces"),
+        h(Pill, { band: "green" }, "drag dots to pin"),
+        h(Pill, { band: "yellow" }, "live/projection arrows " + projectionCount),
+        h(Pill, null, "configured arrows " + configuredCount),
+        h("button", { type: "button", className: "sx-force-reset", onClick: resetForceGraphLayout }, "Reset layout"),
       ),
     );
   }
@@ -958,7 +1460,6 @@
       h("div", { className: "sx-trace-fields" },
         h(TraceField, { label: "role", value: graphNode ? ((FLOW_DAG_COLUMN_LABELS[graphNode.kind] || graphNode.kind) + " / " + graphNode.kind) : subject.kind }),
         h(TraceField, { label: "origin", value: graphNode ? (graphNode.origin === "instance" ? "live overlay" : "configured topology") : subject.origin }),
-        h(TraceField, { label: "visual form", value: graphNode && (FLOW_NODE_FORM_LABELS[flowNodeForm(graphNode)] || flowNodeForm(graphNode)) }),
         h(TraceField, { label: "status source", value: statusSource }),
         h(TraceField, { label: "configured", value: graphNode && graphNode.configured_status }),
         h(TraceField, { label: "enabled", value: graphNode && graphNode.enabled !== undefined && graphNode.enabled !== null ? String(graphNode.enabled) : null }),
@@ -1005,9 +1506,8 @@
 
     return h(Section, { title: "Flow DAG", subtitle: "Config-derived processing graph plus current open candidates/threads/actions as a live overlay. Select a node or edge for /trace provenance." },
       (topo.error || runtime.error || attention.error) ? h(Card, { className: "sx-card sx-error" }, h(CardContent, null, "Flow DAG fetch failed: ", topo.error || runtime.error || attention.error)) : null,
-      h("div", { className: "sx-flow-dag-layout" },
-        h(FlowDagCanvas, { graph: graph, selected: selected, onSelect: setSelected }),
-        h(TraceDetailRail, { selected: selected, trace: traceState, graph: graph }),
+      h("div", { className: "sx-flow-dag-layout sx-flow-dag-layout-free" },
+        h(FlowDagCanvas, { graph: graph, selected: selected, onSelect: setSelected, trace: traceState }),
       ),
       h("p", { className: "sx-muted" }, "Solid edges are configured topology. Dashed runtime/projection edges attach visible attention items and compact lineage relations from /runtime-status; they are bounded current-state evidence, not a complete traversal log."),
     );

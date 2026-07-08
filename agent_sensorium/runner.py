@@ -33,6 +33,7 @@ from .sensors import (
     classify_machine_network_pressure,
     classify_machine_process_pressure,
     classify_media_capacity,
+    classify_provider_budget_pressure,
     classify_tts_sidecar_pressure,
     codex_usage_sample,
     hindsight_pressure_sample,
@@ -41,6 +42,7 @@ from .sensors import (
     machine_network_pressure_sample,
     machine_process_pressure_sample,
     media_capacity_sample,
+    provider_budget_sample,
     runtime_heartbeat_sample,
     tts_sidecar_pressure_sample,
 )
@@ -59,6 +61,7 @@ BUILTIN_TRANSITION_SENSORS: dict[str, tuple] = {
     "tts_sidecar_pressure": (tts_sidecar_pressure_sample, classify_tts_sidecar_pressure, False),
     "media_capacity": (media_capacity_sample, classify_media_capacity, False),
     "codex_usage": (codex_usage_sample, classify_codex_usage_pressure, False),
+    "provider_budget": (provider_budget_sample, classify_provider_budget_pressure, False),
 }
 
 BUILTIN_SENSOR_NAMES = frozenset(BUILTIN_TRANSITION_SENSORS) | {HEARTBEAT_SENSOR_NAME}

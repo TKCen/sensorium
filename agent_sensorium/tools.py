@@ -20,6 +20,7 @@ from .gate import (
     signal_fingerprint,
 )
 from .pointers import select_attention_pointer
+from .volunteer_cards import build_volunteer_cards
 from .schemas import (
     intersect_allowed_surfaces,
     merge_sensitivity,
@@ -120,11 +121,23 @@ def _legacy_state_latest_info(store: SensoriumStore, state: dict) -> dict:
         "excluded_from_freshness": True,
     }
 
-
 def handle_sensorium_status(
     *, instance: str = "default", state_dir: str | None = None,
     config_path: str | None = None,
+    reference_id: str = "",
+    surface: str = "",
 ) -> str:
+    """Surface a Sensorium status snapshot, optionally pinned to a subject.
+
+    ``reference_id`` is the exact-subject pin (P0-2 audit fix): when present,
+    the response includes an ``exact_subject`` block naming that specific
+    thread or candidate, rather than forcing the caller to guess which row
+    of the rotating top-N corresponds to the pointer the agent just saw.
+    ``surface`` is honored for the exact-subject branch so a local-only
+    candidate is reported as not_found when requested from discord. When
+    ``reference_id`` is omitted, the legacy top-N shape is preserved
+    byte-for-byte for backwards compatibility.
+    """
     from .config import load_instance_config
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
@@ -213,6 +226,13 @@ def handle_sensorium_status(
         "config": config_diag,
         "budgets": current_budget_state(store, instance_config),
         "legacy_state_latest": _legacy_state_latest_info(store, state),
+        "volunteer_cards": build_volunteer_cards(
+            store,
+            surface=surface or "local",
+            instance_config=instance_config,
+            config_path=config_path,
+            limit=3,
+        ),
         "ts": utc_now_iso(),
     }
 
@@ -246,6 +266,21 @@ def handle_sensorium_status(
             }
         if "locks" in state:
             data["locks"] = state.get("locks")
+
+    # Exact-subject pin (P0-2 audit fix): when reference_id is requested,
+    # resolve that specific id to its current kind and surface-allowed
+    # visibility. This lets the conscious layer recover "the subject the
+    # prior pointer presented" without guessing across a rotating top-N.
+    if reference_id:
+        exact_surface = surface or "local"
+        data["exact_subject"] = _resolve_exact_subject(
+            reference_id=reference_id,
+            surface=exact_surface,
+            threads=threads,
+            candidates=candidates,
+            instance_config=instance_config,
+            max_title_chars=96,
+        )
 
     return _ok(instance, data)
 
@@ -1006,6 +1041,98 @@ def handle_sensorium_candidate_update(
     })
 
 
+def _resolve_exact_subject(
+    *,
+    reference_id: str,
+    surface: str,
+    threads: list[dict],
+    candidates: list[dict],
+    instance_config: dict | None,
+    max_title_chars: int,
+) -> dict:
+    """Resolve a single reference_id to its current kind + surface-allowed shape.
+
+    Returns a dict with at minimum ``id``. When the id matches a visible
+    thread or candidate, ``kind`` plus surface-safe fields are populated.
+    When the id matches nothing surface-allowed, ``not_found`` is True so
+    the conscious layer can distinguish "the pointer presented this id but
+    it is no longer reachable" from "I never saw this id". This is the
+    exact-subject counterpart to the rotating top-N status shape.
+    """
+    from .config import visible_on_surface
+    from .pointers import DEFAULT_POINTER_CONFIG
+
+    cfg = instance_config if isinstance(instance_config, dict) else {}
+
+    out: dict = {"id": reference_id}
+
+    for thread in threads:
+        if thread.get("id") != reference_id:
+            continue
+        status = thread.get("status")
+        if status not in ("dormant", "held"):
+            return {"id": reference_id, "kind": "unknown", "not_found": True,
+                    "reason": f"thread_status_{status or 'unset'}"}
+        if not visible_on_surface(thread, surface, cfg):
+            return {"id": reference_id, "kind": "thread", "not_found": True,
+                    "surface": surface, "reason": "surface_not_allowed"}
+        task = thread.get("conscious_task") or {}
+        title = task.get("title") or thread.get("next_prompt_to_operator") or "Sensorium thread"
+        out.update({
+            "kind": "thread",
+            "status": status,
+            "title": truncate_text(title, max_title_chars or DEFAULT_POINTER_CONFIG["max_title_chars"]),
+            "task_id": task.get("id"),
+            "origin_candidate_id": thread.get("origin_candidate_id"),
+            "sensitivity": thread.get("sensitivity", "private"),
+            "allowed_surfaces": thread.get("allowed_surfaces", []),
+            "created_at": thread.get("created_at"),
+            "updated_at": thread.get("updated_at"),
+        })
+        return out
+
+    for candidate in candidates:
+        if candidate.get("id") != reference_id:
+            continue
+        settlement = candidate.get("kanban_settlement") or {}
+        decision = str(settlement.get("decision") or "")
+        is_saved_residue = (
+            candidate.get("status") == "archived"
+            and decision in {"SAVE", "PROMOTE_CONSCIOUS"}
+            and settlement.get("intake_task_id")
+        )
+        if not visible_on_surface(candidate, surface, cfg):
+            kind_guess = "saved_residue" if is_saved_residue else "candidate"
+            return {"id": reference_id, "kind": kind_guess, "not_found": True,
+                    "surface": surface, "reason": "surface_not_allowed"}
+        title = candidate.get("summary", "") or (
+            "Saved Sensorium residue" if is_saved_residue else "Sensorium salience"
+        )
+        out.update({
+            "kind": "saved_residue" if is_saved_residue else "candidate",
+            "status": candidate.get("status"),
+            "title": truncate_text(title, max_title_chars or DEFAULT_POINTER_CONFIG["max_title_chars"]),
+            "pressure": candidate.get("pressure"),
+            "kind_raw": candidate.get("kind", ""),
+            "sensitivity": candidate.get("sensitivity", "private"),
+            "allowed_surfaces": candidate.get("allowed_surfaces", []),
+            "created_at": candidate.get("created_at"),
+            "updated_at": candidate.get("updated_at"),
+        })
+        if is_saved_residue:
+            out["kanban_settlement"] = {
+                "decision": decision,
+                "intake_task_id": str(settlement.get("intake_task_id") or ""),
+                "review_task_id": str(settlement.get("review_task_id") or ""),
+                "settled_at": settlement.get("settled_at", ""),
+                "reason_label": settlement.get("reason_label", ""),
+            }
+        return out
+
+    return {"id": reference_id, "kind": "unknown", "not_found": True,
+            "reason": "no_matching_thread_or_candidate"}
+
+
 def _find_thread(threads: list[dict], thread_id: str | None = None) -> dict | None:
     visible = [t for t in threads if t.get("status") in ("dormant", "held")]
     visible.sort(key=lambda t: t.get("created_at", ""), reverse=True)
@@ -1015,6 +1142,118 @@ def _find_thread(threads: list[dict], thread_id: str | None = None) -> dict | No
         if t.get("id") == thread_id:
             return t
     return None
+
+
+def _compact_candidate_capsule(candidate: dict) -> dict:
+    """Compact, surface-safe projection of a candidate for live inspection.
+
+    This is the honesty-preserving counterpart to `_compact_thread_capsule`:
+    a saved-residue candidate is NOT a thread, and the projection must make
+    that distinction visible to the agent (status, kind, settlement, intake
+    task id) without leaking free-form payloads the agent cannot trust.
+    """
+    settlement = candidate.get("kanban_settlement") or {}
+    return {
+        "object_kind": "candidate",  # explicit, not a thread
+        "candidate_id": candidate.get("id"),
+        "status": candidate.get("status"),
+        "kind": candidate.get("kind", ""),
+        "title": truncate_text(candidate.get("summary", "") or "Sensorium candidate", 240),
+        "pressure": candidate.get("pressure"),
+        "created_at": candidate.get("created_at"),
+        "updated_at": candidate.get("updated_at"),
+        "sensitivity": candidate.get("sensitivity", "private"),
+        "allowed_surfaces": candidate.get("allowed_surfaces", []),
+        "source_refs": candidate.get("source_refs", []) or [],
+        "event_ids": candidate.get("event_ids", []) or [],
+        "correlation_keys": candidate.get("correlation_keys", []) or [],
+        "kanban_settlement": {
+            "decision": str(settlement.get("decision") or ""),
+            "intake_task_id": str(settlement.get("intake_task_id") or ""),
+            "review_task_id": str(settlement.get("review_task_id") or ""),
+            "settled_at": settlement.get("settled_at", ""),
+            "reason_label": settlement.get("reason_label", ""),
+        } if settlement else {},
+        "is_openable_thread": False,  # honest signal: this is a candidate, not a thread
+        "honesty_note": (
+            "This is a candidate record, not a thread capsule. The kanban_settlement "
+            "block is the durable trace; intake_task_id points to the saved Kanban "
+            "intake. When responding to a presented pointer, keep using this exact "
+            "candidate_id instead of switching to a new status-selected pointer."
+        ),
+    }
+
+
+def handle_sensorium_candidate_open(
+    *,
+    candidate_id: str,
+    surface: str = "local",
+    instance: str = "default",
+    state_dir: str | None = None,
+    config_path: str | None = None,
+) -> str:
+    """Open a candidate (active or saved-residue) for live, surface-safe inspection.
+
+    Acceptance criterion (b): open latest/candidate semantics can recover
+    relevant candidate details when allowed surface permits. This is the
+    explicit complement to the live ``open`` action that used to fail for
+    candidates. The capsule explicitly says it is a candidate, not a thread,
+    so the surface-facing pointer/doorway does not have to invent a thread.
+    """
+    from .config import load_instance_config, visible_on_surface
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+
+    instance_config, _ = load_instance_config(
+        config_path=config_path, state_dir=str(store.root),
+    )
+
+    candidates = store.read_jsonl("candidates")
+    target = None
+    if candidate_id and candidate_id != "latest":
+        for c in candidates:
+            if c.get("id") == candidate_id:
+                target = c
+                break
+    if target is None:
+        # Honour acceptance (b): when "latest" is requested for a surface,
+        # prefer the highest-pressure active candidate on that surface and
+        # fall back to the highest-pressure saved-residue candidate when no
+        # active candidate is available.
+        active_visible = [
+            c for c in candidates
+            if c.get("status") == "candidate"
+            and visible_on_surface(c, surface, instance_config)
+        ]
+        if active_visible:
+            active_visible.sort(key=lambda c: (c.get("pressure") or 0), reverse=True)
+            target = active_visible[0]
+        else:
+            saved_visible = [
+                c for c in candidates
+                if (c.get("kanban_settlement") or {}).get("decision") in {"SAVE", "PROMOTE_CONSCIOUS"}
+                and (c.get("kanban_settlement") or {}).get("intake_task_id")
+                and visible_on_surface(c, surface, instance_config)
+            ]
+            if saved_visible:
+                saved_visible.sort(key=lambda c: (c.get("pressure") or 0), reverse=True)
+                target = saved_visible[0]
+
+    if target is None:
+        return _err(
+            instance,
+            f"No viewable candidate for surface '{surface}' (id='{candidate_id or 'latest'}'); "
+            "the agent should call sensorium(action='status', surface=...) instead.",
+        )
+    if not visible_on_surface(target, surface, instance_config):
+        return _err(
+            instance,
+            f"Candidate '{target.get('id')}' is not allowed on surface '{surface}'.",
+        )
+
+    capsule = _compact_candidate_capsule(target)
+    return _ok(instance, capsule)
 
 
 def _compact_thread_capsule(thread: dict) -> dict:

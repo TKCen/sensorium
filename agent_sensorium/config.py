@@ -107,8 +107,11 @@ SAFE_DEFAULTS: dict = {
     "thread_ttl_hours": 168,
     # Generic default actor for the deprecated background-conscious lease lane.
     "default_actor": "background_conscious",
-    # Generic cheap-reviewer profile the Kanban bridge assigns intake to.
-    "subconscious_profile": "subconscious_worker",
+    # Generic reviewer profile the Kanban bridge assigns intake to. Defaults to
+    # the real Hermes `serasubconscious` profile so newly minted intake rows are
+    # claimable by the dispatcher. Override per-instance via instance.config.json
+    # `subconscious_profile` when running against a different reviewer lane.
+    "subconscious_profile": "serasubconscious",
     # Dashboard quiet-tick freshness filename (configurable, generic default).
     "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
     "tts": DEFAULT_TTS_CONFIG,

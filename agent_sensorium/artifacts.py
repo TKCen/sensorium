@@ -26,6 +26,7 @@ VALID_DELIVERY_STATES = {
     "held_for_review",
     "delivery_blocked",
     "delivery_cancelled",
+    "silenced",
 }
 OUTBOUND_DELIVERY_STATES = {"delivered", "sent", "posted", "dispatched", "queued"}
 

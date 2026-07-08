@@ -124,7 +124,7 @@ def test_runtime_status_maps_candidate_review_held_stale_cases(tmp_path, monkeyp
 
     nodes_by_id = {node["id"]: node for node in data["nodes"] if node["origin"] == "instance"}
     assert any(n["status"] == "waiting" for n in nodes_by_id.values() if n["kind"] == "candidate")
-    assert any(n["status"] == "reviewing" for n in nodes_by_id.values() if n["kind"] == "candidate")
+    assert any(n["status"] == "settled" for n in nodes_by_id.values() if n["kind"] == "candidate")
     assert any(n["status"] == "stale" for n in nodes_by_id.values() if n["kind"] == "candidate")
     thread_nodes = [n for n in nodes_by_id.values() if n["kind"] == "thread"]
     # closed thread is not an "active" instance and must not be surfaced at all.
@@ -135,6 +135,74 @@ def test_runtime_status_maps_candidate_review_held_stale_cases(tmp_path, monkeyp
 
     for node in data["nodes"]:
         assert node["status"] in data["status_vocab"]
+
+
+def test_runtime_status_marks_historical_prepared_outbox_as_settled(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(root, blocks={})
+    _append_jsonl(root / "threads.jsonl", {
+        "id": "thread_archived_1", "status": "archived", "updated_at": "2026-06-21T10:00:00Z",
+    })
+    _append_jsonl(root / "thread_actions.jsonl", {
+        "id": "action_acted_1",
+        "status": "acted",
+        "origin_thread_id": "thread_archived_1",
+        "attachments": [{"kind": "outbox_request", "ref_id": "outbox_prepared_1"}],
+        "updated_at": "2026-06-21T10:01:00Z",
+    })
+    _append_jsonl(root / "outbox.jsonl", {
+        "id": "outbox_prepared_1",
+        "status": "prepared",
+        "delivery_mode": "context_pointer",
+        "origin_thread_id": "thread_archived_1",
+        "updated_at": "2026-06-21T10:02:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.runtime_status(instance="demo"))
+
+    outbox_nodes = [node for node in data["nodes"] if node["kind"] == "outbox"]
+    assert outbox_nodes == []
+
+
+def test_runtime_status_keeps_live_outbox_while_excluding_historical_prepared_pointer(tmp_path, monkeypatch):
+    root = tmp_path / "sensorium" / "demo"
+    _write_registry(root, blocks={})
+    _append_jsonl(root / "threads.jsonl", {
+        "id": "thread_archived_1", "status": "archived", "updated_at": "2026-06-21T10:00:00Z",
+    })
+    _append_jsonl(root / "threads.jsonl", {
+        "id": "thread_live_1", "status": "held", "updated_at": "2026-06-21T10:03:00Z",
+    })
+    _append_jsonl(root / "thread_actions.jsonl", {
+        "id": "action_acted_1",
+        "status": "acted",
+        "origin_thread_id": "thread_archived_1",
+        "attachments": [{"kind": "outbox_request", "ref_id": "outbox_historical_1"}],
+        "updated_at": "2026-06-21T10:01:00Z",
+    })
+    _append_jsonl(root / "outbox.jsonl", {
+        "id": "outbox_historical_1",
+        "status": "prepared",
+        "delivery_mode": "context_pointer",
+        "origin_thread_id": "thread_archived_1",
+        "updated_at": "2026-06-21T10:02:00Z",
+    })
+    _append_jsonl(root / "outbox.jsonl", {
+        "id": "outbox_live_1",
+        "status": "failed",
+        "delivery_mode": "context_pointer",
+        "origin_thread_id": "thread_live_1",
+        "updated_at": "2026-06-21T10:04:00Z",
+    })
+
+    mod = _load_dashboard(monkeypatch, root)
+    data = asyncio.run(mod.runtime_status(instance="demo"))
+
+    outbox_nodes = [node for node in data["nodes"] if node["kind"] == "outbox"]
+    assert len(outbox_nodes) == 1
+    assert outbox_nodes[0]["id"] == "outbox:outbox_live_1"
+    assert outbox_nodes[0]["status"] == "error"
 
 
 def test_runtime_status_unknown_and_hostile_status_does_not_leak(tmp_path, monkeypatch):

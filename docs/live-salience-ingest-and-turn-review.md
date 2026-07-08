@@ -49,7 +49,7 @@ A salient item is foreground-owned when the current turn is already doing the re
 - making an explicit no-action decision for it;
 - asking the user for the needed decision.
 
-Foreground-owned salience should not be ingested into Sensorium just because it is important.
+Foreground-owned salience should not be ingested into Sensorium merely because it is important. But foreground-handled is not automatically the same as fully settled: explicit corrections, relational salience, creative/taste locks, live design insights, durable importance, and pattern pressure should still leave one compact Sensorium residue signal when the live answer/action does not otherwise preserve the future tendency.
 
 ### Unresolved residue
 
@@ -83,9 +83,9 @@ Over-ingestion is when Sensorium accumulates shadow backlog:
 
 ```text
 1. Handle the user's live turn normally.
-2. Ask whether the salient item is foreground-owned.
-3. If foreground-owned and fully resolved: do not ingest.
-4. If foreground-owned but a compact unresolved residue remains: ingest only that residue.
+2. Ask whether this is high-salience material: explicit correction, relational salience, creative/taste lock, live design insight, durable importance, or pattern pressure.
+3. If it is high-salience and the foreground answer/action does not otherwise preserve the future tendency: ingest one compact residue signal, even if you also answered now.
+4. If foreground-owned and fully resolved/captured elsewhere with no residue: do not ingest.
 5. If not foreground-owned and the item should persist as attention rather than a task: ingest.
 6. If the item needs durable procedural/factual memory instead: use skill/memory/Hindsight/docs, not Sensorium ingest.
 ```
@@ -93,8 +93,9 @@ Over-ingestion is when Sensorium accumulates shadow backlog:
 The short form:
 
 ```text
-Foreground work goes to foreground tools.
-Unresolved residue goes to Sensorium.
+Foreground handled does not automatically mean skip.
+High-salience residue goes to Sensorium as one compact signal.
+Fully settled or captured elsewhere goes quiet.
 Durable facts/procedures go to memory/skills/docs.
 ```
 
@@ -125,19 +126,22 @@ The hook should bias against duplicate ingest without forbidding residue capture
 Required semantics:
 
 - say to handle the live turn normally first;
-- say not to ingest merely because the turn is important;
-- say not to ingest when answering/acting/retaining/patching now;
-- allow ingest for unresolved residue that the foreground will not settle;
+- bias toward compact capture for explicit corrections, relational salience, creative/taste locks, live design insights, durable importance, and pattern pressure;
+- say that answering now does not by itself mean skip;
+- say to skip only when the item is ordinary, captured elsewhere with no Sensorium value, or would become task/log spam;
+- preserve the foreground-duplicate guard for fully settled/no-residue work;
 - preserve the `compact signal, not a task` boundary;
 - remain under the existing small-context budget.
 
 Example target wording:
 
 ```text
-Do not ingest merely because the turn is important if you are answering,
-acting on, retaining, or patching it now. Only call sensorium(action='ingest')
-for unresolved residue: something important that the foreground turn will not
-settle and should persist as a compact signal, not a task.
+Handle the live turn normally first. Call sensorium(action='ingest') when
+something matters even if you also answer now: explicit corrections,
+relational salience, creative/taste locks, live design insights, durable
+importance, or pattern pressure. Skip only when it is ordinary, captured
+elsewhere with no Sensorium value, or would become task/log spam. Capture
+one compact residue signal, not a task or raw transcript.
 ```
 
 ## Cheap turn-review safety net

@@ -19,6 +19,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .provider_budget import (
+    BAND_RANKS,
+    PROVIDER_BUDGET_CORRELATION_KEYS,
+    collect_provider_budget_sample,
+    evaluate_provider_budget_sample,
+    format_budget_event,
+)
 from .schemas import VALID_SENSITIVITIES, truncate_text
 
 MAX_SUMMARY_CHARS = 200
@@ -889,6 +896,20 @@ def codex_usage_sample(
     return codex_usage_compact_sample(codex, generated_at=data.get("generated_at"))
 
 
+def provider_budget_sample(
+    *,
+    probe_path: str | None = None,
+    timeout_seconds: int = 45,
+) -> dict:
+    """Read paid-provider subscription budget pressure from the shared probe.
+
+    The returned shape is already reduced to provider/window percentages,
+    statuses, selected model labels, and reset times. It contains no tokens,
+    account identifiers, emails, or raw provider payloads.
+    """
+    return collect_provider_budget_sample(probe_path=probe_path, timeout_seconds=timeout_seconds)
+
+
 def codex_usage_compact_sample(codex: dict, *, generated_at: str | None = None) -> dict:
     """Sanitize a Codex usage payload down to pressure-relevant fields."""
     raw_main = codex.get("main_rate_limit")
@@ -1029,6 +1050,84 @@ def classify_codex_usage_pressure(
     next_state["last_generated_at"] = sample.get("generated_at") or ""
     next_state["last_values"] = values
     return sig, next_state
+
+
+def classify_provider_budget_pressure(
+    sample: dict,
+    *,
+    state: dict | None = None,
+    config: dict | None = None,
+) -> tuple[dict | None, dict]:
+    """Classify MiniMax/paid-stack provider subscription budget pressure.
+
+    Debounce and threshold semantics are delegated to agent_sensorium.provider_budget
+    so the Sensorium sensor and emergency watchdog cannot drift.
+    """
+    events, next_state = evaluate_provider_budget_sample(sample, state=state, config=config)
+    if not events:
+        next_state["level"] = next_state.get("level") or "healthy"
+        return None, next_state
+
+    primary = events[0]
+    level = str(primary.get("band") or "healthy")
+    rank = BAND_RANKS.get(level, 0)
+    strength = 0.72
+    if rank >= BAND_RANKS["exhausted"]:
+        strength = 0.98
+    elif rank >= BAND_RANKS["critical"]:
+        strength = 0.95
+    elif rank >= BAND_RANKS["degraded"]:
+        strength = 0.84
+    elif rank >= BAND_RANKS["watch"]:
+        strength = 0.68
+
+    event_summaries = [format_budget_event(event) for event in events[:4]]
+    summary = "inference budget pressure " + str(primary.get("transition") or level)
+    if event_summaries:
+        summary += ": " + "; ".join(event_summaries)
+    values = {
+        "primary": primary.get("values") or {},
+        "events": [
+            {
+                "provider": event.get("provider"),
+                "window": event.get("window"),
+                "band": event.get("band"),
+                "previous_band": event.get("previous_band"),
+                "transition": event.get("transition"),
+                "metric_family": event.get("metric_family"),
+                "reset_identity": event.get("reset_identity"),
+                "missed_warning": bool(event.get("missed_warning", False)),
+                "values": event.get("values") or {},
+            }
+            for event in events[:8]
+        ],
+        "event_count": len(events),
+    }
+    metric_family = str(primary.get("metric_family") or "provider_budget")
+    provider = str(primary.get("provider") or "provider")
+    signal = {
+        "sensor": "sensorium.provider_budget_pressure",
+        "source": "provider_budget",
+        "kind": "inference_budget_pressure",
+        "summary": truncate_text(summary, MAX_SUMMARY_CHARS),
+        "actor": "tool",
+        "strength_hint": strength,
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+        "correlation_keys": PROVIDER_BUDGET_CORRELATION_KEYS + [
+            f"provider-budget:{provider}",
+            f"provider-budget:{metric_family}",
+        ],
+        "scope": "global",
+        "metric_family": metric_family,
+        "pressure_level": level,
+        "previous_level": primary.get("previous_band") or "healthy",
+        "transition": primary.get("transition") or level,
+        "values": values,
+    }
+    next_state["level"] = level
+    next_state["last_values"] = values
+    return signal, next_state
 
 
 _TCP_STATE_NAMES = {

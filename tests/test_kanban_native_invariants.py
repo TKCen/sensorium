@@ -648,6 +648,105 @@ class TestRuntimeKanbanBridgeIntakeRows:
         )
         self._assert_sticky_block_then_assign(calls, 4, bridge.PROFILE)
 
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_intake_assignee_is_a_real_hermes_profile_no_ghost(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: no `subconscious_worker` ghost assignee in any intake path.
+
+        The bridge must default to a profile that the Hermes dispatcher
+        actually knows about (currently ``serasubconscious``) so newly minted
+        `sensor:intake:*` rows are immediately claimable. Override via
+        ``SENSORIUM_SUBCONSCIOUS_PROFILE`` is honored, but the hardcoded
+        fallback must never reintroduce the legacy ghost name.
+        """
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+
+        # 1. The module's default profile constant must not be the ghost.
+        assert bridge.PROFILE != "subconscious_worker", (
+            f"{label}: bridge.PROFILE still defaults to the ghost 'subconscious_worker'; "
+            "update the script default to a real Hermes profile (e.g. 'serasubconscious')."
+        )
+
+        # 2. Drive both intake paths and assert no emitted command argument
+        #    ever carries the ghost name — neither as the assignee nor as a
+        #    free-standing token that could leak into the body or metadata.
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=json.dumps({"id": f"t_fake_{len(calls)}"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+
+        bridge._create_intake(
+            {
+                "id": "evt_ghost_check",
+                "kind": "hindsight_pressure",
+                "summary": "intake must not use ghost assignee",
+            }
+        )
+        bridge._create_candidate_intake(
+            {
+                "id": "cand_ghost_check",
+                "kind": "hindsight_pressure",
+                "summary": "candidate intake must not use ghost assignee",
+            }
+        )
+
+        ghost = "subconscious_worker"
+        for idx, cmd in enumerate(calls, start=1):
+            assert ghost not in cmd, (
+                f"{label}: call #{idx} carries ghost assignee {ghost!r} -> {cmd!r}"
+            )
+        # And the sticky-block-then-assign path used by both intake creators
+        # must point at the bridge's configured profile, never the ghost.
+        assert bridge.PROFILE != ghost
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_blocked_conscious_backlog_does_not_starve_subconscious_review(
+        self,
+        label: str,
+        path: Path,
+    ):
+        """Blocked Conscious furniture must not suppress Subconscious intake review.
+
+        Regression: the runtime bridge counted blocked ``conscious:review:*``
+        rows as active attention heads. A few intentional holds then prevented
+        creation of any ``subconscious:review:*`` batch, leaving fresh
+        ``sensor:intake:*`` rows sticky-blocked forever.
+        """
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+
+        blocked = {
+            "id": "t_blocked_conscious",
+            "title": "conscious:review: parked old attention",
+            "status": "blocked",
+        }
+        todo = {
+            "id": "t_todo_conscious",
+            "title": "conscious:review: dependency-gated child",
+            "status": "todo",
+        }
+        ready = {
+            "id": "t_ready_conscious",
+            "title": "conscious:review: live attention",
+            "status": "ready",
+        }
+
+        assert bridge._active_conscious([blocked, todo]) == []
+        assert bridge._active_conscious([ready]) == [ready]
+
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:
     def _open_candidate_intake(self, *, status="ready", comment="decision: DROP") -> dict:

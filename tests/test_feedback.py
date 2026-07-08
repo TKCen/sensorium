@@ -407,23 +407,16 @@ class TestThreadUpdateFeedbackEmission:
 class TestPluginFeedbackSchema:
     """Plugin schema/handler forwards emit_feedback config."""
 
-    def test_thread_update_schema_includes_emit_feedback(self):
+    def test_thread_update_admin_schema_is_not_registered(self):
         from agent_sensorium.plugin import register
         from tests.test_plugin_registration import FakePluginContext
 
         ctx = FakePluginContext()
         register(ctx)
-        schema = ctx.tools["sensorium_thread_update"]["schema"]
-        props = schema["parameters"]["properties"]
-        assert "emit_feedback" in props
-        assert props["emit_feedback"]["type"] == "boolean"
+        assert "sensorium_thread_update" not in ctx.tools
 
     def test_thread_update_handler_accepts_emit_feedback(self, state_dir):
-        from agent_sensorium.plugin import register
-        from tests.test_plugin_registration import FakePluginContext
-
-        ctx = FakePluginContext()
-        register(ctx)
+        from agent_sensorium.tools import handle_sensorium_thread_update
 
         sig = {
             "sensor": "test",
@@ -445,15 +438,14 @@ class TestPluginFeedbackSchema:
         threads = store.read_jsonl("threads")
         thread_id = threads[0]["id"]
 
-        handler = ctx.tools["sensorium_thread_update"]["handler"]
-        raw = handler({
-            "thread_id": thread_id,
-            "action": "close",
-            "reason": "test",
-            "emit_feedback": True,
-            "instance": "test",
-            "state_dir": state_dir,
-        })
+        raw = handle_sensorium_thread_update(
+            thread_id=thread_id,
+            action="close",
+            reason="test",
+            emit_feedback=True,
+            instance="test",
+            state_dir=state_dir,
+        )
         result = json.loads(raw)
         assert result["success"] is True
         assert result["data"].get("feedback_emitted") is True

@@ -1,0 +1,1068 @@
+1
+00:00:00,000 --> 00:00:03,600
+Is your music missing that groove,
+
+2
+00:00:01,760 --> 00:00:05,480
+movement, and bounce that you hear in
+
+3
+00:00:03,600 --> 00:00:07,760
+professional tracks? I used to think the
+
+4
+00:00:05,480 --> 00:00:09,400
+solution would be something complex, but
+
+5
+00:00:07,760 --> 00:00:11,160
+two decades of releasing records and
+
+6
+00:00:09,400 --> 00:00:12,920
+teaching thousands of producers has
+
+7
+00:00:11,160 --> 00:00:14,520
+taught me that it's not some complex
+
+8
+00:00:12,920 --> 00:00:17,240
+plugin chain or advanced [music]
+
+9
+00:00:14,520 --> 00:00:19,040
+technique. Here's the secret, volume. If
+
+10
+00:00:17,240 --> 00:00:21,160
+you're only using it for basic leveling
+
+11
+00:00:19,040 --> 00:00:22,840
+and fades, that's like owning a Swiss
+
+12
+00:00:21,160 --> 00:00:24,560
+Army knife and only ever using the
+
+13
+00:00:22,840 --> 00:00:26,680
+screwdriver. So, today I'm going to show
+
+14
+00:00:24,560 --> 00:00:29,520
+you four common reasons why your tracks
+
+15
+00:00:26,680 --> 00:00:32,360
+feel flat and lack movement, and how to
+
+16
+00:00:29,520 --> 00:00:35,000
+solve it with the power of volume. So,
+
+17
+00:00:32,360 --> 00:00:36,920
+let's start with problem one, synths. I
+
+18
+00:00:35,000 --> 00:00:38,840
+bet you've added a synth to your track
+
+19
+00:00:36,920 --> 00:00:40,640
+only to feel like it's not quite sitting
+
+20
+00:00:38,840 --> 00:00:43,160
+right. That's because synths and pads
+
+21
+00:00:40,640 --> 00:00:45,040
+often feel flat and static straight out
+
+22
+00:00:43,160 --> 00:00:47,880
+of the source, especially when played
+
+23
+00:00:45,040 --> 00:00:49,880
+over rhythmic stuff like drums and bass.
+
+24
+00:00:47,880 --> 00:00:52,160
+Here I've got a pad and a string grouped
+
+25
+00:00:49,880 --> 00:00:54,365
+together. They sound okay, but they just
+
+26
+00:00:52,160 --> 00:00:56,385
+play statically over the drums.
+
+27
+00:00:54,365 --> 00:00:56,385
+>> [music]
+
+28
+00:00:57,840 --> 00:01:01,280
+>> So, let's get this synth grooving with
+
+29
+00:00:59,640 --> 00:01:03,760
+playing old volume. You can use
+
+30
+00:01:01,280 --> 00:01:06,200
+automation or whatever plugin you like,
+
+31
+00:01:03,760 --> 00:01:07,640
+anything that turns volume up and down.
+
+32
+00:01:06,200 --> 00:01:09,760
+I'm going to use volume shaper which
+
+33
+00:01:07,640 --> 00:01:11,720
+runs inside shaper box. I'm going to
+
+34
+00:01:09,760 --> 00:01:14,600
+load volume shaper on this group. Let's
+
+35
+00:01:11,720 --> 00:01:16,120
+start by loading this ramp up wave
+
+36
+00:01:14,600 --> 00:01:18,840
+preset. And without touching anything
+
+37
+00:01:16,120 --> 00:01:22,320
+else, this volume rise every bar feels
+
+38
+00:01:18,840 --> 00:01:22,320
+nice. It fits the groove.
+
+39
+00:01:23,840 --> 00:01:25,860
+>> [music]
+
+40
+00:01:27,680 --> 00:01:32,520
+>> Now I'll reduce mix to halfway so the
+
+41
+00:01:30,600 --> 00:01:34,976
+swelling is more subtle. This already
+
+42
+00:01:32,520 --> 00:01:36,996
+takes the track from flat to bouncing.
+
+43
+00:01:34,976 --> 00:01:36,996
+>> [music]
+
+44
+00:01:40,240 --> 00:01:44,880
+>> Now listen to what happens when I bend
+
+45
+00:01:41,880 --> 00:01:46,766
+this curve down. It feels lazy, more
+
+46
+00:01:44,880 --> 00:01:48,786
+laid-back.
+
+47
+00:01:46,766 --> 00:01:48,786
+>> [music]
+
+48
+00:01:51,240 --> 00:01:56,591
+>> Or when I make it steeper at the start,
+
+49
+00:01:53,360 --> 00:01:58,611
+the sound rushes in. It feels urgent.
+
+50
+00:01:56,591 --> 00:01:58,611
+>> [music]
+
+51
+00:02:00,920 --> 00:02:06,200
+>> Now I'll change the rate to half notes,
+
+52
+00:02:03,440 --> 00:02:10,200
+so the volume swells up every two beats.
+
+53
+00:02:06,200 --> 00:02:10,200
+And let's reduce mix even more.
+
+54
+00:02:10,346 --> 00:02:12,366
+>> [music]
+
+55
+00:02:13,720 --> 00:02:17,551
+>> It's super subtle, but that tiny bit of
+
+56
+00:02:15,480 --> 00:02:19,571
+movement changes the feel.
+
+57
+00:02:17,551 --> 00:02:19,571
+>> [music]
+
+58
+00:02:22,360 --> 00:02:25,200
+>> And we're not filtering, we're not
+
+59
+00:02:23,560 --> 00:02:28,200
+distorting, because I'm only shaping
+
+60
+00:02:25,200 --> 00:02:30,720
+volume, the actual tone of the sound is
+
+61
+00:02:28,200 --> 00:02:32,760
+identical. It's the most transparent way
+
+62
+00:02:30,720 --> 00:02:34,400
+to I believe to anything. Now, I know
+
+63
+00:02:32,760 --> 00:02:36,840
+what you're thinking, this feels like
+
+64
+00:02:34,400 --> 00:02:38,840
+sidechain pumping, but a bit slower. And
+
+65
+00:02:36,840 --> 00:02:40,400
+yeah, it does a bit, but something else
+
+66
+00:02:38,840 --> 00:02:42,800
+I do a lot is what I call
+
+67
+00:02:40,400 --> 00:02:46,280
+anti-sidechaining. Let me show you. I'll
+
+68
+00:02:42,800 --> 00:02:49,640
+load the ramp down preset, and then I'll
+
+69
+00:02:46,280 --> 00:02:51,611
+bend the curve up to create this inverse
+
+70
+00:02:49,640 --> 00:02:53,631
+sidechain curve.
+
+71
+00:02:51,611 --> 00:02:53,631
+>> [music]
+
+72
+00:02:56,851 --> 00:03:00,120
+[music]
+
+73
+00:02:57,959 --> 00:03:03,080
+>> So, if your usual pumping from low to
+
+74
+00:03:00,120 --> 00:03:05,367
+high is like breathing in, this feels
+
+75
+00:03:03,080 --> 00:03:07,387
+more like breathing out.
+
+76
+00:03:05,367 --> 00:03:07,387
+>> [music]
+
+77
+00:03:10,607 --> 00:03:12,627
+[music]
+
+78
+00:03:13,160 --> 00:03:17,280
+>> With the mix subtle, you barely hear it,
+
+79
+00:03:15,080 --> 00:03:19,519
+but you feel the movement. It stops that
+
+80
+00:03:17,280 --> 00:03:21,959
+flat sustain feeling that pads and
+
+81
+00:03:19,519 --> 00:03:23,800
+synths often have. And you can combine
+
+82
+00:03:21,959 --> 00:03:25,760
+normal ducking with an anti-sidechain
+
+83
+00:03:23,800 --> 00:03:27,640
+shape. So, here I'm using the sub note
+
+84
+00:03:25,760 --> 00:03:29,640
+at the start [music] of every bar to
+
+85
+00:03:27,640 --> 00:03:31,840
+trigger the compressor. And combined
+
+86
+00:03:29,640 --> 00:03:33,800
+with the anti-sidechain volume curve,
+
+87
+00:03:31,840 --> 00:03:36,807
+you get this [music] push-pull that
+
+88
+00:03:33,800 --> 00:03:38,827
+locks everything into the groove.
+
+89
+00:03:36,807 --> 00:03:38,827
+>> [music]
+
+90
+00:03:41,760 --> 00:03:45,560
+>> Okay, so we've looked at basic shapes,
+
+91
+00:03:43,680 --> 00:03:47,120
+but here's another example. In this
+
+92
+00:03:45,560 --> 00:03:49,200
+track, I've got a bunch of synths all
+
+93
+00:03:47,120 --> 00:03:51,872
+grouped. And on the group, I drew this
+
+94
+00:03:49,200 --> 00:03:53,892
+wavy volume curve.
+
+95
+00:03:51,872 --> 00:03:53,892
+>> [music]
+
+96
+00:03:56,457 --> 00:03:58,477
+[music]
+
+97
+00:03:59,560 --> 00:04:03,440
+>> The secret is to feel the groove that
+
+98
+00:04:01,920 --> 00:04:05,640
+the other sounds have already
+
+99
+00:04:03,440 --> 00:04:07,959
+established, and then draw a volume
+
+100
+00:04:05,640 --> 00:04:11,640
+curve to help your sound weave [music]
+
+101
+00:04:07,959 --> 00:04:11,640
+in and out and around that groove.
+
+102
+00:04:15,320 --> 00:04:18,760
+And you [music] probably noticed that in
+
+103
+00:04:16,760 --> 00:04:21,120
+these examples, I've been using volume
+
+104
+00:04:18,760 --> 00:04:23,600
+modulation on [music] groups of synths
+
+105
+00:04:21,120 --> 00:04:25,840
+together, which is a tip in itself. By
+
+106
+00:04:23,600 --> 00:04:28,040
+making all of your synths ebb and flow
+
+107
+00:04:25,840 --> 00:04:29,919
+to the same shape, it gives this feeling
+
+108
+00:04:28,040 --> 00:04:32,160
+of unity as everything [music]
+
+109
+00:04:29,919 --> 00:04:33,800
+grooves together. Okay, now to problem
+
+110
+00:04:32,160 --> 00:04:36,400
+two. You've got your synths and your
+
+111
+00:04:33,800 --> 00:04:39,120
+sounds moving, but what if they still
+
+112
+00:04:36,400 --> 00:04:40,919
+feel too polite? Sometimes what's making
+
+113
+00:04:39,120 --> 00:04:43,360
+your track feel flat isn't just a lack
+
+114
+00:04:40,919 --> 00:04:45,080
+of movement, it's a lack of attitude
+
+115
+00:04:43,360 --> 00:04:47,040
+giving that straight out of the box
+
+116
+00:04:45,080 --> 00:04:49,919
+feeling. This is where this much sharper
+
+117
+00:04:47,040 --> 00:04:51,640
+trick comes in. I call it hole punching.
+
+118
+00:04:49,919 --> 00:04:54,753
+Have a listen to this synth. It sounds
+
+119
+00:04:51,640 --> 00:04:56,773
+cool, but it feels too full on.
+
+120
+00:04:54,753 --> 00:04:56,773
+>> [music]
+
+121
+00:04:59,840 --> 00:05:04,320
+>> So, to make it tighter and groovier, we
+
+122
+00:05:01,760 --> 00:05:07,840
+can draw volume steps [music] to carve
+
+123
+00:05:04,320 --> 00:05:07,840
+out some notes in the rhythm.
+
+124
+00:05:09,163 --> 00:05:12,200
+>> [music]
+
+125
+00:05:10,240 --> 00:05:13,748
+>> I like how this now sounds choppier and
+
+126
+00:05:12,200 --> 00:05:15,768
+more syncopated.
+
+127
+00:05:13,748 --> 00:05:15,768
+>> [music]
+
+128
+00:05:18,160 --> 00:05:21,800
+>> Because music production is like
+
+129
+00:05:19,560 --> 00:05:23,840
+sculpture, you start with blocks of
+
+130
+00:05:21,800 --> 00:05:25,840
+sound and you carve away to make
+
+131
+00:05:23,840 --> 00:05:29,040
+everything fit. So, I'll often use
+
+132
+00:05:25,840 --> 00:05:32,000
+volume like a chisel to chip away gaps
+
+133
+00:05:29,040 --> 00:05:34,280
+in riffs and find little pockets that
+
+134
+00:05:32,000 --> 00:05:36,160
+add a stop-start feel. And by doing
+
+135
+00:05:34,280 --> 00:05:39,080
+this, I use this hole punching as a
+
+136
+00:05:36,160 --> 00:05:40,800
+sketch pad for new ideas. Now, I can
+
+137
+00:05:39,080 --> 00:05:43,400
+take what I learned from punching these
+
+138
+00:05:40,800 --> 00:05:44,919
+holes and copy the rhythm by muting some
+
+139
+00:05:43,400 --> 00:05:46,680
+of the mini notes in the clip. Although,
+
+140
+00:05:44,919 --> 00:05:49,160
+actually I prefer the hole punched
+
+141
+00:05:46,680 --> 00:05:51,240
+version in this case because at the end
+
+142
+00:05:49,160 --> 00:05:53,960
+of every bar, it chops off the
+
+143
+00:05:51,240 --> 00:05:56,320
+pre-volume reverb in a subtle but cool
+
+144
+00:05:53,960 --> 00:05:56,320
+way.
+
+145
+00:05:57,634 --> 00:05:59,920
+>> [music]
+
+146
+00:05:58,240 --> 00:06:02,080
+>> Now, you can take this even further with
+
+147
+00:05:59,920 --> 00:06:03,760
+advanced trans-gating. If you want to
+
+148
+00:06:02,080 --> 00:06:05,440
+see how to do that, go and watch my
+
+149
+00:06:03,760 --> 00:06:07,040
+vocal hooks video, which I'll link to
+
+150
+00:06:05,440 --> 00:06:08,920
+below. Now, there's another whole
+
+151
+00:06:07,040 --> 00:06:11,400
+punching trick that can make synths and
+
+152
+00:06:08,920 --> 00:06:13,520
+samples sound more pro. I grew up
+
+153
+00:06:11,400 --> 00:06:15,840
+listening to hip-hop in my teens. I've
+
+154
+00:06:13,520 --> 00:06:18,280
+always loved that certain snap and
+
+155
+00:06:15,840 --> 00:06:20,640
+swagger you get from old school sample
+
+156
+00:06:18,280 --> 00:06:22,560
+chopping. You also hear this in Daft
+
+157
+00:06:20,640 --> 00:06:24,520
+Punk's early records where the samples
+
+158
+00:06:22,560 --> 00:06:26,840
+are cut slightly off the grid. So,
+
+159
+00:06:24,520 --> 00:06:30,040
+inspired by that, I like to use volume
+
+160
+00:06:26,840 --> 00:06:33,480
+to punch these teeny gaps into a sound.
+
+161
+00:06:30,040 --> 00:06:33,480
+Here's with and without.
+
+162
+00:06:42,829 --> 00:06:44,080
+>> [music]
+
+163
+00:06:42,919 --> 00:06:45,840
+>> For more on this technique, I've made a
+
+164
+00:06:44,080 --> 00:06:48,720
+short video here on our Cable Guys
+
+165
+00:06:45,840 --> 00:06:51,240
+channel and a deep dive on my Minor
+
+166
+00:06:48,720 --> 00:06:52,960
+Chord channel. I'll link both below. All
+
+167
+00:06:51,240 --> 00:06:54,720
+right, now your sounds have groove and
+
+168
+00:06:52,960 --> 00:06:57,400
+attitude, but here's problem number
+
+169
+00:06:54,720 --> 00:06:59,720
+three. If the same volume pattern keeps
+
+170
+00:06:57,400 --> 00:07:02,200
+repeating over and over, your listener
+
+171
+00:06:59,720 --> 00:07:03,840
+stops noticing it and your track starts
+
+172
+00:07:02,200 --> 00:07:06,120
+feeling flat again for a completely
+
+173
+00:07:03,840 --> 00:07:08,280
+different reason. So, to overcome this,
+
+174
+00:07:06,120 --> 00:07:10,760
+think of how a magician uses slight of
+
+175
+00:07:08,280 --> 00:07:12,720
+hand. They do one thing in front of you,
+
+176
+00:07:10,760 --> 00:07:14,680
+but they also do something else out of
+
+177
+00:07:12,720 --> 00:07:17,120
+sight while you're distracted. Put the
+
+178
+00:07:14,680 --> 00:07:19,080
+two together and the audience is fooled.
+
+179
+00:07:17,120 --> 00:07:21,880
+And you can do slight of hand with
+
+180
+00:07:19,080 --> 00:07:23,640
+volume to make magic rhythms. Here's an
+
+181
+00:07:21,880 --> 00:07:27,280
+example. Here we've got a repeating
+
+182
+00:07:23,640 --> 00:07:27,280
+volume curve like we looked at earlier.
+
+183
+00:07:27,370 --> 00:07:29,390
+>> [music]
+
+184
+00:07:29,440 --> 00:07:34,280
+>> But then I'm automating the mix control
+
+185
+00:07:31,560 --> 00:07:36,200
+to keep the movement tight at first and
+
+186
+00:07:34,280 --> 00:07:38,505
+then blend out to something more
+
+187
+00:07:36,200 --> 00:07:40,525
+sustained to open up.
+
+188
+00:07:38,505 --> 00:07:40,525
+>> [music]
+
+189
+00:07:45,055 --> 00:07:47,075
+[music]
+
+190
+00:07:51,440 --> 00:07:55,280
+>> By doing this, the listener never quite
+
+191
+00:07:53,120 --> 00:07:57,240
+hears the same thing twice. And we can
+
+192
+00:07:55,280 --> 00:07:59,480
+go more extreme to make those
+
+193
+00:07:57,240 --> 00:08:02,080
+head-spinning rhythms you hear on modern
+
+194
+00:07:59,480 --> 00:08:04,640
+records. Again, I'll set up a simple
+
+195
+00:08:02,080 --> 00:08:07,160
+repeating shape, this time a downwards
+
+196
+00:08:04,640 --> 00:08:07,160
+ramp.
+
+197
+00:08:08,880 --> 00:08:14,000
+I'll set the rate to unsynced, so the
+
+198
+00:08:11,360 --> 00:08:16,120
+volume curve is free-running, not synced
+
+199
+00:08:14,000 --> 00:08:19,080
+to tempo. And by automating this from
+
+200
+00:08:16,120 --> 00:08:21,080
+fast to slow, we get this exponential
+
+201
+00:08:19,080 --> 00:08:23,100
+rhythm effect.
+
+202
+00:08:21,080 --> 00:08:23,100
+>> [music]
+
+203
+00:08:27,880 --> 00:08:32,215
+>> Quick side note, this also works well
+
+204
+00:08:29,280 --> 00:08:34,235
+with other effects like filters.
+
+205
+00:08:32,215 --> 00:08:34,235
+>> [music]
+
+206
+00:08:34,599 --> 00:08:38,840
+>> And you can also get wavy and automate
+
+207
+00:08:37,039 --> 00:08:41,000
+the smooth amount. Start with a
+
+208
+00:08:38,840 --> 00:08:45,840
+straight-edged wave and morph it to
+
+209
+00:08:41,000 --> 00:08:45,840
+smooth for this bubbly sequenced feel.
+
+210
+00:08:49,246 --> 00:08:51,266
+>> [music]
+
+211
+00:08:52,440 --> 00:08:57,040
+>> Many tremolo or volume plugins have some
+
+212
+00:08:54,760 --> 00:08:59,480
+kind of smoothing control like this. Try
+
+213
+00:08:57,040 --> 00:09:01,600
+automating it on pads and vocals.
+
+214
+00:08:59,480 --> 00:09:03,560
+Okay, on to problem number four. You've
+
+215
+00:09:01,600 --> 00:09:05,560
+added groove, you've got attitude,
+
+216
+00:09:03,560 --> 00:09:08,040
+you've automated movement, but your
+
+217
+00:09:05,560 --> 00:09:10,320
+track still feels off. Something's still
+
+218
+00:09:08,040 --> 00:09:12,160
+not sitting right. This catches a lot of
+
+219
+00:09:10,320 --> 00:09:14,640
+producers out. Nothing's missing
+
+220
+00:09:12,160 --> 00:09:16,680
+creatively, it's something small jumping
+
+221
+00:09:14,640 --> 00:09:18,839
+out and distracting the listener. This
+
+222
+00:09:16,680 --> 00:09:21,400
+could be a hit of percussion in a loop
+
+223
+00:09:18,839 --> 00:09:23,440
+or a spike in an arpeggio or a click
+
+224
+00:09:21,400 --> 00:09:25,880
+that catches your ear. Even a casual
+
+225
+00:09:23,440 --> 00:09:28,400
+listener who's never opened a door will
+
+226
+00:09:25,880 --> 00:09:30,640
+feel it. So, the solution is to get
+
+227
+00:09:28,400 --> 00:09:33,160
+surgical. Most producers reach for a
+
+228
+00:09:30,640 --> 00:09:35,320
+compressor to fix levels, but that's
+
+229
+00:09:33,160 --> 00:09:38,080
+like using a sledgehammer to crack a
+
+230
+00:09:35,320 --> 00:09:40,440
+walnut. I'm militant about using volume
+
+231
+00:09:38,080 --> 00:09:42,520
+instead because it's more controllable,
+
+232
+00:09:40,440 --> 00:09:44,280
+it's totally transparent, and it doesn't
+
+233
+00:09:42,520 --> 00:09:46,120
+touch the rest of the loop. So, if
+
+234
+00:09:44,280 --> 00:09:48,760
+something's sticking out of my drums,
+
+235
+00:09:46,120 --> 00:09:50,816
+I'll use volume to turn down or silence
+
+236
+00:09:48,760 --> 00:09:52,836
+any parts that mess up the groove.
+
+237
+00:09:50,816 --> 00:09:52,836
+[music]
+
+238
+00:09:55,401 --> 00:09:57,421
+>> [music]
+
+239
+00:09:59,040 --> 00:10:02,960
+>> And you can tweak the shape of the curve
+
+240
+00:10:00,800 --> 00:10:05,400
+to make it fit perfectly. Then use mix
+
+241
+00:10:02,960 --> 00:10:07,760
+to dial back the strength. And the same
+
+242
+00:10:05,400 --> 00:10:10,000
+idea works for cleaning up samples. If
+
+243
+00:10:07,760 --> 00:10:12,600
+you've got a click or a pop in a loop,
+
+244
+00:10:10,000 --> 00:10:14,600
+draw the volume right down on that spot,
+
+245
+00:10:12,600 --> 00:10:17,017
+and it's gone. No need to chop the audio
+
+246
+00:10:14,600 --> 00:10:19,037
+or load a de-clicker.
+
+247
+00:10:17,017 --> 00:10:19,037
+>> [music]
+
+248
+00:10:23,800 --> 00:10:28,320
+>> Or if a hit is feeling a bit spiky or
+
+249
+00:10:25,680 --> 00:10:32,200
+ticky, you can smooth its attack out
+
+250
+00:10:28,320 --> 00:10:32,200
+just with volume, nice and easy.
+
+251
+00:10:33,392 --> 00:10:36,760
+>> [music]
+
+252
+00:10:35,160 --> 00:10:38,640
+>> So, volume, it's the simplest tool
+
+253
+00:10:36,760 --> 00:10:40,880
+you've got, but that is why it's the
+
+254
+00:10:38,640 --> 00:10:43,360
+most powerful. Next time you need subtle
+
+255
+00:10:40,880 --> 00:10:45,680
+movement, chops with attitude, magic
+
+256
+00:10:43,360 --> 00:10:47,640
+interactions, or surgical fixes, you
+
+257
+00:10:45,680 --> 00:10:49,920
+know which effect to reach for. Because
+
+258
+00:10:47,640 --> 00:10:52,360
+remember, volume is your most powerful
+
+259
+00:10:49,920 --> 00:10:53,320
+chisel. Go to cableguys.com for more on
+
+260
+00:10:52,360 --> 00:10:56,000
+Volume Shaper and our
+
+261
+00:10:53,320 --> 00:10:57,880
+multi-award-winning ShaperBox plugin.
+
+262
+00:10:56,000 --> 00:11:00,200
+And to try the free, fully functional
+
+263
+00:10:57,880 --> 00:11:02,160
+demo with no time limit. And using
+
+264
+00:11:00,200 --> 00:11:04,560
+volume is one thing, but understanding
+
+265
+00:11:02,160 --> 00:11:07,120
+advanced distortion techniques will step
+
+266
+00:11:04,560 --> 00:11:11,760
+up your skills to the next level. So, to
+
+267
+00:11:07,120 --> 00:11:11,760
+do that, go and watch this video next.
+

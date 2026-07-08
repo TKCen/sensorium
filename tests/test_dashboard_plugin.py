@@ -299,7 +299,12 @@ def test_dashboard_inner_life_routes_are_read_only_and_privacy_safe(tmp_path, mo
 
     for path in ["/registry", "/probe-audit", "/dampeners", "/blockers"]:
         assert routes[path] == ["GET"]
-    assert all(set(methods) <= {"GET", "HEAD"} for methods in routes.values())
+    write_routes = {"/artifacts/{artifact_id}/triage"}
+    assert all(
+        set(methods) <= {"GET", "HEAD"} or path in write_routes
+        for path, methods in routes.items()
+    )
+    assert routes["/artifacts/{artifact_id}/triage"] == ["POST"]
 
     payloads = [
         asyncio.run(mod.registry(instance="demo")),

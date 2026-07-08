@@ -125,6 +125,8 @@ _LOOP_STRING_BOUND_KEYS = frozenset(
 _LOOP_NUMERIC_BOUND_KEYS = frozenset({"cooldown_seconds", "ttl_seconds", "ttl_hours", "max_passes"})
 _LOOP_BOOL_BOUND_KEYS = frozenset({"receipt_required"})
 _LOOP_BOUND_KEYS = _LOOP_STRING_BOUND_KEYS | _LOOP_NUMERIC_BOUND_KEYS | _LOOP_BOOL_BOUND_KEYS
+_SIGNAL_INBOX_BLOCK_ID = "signal_inbox"
+_SIGNAL_EMITTING_SENSOR_KINDS = frozenset({BlockKind.SENSOR.value, BlockKind.TEMPORAL_SENSOR.value})
 
 
 def _ensure_mapping(value: object, *, label: str) -> dict:
@@ -340,6 +342,108 @@ def _enabled_edges(edges: Iterable[dict]) -> list[dict]:
     return [edge for edge in edges if edge.get("enabled", True)]
 
 
+def _registry_blocks(registry: dict) -> dict:
+    blocks = registry.get("blocks") if isinstance(registry, dict) else {}
+    return blocks if isinstance(blocks, dict) else {}
+
+
+def _edge_items(edge_registry: dict) -> list[dict]:
+    edges = edge_registry.get("edges") if isinstance(edge_registry, dict) else []
+    return [edge for edge in edges if isinstance(edge, dict)] if isinstance(edges, list) else []
+
+
+def _block_is_enabled(block: dict) -> bool:
+    if block.get("enabled") is False:
+        return False
+    status = str(block.get("status") or "").strip().lower()
+    return status not in {"paused", "deprecated", "disabled"}
+
+
+def _block_emits_signals(block: dict) -> bool:
+    """Whether a sensor block should have signal_inbox lineage.
+
+    Sensor blocks are emitting by default. Operators can explicitly declare a
+    non-emitting sensor-like block with ``emits_signals: false``; that is the
+    narrow allowlist for intentional topology exceptions.
+    """
+
+    return block.get("emits_signals") is not False
+
+
+def _edge_endpoint(edge: dict, primary: str, fallback: str) -> str | None:
+    value = edge.get(primary)
+    if value is None:
+        value = edge.get(fallback)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _has_enabled_path(start: str, target: str, adjacency: dict[str, list[str]]) -> bool:
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        for next_node in adjacency.get(node, []):
+            if next_node == target:
+                return True
+            if next_node not in seen:
+                stack.append(next_node)
+    return False
+
+
+def signal_inbox_lineage_violations(registry: dict, edge_registry: dict) -> list[dict[str, str]]:
+    """Return enabled emitting sensor blocks without a path to ``signal_inbox``.
+
+    This is a topology completeness guard, not a runtime traversal log. It only
+    reads compact registry/edge sidecars and treats ``emits_signals: false`` as
+    the explicit allowlist for intentionally non-emitting sensor blocks.
+    """
+
+    blocks = _registry_blocks(registry)
+    adjacency: dict[str, list[str]] = {}
+    for edge in _edge_items(edge_registry):
+        if edge.get("enabled", True) is False:
+            continue
+        source = _edge_endpoint(edge, "from", "source")
+        target = _edge_endpoint(edge, "to", "target")
+        if source and target:
+            adjacency.setdefault(source, []).append(target)
+
+    violations: list[dict[str, str]] = []
+    for block_id, block in sorted(blocks.items(), key=lambda item: str(item[0])):
+        block_map = block if isinstance(block, dict) else {}
+        kind = str(block_map.get("type") or block_map.get("kind") or BlockKind.SENSOR.value).strip().lower()
+        sensor_id = str(block_id).strip()
+        if not sensor_id or kind not in _SIGNAL_EMITTING_SENSOR_KINDS:
+            continue
+        if not _block_is_enabled(block_map) or not _block_emits_signals(block_map):
+            continue
+        if not _has_enabled_path(sensor_id, _SIGNAL_INBOX_BLOCK_ID, adjacency):
+            violations.append(
+                {
+                    "sensor": sensor_id,
+                    "reason": "missing_signal_inbox_lineage",
+                    "required_target": _SIGNAL_INBOX_BLOCK_ID,
+                }
+            )
+    return violations
+
+
+def _validate_signal_inbox_lineage(registry: dict, edge_registry: dict) -> None:
+    violations = signal_inbox_lineage_violations(registry, edge_registry)
+    if violations:
+        sensors = ", ".join(violation["sensor"] for violation in violations[:10])
+        suffix = "" if len(violations) <= 10 else f" (+{len(violations) - 10} more)"
+        raise InnerLifeValidationError(
+            f"enabled sensor missing signal_inbox lineage: {sensors}{suffix}"
+        )
+
+
 def _edge_cycle_sets(edges: list[dict]) -> list[set[str]]:
     """Return edge-id sets that participate in simple directed cycles."""
 
@@ -466,5 +570,6 @@ def load_inner_life_config(store) -> dict:
         store.read_sensor_edges(),
         known_blocks=set(registry["blocks"]),
     )
+    _validate_signal_inbox_lineage(registry, edges)
     policy = validate_policy(store.read_sensor_policy())
     return {"registry": registry, "edges": edges, "policy": policy}

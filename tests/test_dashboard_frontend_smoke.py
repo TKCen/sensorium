@@ -82,17 +82,15 @@ def test_flow_dag_is_the_default_primary_view():
     assert 'useState("flow_dag")' in source
 
 
-def test_flow_dag_distinguishes_structure_forms_from_live_items():
+def test_bundle_exposes_held_artifact_triage_panel_and_endpoint():
     manifest = _manifest()
     entry_path = DASHBOARD_DIR / manifest["entry"]
-    css_path = DASHBOARD_DIR / manifest["css"]
     source = entry_path.read_text()
-    css = css_path.read_text()
 
-    assert "function flowNodeForm" in source
-    assert "sx-flow-node-form-" in source
-    assert "persistent structure" in source
-    assert "visual form" in source
-    assert ".sx-flow-node-form-sensor" in css
-    assert ".sx-flow-node-form-persistent" in css
-    assert ".sx-flow-node-form-live" in css
+    assert "/api/plugins/agent-sensorium/artifacts/" in source
+    assert "/triage" in source
+    assert "held_for_review" in source
+    assert "approve_delivery" in source
+    assert "choose_silence" in source
+    assert "block_delivery" in source
+    assert "Review queue" in source

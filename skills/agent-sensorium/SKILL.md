@@ -2,6 +2,15 @@
 
 Bounded inner-lifecycle substrate for Hermes agents. Captures salient signals, promotes them through a deterministic pipeline (signal → event → candidate → conscious thread capsule), and surfaces policy-gated attention for pull-based review.
 
+## Repair posture (for the host agent reading this skill)
+
+If you are a host agent (Sera, Sebastian's other leads) and you are reading this skill because Sensorium itself is broken or you want to change it: **do not patch the substrate inline.** Sensorium is an *attention substrate*, and altering it from the foreground compromises the very attention you are using to fix it.
+
+- ≤3 tool calls, reversible, mostly judgment/synthesis → foreground is fine (a `status`/`ingest` smoke, a one-line config read).
+- 4+ tool calls, repo-wide inspection, code patch, migration, gateway/runtime sync, ambiguous substrate repair, or anything touching `~/.hermes/plugins/agent-sensorium/` live state → dispatch a worker lane (OMC `/ultrawork` in an isolated worktree, or OMX for surgical). The host keeps the DM cockpit; the lane does the work; the host reviews the report and decides.
+
+If a foreground patch was already started before this rule was checked: stop, save `git diff --binary`, revert, and seed the lane with the captured WIP. Do not finish the patch in the foreground.
+
 ## Ordinary use: the `sensorium` live tool
 
 During normal operation exactly one tool is exposed: `sensorium`. It always operates on the active/default profile. You do not pass a profile name on ordinary calls.
@@ -10,7 +19,7 @@ During normal operation exactly one tool is exposed: `sensorium`. It always oper
 
 | Action | Purpose |
 |--------|---------|
-| `status` | Read current attention state: open thread count, top candidate, inbox summary, dispatcher lock status |
+| `status` | Read current attention state: open thread count, top candidate, inbox summary, dispatcher lock status. Optionally pass `reference_id="<thread_or_candidate_id>"` to pin to one exact subject — returns an `exact_subject` block with `kind`, `id`, `title`, `status`, and (for saved residue) `kanban_settlement`. Use this when you saw a specific pointer earlier and want to recover the exact subject without scanning the rotating top-N. |
 | `ingest` | Record deferred salience from the current session as a compact signal. Pass `text`, `kind`, and optionally `strength` (0–1). The tool fills correlation keys and metadata internally. |
 | `open` | Open a dormant conscious thread capsule. Pass `id` of the thread (visible from `status`). Returns the capsule content if the surface/sensitivity gate allows it. |
 | `update` | Apply a lifecycle keyword to an open thread. Pass `id` and `keyword` (e.g. `close`, `hold`, `archive`, `mark_reviewed`). |
@@ -26,17 +35,61 @@ Do not dump full transcripts or raw messages. Keep `text` compact.
 
 ### When to use `open`
 
-The pre-LLM hook may inject a pointer like:
+The pre-LLM hook may inject a pointer. There are three pointer shapes:
 
-```
-I have something for you: <short title>. Say "take it up" to open it.
-```
+1. **Thread pointer** — `Pointer type: thread — <thread_id>`. There IS an openable
+   conscious thread. If the user says "take it up", call
+   `sensorium(action="open", id="<thread_id>")` and surface the capsule content.
+2. **Candidate pointer** — `Pointer type: candidate (NOT an openable thread) — <candidate_id>`.
+   There is a salience candidate in the attention inbox but no thread capsule.
+   If the user says "take a look" / "check the inbox", call
+   `sensorium(action="open", id="<candidate_id>", surface=...)` using the
+   exact id from the pointer and surface the returned compact candidate capsule
+   (`object_kind: "candidate"`, `is_openable_thread: false`). Do NOT switch
+   to a fresh `status` pointer after the pointer has been presented: cooldown
+   selection can advance and return a different candidate/residue than the one
+   the user is responding to. Do NOT improvise "thread X is waiting" when the
+   pointer says candidate.
+3. **Saved-residue pointer** — `Pointer type: saved_residue (Kanban SAVE/PROMOTE_CONSCIOUS; NOT an openable thread) — <candidate_id>`.
+   This was previously saved to Kanban but never became a thread. Conscious
+   access is preserved via an honest doorway that links to the saved intake
+   task id. If the user wants a recap, call
+   `sensorium(action="open", id="<candidate_id>", surface=...)` using the
+   exact id from the pointer and report the compact candidate capsule plus the
+   kanban intake/review task ids. Do NOT use `status` as the primary lookup for
+   a presented saved-residue pointer, because cooldown selection can advance
+   and show a different saved residue. Do NOT improvise "thread X is waiting
+   for you" — say honestly that this was saved, not opened.
 
-That confident phrase is valid only when Sensorium has already produced a visible/openable pointer for the current surface. Do not improvise it before checking `sensorium(action="status")` or receiving a hook-provided pointer. If status shows no openable thread but you feel residual salience, use uncertainty phrasing instead, such as “I think I have something that might matter — want me to look?” or “I have some unsettled salience — want me to surface it?”
+   Operators can dial the saved-residue pathway down via two opt-in pointer
+   config keys (both default `None` = unlimited):
+   - `pointer.saved_residue_max_age_days` — drop residues whose
+     `kanban_settlement.settled_at` is older than N days. Use this to keep
+     "archive-confetti" out of the live turn.
+   - `pointer.saved_residue_max_items` — keep only the top-N after the
+     freshness sort. Use this to bound rotation through archived residue
+     when no active candidate exists.
+   The freshest settled residue wins at equal pressure; a higher-pressure
+   older residue still wins over a fresh low-pressure one.
 
-When your user says "take it up" (or equivalent), call `sensorium(action="open", id="<id from pointer>")`.
+That confident phrase "I have a thread waiting for you" is valid only when
+Sensorium has produced a thread pointer. For candidate and saved-residue
+pointers, the surface-facing copy already says so; mirror that honestly when
+speaking to the user. If status shows no openable thread AND no surface-visible
+candidate AND no saved residue, do not improvise — use uncertainty phrasing
+such as "I think I have something that might matter — want me to look?" or
+"I have some unsettled salience — want me to surface it?"
 
-The pointer is a doorway only — capsule internals are not returned until `open` is called and the surface/sensitivity gate passes.
+When your user explicitly says "take it up" (or equivalent) for a thread pointer,
+call `sensorium(action="open", id="<id from pointer>")`. For candidate or saved-residue
+pointers, "take it up" should map to `sensorium(action="open", id="<candidate_id>")`
+when an explicit candidate id is shown — that returns the compact candidate capsule,
+not a fake thread. Never call `sensorium(action="open", id="latest")` and then tell
+the user "thread is opened" if the response is "Thread 'latest' not found." Instead
+be honest about what the substrate returned.
+
+The pointer is a doorway only — capsule internals are not returned until `open` is
+called and the surface/sensitivity gate passes.
 
 ---
 
@@ -53,6 +106,18 @@ Sensors → Signals → [Gate] → Events → Candidates → [Dispatcher] → Co
 4. A **Dispatcher** promotes the top candidate into a dormant **Conscious Thread** capsule.
 5. The **pre-LLM hook** injects a compact pointer when an eligible thread is available.
 6. Optional **actuators** are hot-reloadable, trusted local scripts that prepare artifacts only after a conscious decision ref; they never authorize delivery.
+
+### Memory Volunteering Protocol
+
+Any Sensorium/Subconscious path that wants to volunteer a memory, insight, recalled fact, private salience, or offer candidate must follow:
+
+```text
+evidence-cited capsule -> transparent confidence proposal -> Conscious authorization receipt
+```
+
+Confidence is an attention-routing signal only. It may justify `ATTENTION_INBOX` or `CONSCIOUS_REVIEW`; it may not write Hindsight/Memory/LCM, create durable truth, generate confident personal offer language, create external tasks, prepare artifacts, or authorize delivery by itself. The capsule must carry resolvable evidence refs, explicit `do_not_know` gaps, sensitivity, and allowed surfaces. The proposal must expose confidence components and negative evidence. Durable memory writes, skill/doc changes, artifact presentation, and outbound delivery require an explicit Conscious authorization receipt plus any configured operator/policy gate.
+
+See `docs/memory-volunteering-protocol.md` in the plugin docs for the formal schema, threshold defaults, source-type rules, and acceptance probes.
 
 ---
 

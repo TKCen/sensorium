@@ -548,32 +548,25 @@ class TestStatusConfigDiagnostics:
 
 
 class TestPluginConfigSeams:
-    def test_status_schema_includes_config_path(self):
+    def test_status_admin_schema_is_not_registered(self):
         from agent_sensorium.plugin import register
         from tests.test_plugin_registration import FakePluginContext
 
         ctx = FakePluginContext()
         register(ctx)
-        schema = ctx.tools["sensorium_status"]["schema"]
-        props = schema["parameters"]["properties"]
-        assert "config_path" in props
-        assert props["config_path"]["type"] == "string"
+        assert "sensorium_status" not in ctx.tools
 
     def test_status_handler_forwards_config_path(self, tmp_path):
-        from agent_sensorium.plugin import register
-        from tests.test_plugin_registration import FakePluginContext
+        from agent_sensorium.tools import handle_sensorium_status
 
         cfg_file = tmp_path / "test-config.json"
         cfg_file.write_text(json.dumps({"instance_name": "plugin-test"}))
 
-        ctx = FakePluginContext()
-        register(ctx)
-        handler = ctx.tools["sensorium_status"]["handler"]
-        raw = handler({
-            "instance": "test",
-            "state_dir": str(tmp_path),
-            "config_path": str(cfg_file),
-        })
+        raw = handle_sensorium_status(
+            instance="test",
+            state_dir=str(tmp_path),
+            config_path=str(cfg_file),
+        )
         result = json.loads(raw)
         assert result["success"] is True
         assert result["data"]["config"]["instance_name"] == "plugin-test"

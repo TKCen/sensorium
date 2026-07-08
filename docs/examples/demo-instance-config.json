@@ -34,7 +34,7 @@
     "pointer": {"capacity": 12, "window_seconds": 3600}
   },
   "default_actor": "background_conscious",
-  "subconscious_profile": "subconscious_worker",
+  "subconscious_profile": "serasubconscious",
   "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
   "tts": {
     "base_url": "http://127.0.0.1:8892/v1",
