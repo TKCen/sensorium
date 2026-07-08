@@ -47,12 +47,27 @@ class TestSalienceContextForLl:
         assert "not exhaustive" in lower
         assert "use a concise kind" in lower
         assert "handle the live turn normally first" in lower
-        assert "do not ingest merely because" in lower
-        assert "answering, acting on, retaining, or patching" in lower
-        assert "unresolved residue" in lower
-        assert "skip ingest" in lower
+        assert "even if you also answer now" in lower
+        assert "later sensorium/subconscious attention" in lower
+        assert "creative or taste locks" in lower
+        assert "skip only" in lower
+        assert "task/log spam" in lower
+        assert "durable residue" in lower
+        assert "do not ingest merely because" not in lower
+        assert "if the foreground session owns or resolves it" not in lower
+        assert "skip ingest" not in lower
         assert "appropriate kind (" not in ctx
         assert "supported kinds" not in lower
+
+    def test_rebalances_toward_compact_capture_for_high_salience_turns(self):
+        ctx = salience_context_for_llm().lower()
+        assert "call sensorium(action='ingest') when something matters" in ctx
+        assert "even if you also answer now" in ctx
+        assert "explicit corrections" in ctx
+        assert "relational salience" in ctx
+        assert "creative or taste locks" in ctx
+        assert "live design insights" in ctx
+        assert "skip only when" in ctx
 
     def test_mentions_compact_sensorium_ingest(self):
         ctx = salience_context_for_llm()

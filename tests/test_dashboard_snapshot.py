@@ -131,19 +131,96 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     data = _snapshot(api)
 
     assert data["ok"] is True
-    assert data["counts"]["prepared_outbox"] == 1
+    assert data["counts"]["prepared_outbox"] == 0
+    assert data["counts"]["prepared_outbox_raw"] == 1
+    assert data["counts"]["open_outbox"] == 0
+    assert data["counts"]["open_outbox_raw"] == 1
+    assert data["counts"]["historical_outbox"] == 1
     assert data["counts"]["actionable_outbox"] == 0
     assert data["counts"]["lifecycle_warnings"] == 0
     assert data["health"]["status"] == "quiet"
     assert data["outbox"][0]["safety"]["label"] == "historical_prepared_pointer"
     assert data["outbox"][0]["safety"]["outbound_delivery"] is False
+    assert data["outbox"][0]["safety"]["dispatch_requires_execute"] is False
     assert data["outbox"][0]["safety"]["attached_action_id"] == "tact_lakmus"
+    trace = _trace(api, node_id="outbox:obx_lakmus")
+    assert trace["subject"]["status"] == "settled"
+    assert trace["contents"]["status"] == "settled"
+    assert "no dispatch receipt yet" not in json.dumps(trace)
+    assert "historical prepared pointer" in json.dumps(trace)
     assert data["actions"][0]["outbox_refs"] == ["obx_lakmus"]
     assert data["artifacts"][0]["id"] == "art_audio"
     assert data["counts"]["artifact_groups"] == 1
     assert data["artifact_groups"][0]["id"] == "action:tact_lakmus"
     assert data["artifact_groups"][0]["count"] == 2
     assert data["artifact_groups"][0]["kinds"] == {"audio": 1, "text": 1}
+
+
+def test_snapshot_open_outbox_counts_exclude_historical_prepared_pointer_only(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+
+    _append_jsonl(root, "threads.jsonl", {"id": "thread_archived_1", "status": "archived", "updated_at": "2026-05-31T12:00:00Z"})
+    _append_jsonl(root, "threads.jsonl", {"id": "thread_live_1", "status": "held", "updated_at": "2026-05-31T12:01:00Z"})
+    _append_jsonl(
+        root,
+        "thread_actions.jsonl",
+        {
+            "id": "action_acted_1",
+            "status": "acted",
+            "origin_thread_id": "thread_archived_1",
+            "attachments": [{"kind": "outbox_request", "ref_id": "obx_historical_1"}],
+            "updated_at": "2026-05-31T12:02:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "outbox.jsonl",
+        {
+            "id": "obx_historical_1",
+            "status": "prepared",
+            "origin_thread_id": "thread_archived_1",
+            "delivery_mode": "context_pointer",
+            "updated_at": "2026-05-31T12:03:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "outbox.jsonl",
+        {
+            "id": "obx_live_1",
+            "status": "prepared",
+            "origin_thread_id": "thread_live_1",
+            "delivery_mode": "context_pointer",
+            "updated_at": "2026-05-31T12:04:00Z",
+        },
+    )
+    _append_jsonl(
+        root,
+        "outbox.jsonl",
+        {
+            "id": "obx_failed_1",
+            "status": "failed",
+            "origin_thread_id": "thread_live_1",
+            "delivery_mode": "context_pointer",
+            "updated_at": "2026-05-31T12:05:00Z",
+        },
+    )
+
+    data = _snapshot(api)
+
+    assert data["counts"]["prepared_outbox"] == 1
+    assert data["counts"]["prepared_outbox_raw"] == 2
+    assert data["counts"]["open_outbox"] == 2
+    assert data["counts"]["open_outbox_raw"] == 3
+    assert data["counts"]["historical_outbox"] == 1
+    labels = {item["id"]: item["safety"]["label"] for item in data["outbox"]}
+    assert labels["obx_historical_1"] == "historical_prepared_pointer"
+    assert labels["obx_live_1"] == "prepared_pointer_only"
+    assert labels["obx_failed_1"] == "dispatch_failed"
 
 
 def test_snapshot_exposes_conscious_reachout_metrics_without_message_body(tmp_path, monkeypatch):

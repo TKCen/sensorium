@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, HTTPException
 
 router = APIRouter()
 
@@ -484,10 +484,69 @@ def _action_item(action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _verify_artifact_file(ref_path: str, kind: str) -> dict[str, Any]:
+    if kind not in {"text", "image"}:
+        return {"status": "UNVERIFIED", "error_details": None}
+    if not ref_path:
+        return {"status": "UNVERIFIED", "error_details": None}
+
+    # Path traversal and approved directory check
+    # Check for parent directory components ("..")
+    path_parts = Path(ref_path).parts
+    if ".." in path_parts or ".." in ref_path:
+        return {"status": "UNVERIFIED", "error_details": "security_warning"}
+
+    try:
+        resolved_path = Path(ref_path).resolve()
+    except Exception:
+        return {"status": "UNVERIFIED", "error_details": "security_warning"}
+
+    # Must be located strictly within approved directories (e.g. /home/entity/.hermes/ or project workspace)
+    allowed_prefixes = [
+        Path("/home/entity/.hermes").resolve(),
+        Path("/home/entity/.gemini/antigravity-cli/scratch").resolve(),
+        Path("/tmp").resolve(),
+    ]
+    is_allowed = False
+    for prefix in allowed_prefixes:
+        try:
+            resolved_path.relative_to(prefix)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+    if not is_allowed:
+        return {"status": "UNVERIFIED", "error_details": "security_warning"}
+
+    # File existence check
+    if not resolved_path.is_file():
+        return {"status": "MISSING_FILE", "error_details": "file_not_found"}
+
+    # Read compliance check
+    try:
+        with open(resolved_path, "r", encoding="utf-8", errors="ignore") as f:
+            line1 = f.readline()
+            line2 = f.readline()
+        
+        # Strip trailing newlines and whitespace
+        line1 = line1.strip()
+        line2 = line2.strip()
+        
+        # Check first line has STATUS: and second line has ARTIFACT:
+        if line1.startswith("STATUS:") and line2.startswith("ARTIFACT:"):
+            return {"status": "VERIFIED_COMPLIANT", "error_details": None}
+        else:
+            return {"status": "NONCOMPLIANT", "error_details": "missing_status_marker"}
+    except Exception:
+        # Catch concurrent write/read lock exceptions as UNVERIFIED to handle race conditions
+        return {"status": "UNVERIFIED", "error_details": "read_error"}
+
+
 def _artifact_item(artifact: dict[str, Any]) -> dict[str, Any]:
     raw_source_refs = artifact.get("source_refs")
     source_refs: dict[str, Any] = raw_source_refs if isinstance(raw_source_refs, dict) else {}
     ref_path = str(artifact.get("ref_path") or "")
+    verification = _verify_artifact_file(ref_path, str(artifact.get("kind") or ""))
     return {
         "id": _safe_surface_atom("artifact", artifact.get("id")),
         "kind": _safe_surface_atom("artifact_kind", artifact.get("kind")),
@@ -503,6 +562,7 @@ def _artifact_item(artifact: dict[str, Any]) -> dict[str, Any]:
         "sensitivity": _safe_surface_atom("sensitivity", artifact.get("sensitivity") or artifact.get("privacy")),
         "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (artifact.get("allowed_surfaces") or [])][:8],
         "updated_at": artifact.get("updated_at") or artifact.get("ts"),
+        "verification": verification,
     }
 
 
@@ -682,6 +742,7 @@ def _outbox_safety(
                 band="neutral",
                 label="historical_prepared_pointer",
                 detail="Prepared pointer is attached to a completed action on a closed thread; no outbound send path.",
+                dispatch_requires_execute=False,
             )
         elif thread_status in TERMINAL_THREAD_STATUSES:
             safety.update(
@@ -738,6 +799,28 @@ def _outbox_item(
         "updated_at": req.get("updated_at"),
         "safety": safety,
     }
+
+
+def _outbox_counts_as_open(req: dict[str, Any], *, safety: dict[str, Any] | None = None) -> bool:
+    """Human-facing open/outbox counters exclude settled historical pointers.
+
+    Preserve raw receipts in `outbox` and status breakdowns, but do not let a
+    prepared context-pointer attached to a completed action on a terminal thread
+    inflate live/open dashboard pressure forever.
+    """
+    status = str(req.get("status") or "").strip().lower()
+    if status not in OPEN_OUTBOX_STATUSES:
+        return False
+    safety = safety or {}
+    return safety.get("label") != "historical_prepared_pointer"
+
+
+def _outbox_counts_as_prepared(req: dict[str, Any], *, safety: dict[str, Any] | None = None) -> bool:
+    status = str(req.get("status") or "").strip().lower()
+    if status != "prepared":
+        return False
+    safety = safety or {}
+    return safety.get("label") != "historical_prepared_pointer"
 
 
 def _decision_item(decision: dict[str, Any]) -> dict[str, Any]:
@@ -1726,6 +1809,54 @@ def _sanitize_topology_edges(raw_edge_list: list[Any], node_lookup: dict[str, st
     return edges
 
 
+def _topology_signal_inbox_lineage(
+    blocks_obj: dict[str, Any], raw_edge_list: list[Any], node_lookup: dict[str, str]
+) -> dict[str, Any]:
+    """Compact read-only completeness check for sensor -> signal_inbox paths.
+
+    This does not mutate config or infer runtime traversal. It only flags
+    enabled emitting sensor blocks that are present in the configured Flow-DAG
+    without any enabled configured edge path to ``signal_inbox``. A sensor block
+    can explicitly opt out by declaring ``emits_signals: false``.
+    """
+
+    try:
+        from agent_sensorium.inner_life import signal_inbox_lineage_violations
+
+        raw_violations = signal_inbox_lineage_violations(
+            {"version": 2, "blocks": blocks_obj},
+            {"version": 1, "edges": raw_edge_list},
+        )
+    except Exception:
+        return {
+            "ok": False,
+            "violation_count": 0,
+            "violations": [],
+            "allowlist": "emits_signals:false",
+            "error": "lineage_checker_unavailable",
+        }
+
+    violations: list[dict[str, Any]] = []
+    for violation in raw_violations[:25]:
+        sensor = str(violation.get("sensor") or "")
+        required_target = str(violation.get("required_target") or "signal_inbox")
+        safe_sensor = _topology_safe_id(sensor)
+        violations.append(
+            {
+                "sensor": safe_sensor,
+                "node_id": node_lookup.get(sensor) or f"sensor:{safe_sensor}",
+                "reason": _safe_surface_atom("lineage_reason", violation.get("reason")),
+                "required_target": _topology_safe_id(required_target),
+            }
+        )
+    return {
+        "ok": not raw_violations,
+        "violation_count": len(raw_violations),
+        "violations": violations,
+        "allowlist": "emits_signals:false",
+    }
+
+
 def _topology_config_version(root: Path) -> str:
     """Hash of effective topology/config/registry sources; changes when any source's content changes."""
     parts: list[bytes] = []
@@ -1750,9 +1881,9 @@ _RUNTIME_STATUSES = {
 #     check exists, surfaced as "stale", not "degraded".
 #   - "blocked": reserved for a future blocker-effect overlay (see
 #     `/blockers`); blocker rows are not yet joined onto runtime-status nodes.
-#   - "settled": reserved for a future receipt/settlement-derived overlay;
-#     settlement state today lives in `/snapshot` perception traces and
-#     `/graph` receipt nodes, not `/runtime-status`.
+#   - "settled": is emitted for reviewed candidates. The detailed settlement
+#     receipt still lives in `/snapshot` perception traces and `/graph`, but a
+#     reviewed candidate must not look like live review pressure in the Flow DAG.
 # "waiting" for candidates also covers the `candidate -> waiting` semantics
 # noted in sera-ck9.2: an unreviewed `candidate` status row means "awaiting
 # Subconscious review", not literally idle/quiet, which is why it maps to
@@ -1766,7 +1897,7 @@ _RUNTIME_INSTANCE_LIMIT = 20
 # safe default "quiet" rather than ever passing free-form status text through.
 _RUNTIME_CANDIDATE_STATUS = {
     "candidate": "waiting",
-    "reviewed": "reviewing",
+    "reviewed": "settled",
     "suppressed": "stale",
     "dropped": "stale",
 }
@@ -1886,8 +2017,11 @@ def _runtime_action_node(action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _runtime_outbox_node(req: dict[str, Any]) -> dict[str, Any]:
+def _runtime_outbox_node(req: dict[str, Any], *, safety: dict[str, Any] | None = None) -> dict[str, Any]:
     status = _RUNTIME_OUTBOX_STATUS.get(str(req.get("status") or "").strip().lower(), "quiet")
+    safety = safety or {}
+    if safety.get("label") == "historical_prepared_pointer":
+        status = "settled"
     return {
         "id": f"outbox:{_safe_surface_atom('outbox', req.get('id'))}",
         "kind": "outbox",
@@ -2124,6 +2258,7 @@ def _build_topology(root: Path) -> dict[str, Any]:
     if not isinstance(raw_edge_list, list):
         raw_edge_list = []
     edges = _sanitize_topology_edges(raw_edge_list[:edge_limit], node_lookup)
+    signal_inbox_lineage = _topology_signal_inbox_lineage(blocks_obj, raw_edge_list, node_lookup)
 
     return {
         "nodes": nodes,
@@ -2139,6 +2274,7 @@ def _build_topology(root: Path) -> dict[str, Any]:
             "edge_limit": edge_limit,
             "truncated_nodes": len(blocks_obj) > node_limit,
             "truncated_edges": len(raw_edge_list) > edge_limit,
+            "signal_inbox_lineage": signal_inbox_lineage,
         },
     }
 
@@ -2207,11 +2343,27 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
     threads, _ = _read_jsonl(root, "threads", limit=2000)
     actions, _ = _read_jsonl(root, "thread_actions", limit=2000)
     outbox, _ = _read_jsonl(root, "outbox", limit=2000)
+    thread_by_id = _index_by_id(threads)
+    action_by_id = _index_by_id(actions)
+    action_for_outbox = _find_action_for_outbox(actions)
+    config = _read_json(root / "instance.config.json", {})
 
     eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in _RUNTIME_CANDIDATE_STATUS]
     eligible_threads = [t for t in threads if t.get("status") in ACTIVE_THREAD_STATUSES]
     eligible_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
-    eligible_outbox = [o for o in outbox if o.get("status") in OPEN_OUTBOX_STATUSES]
+    outbox_safety_by_id = {
+        str(o.get("id") or ""): _outbox_safety(
+            o,
+            thread_by_id=thread_by_id,
+            action_by_id=action_by_id,
+            action_for_outbox=action_for_outbox,
+            config=config,
+        )
+        for o in outbox
+    }
+    eligible_outbox = [
+        o for o in outbox if _outbox_counts_as_open(o, safety=outbox_safety_by_id.get(str(o.get("id") or "")))
+    ]
 
     candidate_nodes = [
         _runtime_candidate_node(c) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
@@ -2223,7 +2375,11 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
         _runtime_action_node(a) for a in sorted(eligible_actions, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
     ]
     outbox_nodes = [
-        _runtime_outbox_node(o) for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+        _runtime_outbox_node(
+            o,
+            safety=outbox_safety_by_id.get(str(o.get("id") or "")) or {},
+        )
+        for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
     ]
     instance_nodes = candidate_nodes + thread_nodes + action_nodes + outbox_nodes
     nodes = topology_nodes + instance_nodes
@@ -2455,15 +2611,37 @@ def _trace_runtime_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
     threads, _ = _read_jsonl(root, "threads", limit=2000)
     actions, _ = _read_jsonl(root, "thread_actions", limit=2000)
     outbox, _ = _read_jsonl(root, "outbox", limit=2000)
+    thread_by_id = _index_by_id(threads)
+    action_by_id = _index_by_id(actions)
+    action_for_outbox = _find_action_for_outbox(actions)
+    config = _read_json(root / "instance.config.json", {})
     eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in _RUNTIME_CANDIDATE_STATUS]
     eligible_threads = [t for t in threads if t.get("status") in ACTIVE_THREAD_STATUSES]
     eligible_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
-    eligible_outbox = [o for o in outbox if o.get("status") in OPEN_OUTBOX_STATUSES]
+    outbox_safety_by_id = {
+        str(o.get("id") or ""): _outbox_safety(
+            o,
+            thread_by_id=thread_by_id,
+            action_by_id=action_by_id,
+            action_for_outbox=action_for_outbox,
+            config=config,
+        )
+        for o in outbox
+    }
+    eligible_outbox = [
+        o for o in outbox if _outbox_counts_as_open(o, safety=outbox_safety_by_id.get(str(o.get("id") or "")))
+    ]
     instance_nodes = (
         [_runtime_candidate_node(c) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
         + [_runtime_thread_node(t) for t in sorted(eligible_threads, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
         + [_runtime_action_node(a) for a in sorted(eligible_actions, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
-        + [_runtime_outbox_node(o) for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]]
+        + [
+            _runtime_outbox_node(
+                o,
+                safety=outbox_safety_by_id.get(str(o.get("id") or "")) or {},
+            )
+            for o in sorted(eligible_outbox, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+        ]
     )
     nodes = topology_nodes + instance_nodes
     node_ids = {str(n.get("id") or "") for n in nodes}
@@ -2723,8 +2901,19 @@ def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
     if target is None:
         return None
 
+    threads, _ = _read_jsonl(root, "threads", limit=5000)
     actions, _ = _read_jsonl(root, "thread_actions", limit=5000)
+    thread_by_id = _index_by_id(threads)
+    action_by_id = _index_by_id(actions)
     action_for_outbox = _find_action_for_outbox(actions)
+    config = _read_json(root / "instance.config.json", {})
+    safety = _outbox_safety(
+        target,
+        thread_by_id=thread_by_id,
+        action_by_id=action_by_id,
+        action_for_outbox=action_for_outbox,
+        config=config,
+    )
     upstream = []
     if target.get("origin_thread_id"):
         upstream.append(
@@ -2747,9 +2936,14 @@ def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
         )
 
     status = str(target.get("status") or "")
+    derived_status = "settled" if safety.get("label") == "historical_prepared_pointer" else status
     limitations = []
-    if status not in {"dispatched", "failed"}:
+    if safety.get("label") == "historical_prepared_pointer":
+        limitations.append("historical prepared pointer attached to a completed action on a closed thread; no outbound send path")
+    elif status not in {"dispatched", "failed"}:
         limitations.append("no dispatch receipt yet; outbound delivery has not been observed for this record")
+    target_for_contents = dict(target)
+    target_for_contents["status"] = derived_status
 
     return {
         "subject": {
@@ -2757,12 +2951,12 @@ def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
             "type": "node",
             "kind": "outbox",
             "origin": "instance",
-            "status": _safe_surface_atom("outbox_status", target.get("status")),
+            "status": _safe_surface_atom("outbox_status", derived_status),
         },
         "upstream": upstream,
         "downstream": [],
         "influences": [],
-        "contents": _instance_contents("outbox", target, upstream_count=len(upstream), downstream_count=0),
+        "contents": _instance_contents("outbox", target_for_contents, upstream_count=len(upstream), downstream_count=0),
         "config_refs": [],
         "timestamps": {"created_at": target.get("created_at"), "updated_at": target.get("updated_at")},
         "evidence_refs": [],
@@ -3010,7 +3204,6 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         candidate_by_id=candidate_by_id,
         limit=10,
     )
-    open_outbox = [r for r in outbox if r.get("status") in OPEN_OUTBOX_STATUSES]
     open_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
     closed_actions = [a for a in actions if a.get("status") not in ACTIVE_ACTION_STATUSES]
     perception_traces = _perception_traces(
@@ -3031,6 +3224,16 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         for r in recent_outbox
     ]
     outbox_items = outbox_items_all[:12]
+    outbox_safety_by_id = {
+        str(item.get("id") or ""): item.get("safety") if isinstance(item.get("safety"), dict) else {}
+        for item in outbox_items_all
+    }
+    open_outbox = [
+        r for r in outbox if _outbox_counts_as_open(r, safety=outbox_safety_by_id.get(str(r.get("id") or "")))
+    ]
+    prepared_outbox = [
+        r for r in outbox if _outbox_counts_as_prepared(r, safety=outbox_safety_by_id.get(str(r.get("id") or "")))
+    ]
     actionable_outbox = sum(1 for item in outbox_items_all if item.get("safety", {}).get("actionable"))
     historical_outbox = sum(
         1
@@ -3061,8 +3264,10 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "artifact_groups": len(artifact_groups),
         "held_artifacts": sum(1 for a in artifacts if a.get("delivery_state") == "held_for_review"),
         "outbox": len(outbox),
-        "prepared_outbox": sum(1 for o in outbox if o.get("status") == "prepared"),
+        "prepared_outbox": len(prepared_outbox),
+        "prepared_outbox_raw": sum(1 for o in outbox if str(o.get("status") or "").strip().lower() == "prepared"),
         "open_outbox": len(open_outbox),
+        "open_outbox_raw": sum(1 for o in outbox if str(o.get("status") or "").strip().lower() in OPEN_OUTBOX_STATUSES),
         "historical_outbox": historical_outbox,
         "actionable_outbox": actionable_outbox,
         "lifecycle_warnings": len(warnings),
@@ -3133,3 +3338,60 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "budgets": _current_budgets(root, config),
         "metrics": metrics_data,
     }
+
+
+@router.post("/artifacts/{artifact_id}/triage")
+async def triage_artifact(
+    artifact_id: str,
+    payload: dict = Body(...),
+    instance: str | None = None,
+) -> dict[str, Any]:
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        raise HTTPException(status_code=400, detail="invalid_instance")
+    
+    effective_instance, root = resolved
+    config = _read_json(root / "instance.config.json", {})
+    
+    from agent_sensorium.store import SensoriumStore
+    store = SensoriumStore(instance=effective_instance, state_dir=str(root))
+    
+    decision = payload.get("decision")
+    why_now = payload.get("why_now") or ""
+    surface = payload.get("surface") or ""
+    target_ref = payload.get("target_ref") or ""
+    
+    from agent_sensorium.media_gifts import apply_media_gift_choice, _update_artifact_delivery_state
+    
+    res = apply_media_gift_choice(
+        store=store,
+        decision=decision,
+        why_now=why_now,
+        artifact_id=artifact_id,
+        surface=surface,
+        target_ref=target_ref,
+        config=config,
+    )
+    
+    if not res.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=res.get("error") or "triage_failed",
+        )
+    
+    # Successful choice. Let's make sure the delivery_state of the artifact is updated properly
+    # for decisions other than approve_delivery (which is handled inside apply_media_gift_choice).
+    if decision == "decline":
+        _update_artifact_delivery_state(store, artifact_id, "delivery_cancelled", _now())
+    elif decision == "block_delivery":
+        _update_artifact_delivery_state(store, artifact_id, "delivery_blocked", _now())
+    elif decision == "choose_silence":
+        _update_artifact_delivery_state(store, artifact_id, "silenced", _now())
+        
+    return {
+        "success": True,
+        "decision": decision,
+        "artifact_id": artifact_id,
+        "data": res.get("data"),
+    }
+

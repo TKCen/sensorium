@@ -40,33 +40,8 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     ctx = FakePluginContext()
     register(ctx)
 
-    expected_admin_tools = {
-        "sensorium_status",
-        "sensorium_ingest_signal",
-        "sensorium_sensor_config",
-        "sensorium_profile",
-        "sensorium_ingest_event",
-        "sensorium_candidate_update",
-        "sensorium_attention_pointer",
-        "sensorium_attention_inbox",
-        "sensorium_thread_open",
-        "sensorium_thread_update",
-        "sensorium_compact",
-        "sensorium_service_threads",
-        "sensorium_subconscious_advisory",
-        "sensorium_improvement_collect",
-        "sensorium_attention_policy_decide",
-        "sensorium_attention_policy_manage",
-        "sensorium_improvement_status",
-        "sensorium_artifact_store",
-        "sensorium_artifact_status",
-        "sensorium_media_gift_decide",
-    }
-    assert set(ctx.tools) == {"sensorium", *expected_admin_tools}
+    assert set(ctx.tools) == {"sensorium"}
     assert ctx.tools["sensorium"]["toolset"] == "agent-sensorium-live"
-    assert {
-        entry["toolset"] for name, entry in ctx.tools.items() if name != "sensorium"
-    } == {"agent-sensorium-admin"}
     help_output = ctx.commands["sensorium"]["handler"]("help")
     assert help_output.startswith("Usage: /sensorium")
     assert "outbox" not in help_output
@@ -154,6 +129,7 @@ def test_live_ingest_records_residue_intent_on_signal_and_receipt(tmp_path):
 def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path):
     from agent_sensorium.plugin import register
     from agent_sensorium.store import SensoriumStore
+    from agent_sensorium.tools import handle_sensorium_thread_update
 
     store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
     store.ensure_dirs()
@@ -179,17 +155,16 @@ def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path
     ctx = FakePluginContext()
     register(ctx)
 
-    thread_update_schema = ctx.tools["sensorium_thread_update"]["schema"]
-    assert "resume_trigger" in thread_update_schema["parameters"]["properties"]
+    assert "sensorium_thread_update" not in ctx.tools
 
-    result = json.loads(ctx.tools["sensorium_thread_update"]["handler"]({
-        "instance": "plugin-test",
-        "state_dir": str(tmp_path),
-        "thread_id": "sth_holdtest",
-        "action": "hold",
-        "reason": "waiting",
-        "resume_trigger": "new_evidence",
-    }))
+    result = json.loads(handle_sensorium_thread_update(
+        instance="plugin-test",
+        state_dir=str(tmp_path),
+        thread_id="sth_holdtest",
+        action="hold",
+        reason="waiting",
+        resume_trigger="new_evidence",
+    ))
     assert result["success"] is True
 
     thread = store.read_jsonl("threads")[0]
@@ -258,9 +233,9 @@ def test_memory_reflection_not_in_live_tool_schema(tmp_path):
     ctx = FakePluginContext()
     register(ctx)
 
-    # The registered surface is one live Sensorium tool plus admin-only granular tools.
-    # This is a snapshot guard: adding a memory-probe tool will cause this to fail.
-    _EXPECTED_TOOL_COUNT = 21
+    # The registered model surface is one compact live Sensorium tool.
+    # Granular/admin handlers stay out of the LLM-facing schema.
+    _EXPECTED_TOOL_COUNT = 1
 
     # No tool name may reference memory reflection concepts.
     _FORBIDDEN_NAME_FRAGMENTS = {"memory_reflection", "reflect", "recall", "probe"}

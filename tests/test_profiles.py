@@ -26,7 +26,7 @@ class TestNewConfigDefaults:
     def test_defaults_are_generic(self):
         config, _ = load_instance_config()
         assert config["default_actor"] == "background_conscious"
-        assert config["subconscious_profile"] == "subconscious_worker"
+        assert config["subconscious_profile"] == "serasubconscious"
         assert config["tick_quiet_filename"] == "sensorium_tick_quiet.latest.json"
         assert config["tts"]["voice"] == "warm-voice-demo"
         # No private checkout path is baked into the TTS defaults.
