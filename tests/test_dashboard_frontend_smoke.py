@@ -80,3 +80,19 @@ def test_flow_dag_is_the_default_primary_view():
     source = entry_path.read_text()
 
     assert 'useState("flow_dag")' in source
+
+
+def test_flow_dag_distinguishes_structure_forms_from_live_items():
+    manifest = _manifest()
+    entry_path = DASHBOARD_DIR / manifest["entry"]
+    css_path = DASHBOARD_DIR / manifest["css"]
+    source = entry_path.read_text()
+    css = css_path.read_text()
+
+    assert "function flowNodeForm" in source
+    assert "sx-flow-node-form-" in source
+    assert "persistent structure" in source
+    assert "visual form" in source
+    assert ".sx-flow-node-form-sensor" in css
+    assert ".sx-flow-node-form-persistent" in css
+    assert ".sx-flow-node-form-live" in css
