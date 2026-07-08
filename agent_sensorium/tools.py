@@ -121,7 +121,6 @@ def _legacy_state_latest_info(store: SensoriumStore, state: dict) -> dict:
         "excluded_from_freshness": True,
     }
 
-
 def handle_sensorium_status(
     *, instance: str = "default", state_dir: str | None = None,
     config_path: str | None = None,
@@ -139,7 +138,7 @@ def handle_sensorium_status(
     ``reference_id`` is omitted, the legacy top-N shape is preserved
     byte-for-byte for backwards compatibility.
     """
-    from .config import load_instance_config, visible_on_surface
+    from .config import load_instance_config
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
