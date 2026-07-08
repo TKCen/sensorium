@@ -237,7 +237,7 @@ def test_open_candidate_by_id_recovers_archived_saved_residue(tmp_path):
     """The exact live mismatch: opening a candidate by id must return the
     saved-residue candidate capsule, not a fake thread.
     """
-    store = _seed_state(tmp_path)
+    _seed_state(tmp_path)
     raw = handle_sensorium_candidate_open(
         instance="test", state_dir=str(tmp_path),
         candidate_id="cand_arxiv_regression", surface="discord",
@@ -261,7 +261,7 @@ def test_open_candidate_by_id_recovers_archived_saved_residue(tmp_path):
 
 
 def test_open_candidate_latest_prefers_active_then_saved_residue(tmp_path):
-    store = _seed_state(tmp_path)
+    _seed_state(tmp_path)
     raw = handle_sensorium_candidate_open(
         instance="test", state_dir=str(tmp_path),
         candidate_id="latest", surface="discord",
@@ -288,7 +288,7 @@ def test_open_candidate_latest_falls_back_to_saved_when_no_active(tmp_path):
 
 
 def test_open_candidate_for_disallowed_surface_refuses(tmp_path):
-    store = _seed_state(tmp_path)
+    _seed_state(tmp_path)
     raw = handle_sensorium_candidate_open(
         instance="test", state_dir=str(tmp_path),
         candidate_id="cand_arxiv_regression",
