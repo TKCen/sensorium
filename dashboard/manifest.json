@@ -3,13 +3,13 @@
   "label": "Sensorium",
   "description": "Read-only cockpit for Agent Sensorium attention, efficiency metrics, conscious threads, outbox requests, and lifecycle receipts.",
   "icon": "BrainCircuit",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "tab": {
     "path": "/sensorium",
     "position": "after:inference-budget"
   },
   "slots": [],
-  "entry": "dist/index.v14.js",
-  "css": "dist/style.v10.css",
+  "entry": "dist/index.v15.js",
+  "css": "dist/style.v11.css",
   "api": "plugin_api.py"
 }
