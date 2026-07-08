@@ -159,7 +159,7 @@ def test_pointer_with_no_threads_and_only_saved_residue_says_so_honestly(tmp_pat
     assert pointer["candidate_id"] == "cand_arxiv_regression"
     # Honest copy: claim "not an openable thread", do not claim a thread.
     assert "not an openable thread" in pointer["invitation"].lower()
-    assert pointer["invitation"].lower().startswith("i previously saved")
+    assert "i previously saved" in pointer["invitation"].lower()
     # Linked intake visible.
     assert pointer["settlement_decision"] == "SAVE"
     assert pointer["intake_task_id"] == "t_a0098881"
@@ -337,8 +337,8 @@ def test_saved_residue_pointer_includes_kanban_settlement_block():
             "reason_label": "reason#bdf731842efcbb5b",
         },
         "invitation": (
-            "I previously saved a salience residue (Kanban SAVE): arXiv governance. "
-            "This is not an openable thread — say 'check saved residue' to recap."
+            '🧠 ✨ I previously saved a salience residue (Kanban SAVE): arXiv governance. '
+            'This is not an openable thread — say "check saved residue" to recap.'
         ),
     }
     context = pointer_context_for_llm(pointer)

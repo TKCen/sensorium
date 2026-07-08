@@ -429,11 +429,11 @@ def select_attention_pointer(
         title = truncate_text(title, int(cfg.get("max_title_chars", 96)))
         action_count = count_active_actions_for_thread(store, thread.get("id", ""))
         invitation = (
-            f"I have a conscious thread waiting: {title}."
+            f"🧠 I have a conscious thread waiting: {title}."
         )
         if action_count:
             invitation += f" ({action_count} prepared action{'s' if action_count != 1 else ''}.)"
-        invitation += " Say ‘take it up’ if you want me to open it."
+        invitation += ' Say "take it up" if you want me to open it. 🧵'
         pointer = {
             "action": "pointer_available",
             "pointer_type": "thread",
@@ -471,8 +471,8 @@ def select_attention_pointer(
         # candidate id and read the compact candidate capsule; calling status
         # first can rotate the doorway to a different item after cooldown.
         invitation = (
-            f"I have a salience candidate waiting (not an openable thread): {title}. "
-            "Say ‘take a look’ or ‘check the inbox’ if you want me to surface it."
+            f"🧠 ✨ I have a salience candidate waiting (not an openable thread): {title}. "
+            'Say "take a look" or "check the inbox" if you want me to surface it.'
         )
         return {
             "action": "pointer_available",
@@ -508,8 +508,8 @@ def select_attention_pointer(
         intake_task_id = str(settlement.get("intake_task_id") or "")
         review_task_id = str(settlement.get("review_task_id") or "")
         invitation = (
-            f"I previously saved a salience residue (Kanban {settlement_decision or 'SAVE'}): {title}. "
-            "This is not an openable thread — say ‘check saved residue’ if you want me to recap the intake."
+            f"🧠 ✨ I previously saved a salience residue (Kanban {settlement_decision or 'SAVE'}): {title}. "
+            'This is not an openable thread — say "check saved residue" if you want me to recap the intake.'
         )
         return {
             "action": "pointer_available",

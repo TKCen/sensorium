@@ -136,7 +136,7 @@ def test_pointer_context_is_door_handle_not_capsule():
         "pointer_type": "thread",
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "I have a conscious thread waiting: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": '🧠 I have a conscious thread waiting: A small title. Say "take it up" if you want me to open it. 🧵',
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
@@ -170,7 +170,7 @@ def test_candidate_pointer_context_uses_exact_candidate_open_not_rotating_status
         "candidate_id": "cand_x",
         "title": "Live salience",
         "surface": "discord",
-        "invitation": "I have a salience candidate waiting (not an openable thread): Live salience.",
+        "invitation": "🧠 ✨ I have a salience candidate waiting (not an openable thread): Live salience.",
     }
     context = pointer_context_for_llm(pointer)
     assert "Pointer type: candidate" in context
