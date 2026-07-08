@@ -1,5 +1,6 @@
 """JSONL-backed local state store for Agent Sensorium."""
 
+import collections
 import json
 import os
 import tempfile
@@ -161,21 +162,7 @@ class SensoriumStore:
 
     def read_dampener_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "dampeners.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_path_jsonl(path, limit)
 
     def append_blocker_effect(self, effect: dict) -> None:
         """Append-only audit trace of a blocker_effect record (inner_life/blockers.jsonl)."""
@@ -189,21 +176,7 @@ class SensoriumStore:
 
     def read_blocker_effects(self, limit: int | None = None) -> list[dict]:
         path = self._root / "inner_life" / "blockers.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        if limit is not None:
-            results = results[-limit:]
-        return results
+        return self._read_path_jsonl(path, limit)
 
     def read_sensor_policy(self) -> dict:
         path = self._root / "sensors" / "policy.json"
@@ -238,23 +211,55 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
-    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+    def count_jsonl(self, name: str) -> int:
+        """Efficiently count lines in a JSONL file using binary read and newline counting.
+
+        Optimized for large append-only files where parsing JSON is not required.
+        """
         path = self._resolve(name)
+        if not path.exists():
+            return 0
+        count = 0
+        last_char = b""
+        with open(path, "rb") as f:
+            buf_size = 1024 * 1024  # 1MB buffer
+            while True:
+                buf = f.read(buf_size)
+                if not buf:
+                    break
+                count += buf.count(b"\n")
+                last_char = buf[-1:]
+        if last_char and last_char != b"\n":
+            count += 1
+        return count
+
+    def _read_path_jsonl(self, path: Path, limit: int | None = None) -> list[dict]:
+        """Private helper to read JSONL from a path, optimized with deque for trailing reads."""
         if not path.exists():
             return []
         results: list[dict] = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
+        try:
+            with open(path) as f:
+                if limit is not None and limit > 0:
+                    # Optimized tail read using collections.deque
+                    lines = collections.deque(f, maxlen=limit)
+                else:
+                    lines = f
+
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        results.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
         return results
+
+    def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:
+        return self._read_path_jsonl(self._resolve(name), limit)
 
     def write_state(self, obj: dict) -> None:
         self.ensure_dirs()
