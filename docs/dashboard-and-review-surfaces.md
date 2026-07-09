@@ -31,6 +31,8 @@ The dashboard FastAPI router exposes only GET/HEAD-safe routes. The expected rou
 
 No POST/PUT/PATCH/DELETE dashboard routes should exist. Mutations belong in the live/admin tools and their receipt-writing code paths.
 
+Held artifacts remain visible through the compact `/snapshot` artifact and artifact-group projections: delivery state, verification status, bounded metadata, and timestamps may be shown, but raw bodies remain hidden. The dashboard provides no triage controls or mutation endpoint; an operator must use the conscious/admin review path for any decision.
+
 ---
 
 ## Privacy projection contract
@@ -131,7 +133,7 @@ Useful local commands:
 
 ```bash
 ruff check agent_sensorium dashboard tests
-node --check dashboard/dist/index.v11.js
+node --check dashboard/dist/index.v22.js
 uv run --extra test pytest tests/test_dashboard_plugin.py tests/test_dashboard_snapshot.py tests/test_dashboard_topology.py tests/test_dashboard_runtime_status.py tests/test_dashboard_trace.py tests/test_dashboard_frontend_smoke.py tests/test_dashboard_perception_trace.py tests/test_explanations.py tests/test_receipts.py -q -o 'addopts='
 uv run --extra test pytest -q -o 'addopts='
 git diff --check upstream/main...HEAD

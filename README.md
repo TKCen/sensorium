@@ -201,6 +201,8 @@ The primary dashboard graph is the **Flow DAG**: `/topology` answers what can ha
 
 All dashboard output is an output boundary: legacy/corrupt row values, raw transcript/log markers, secrets, metric labels, state paths, and free-form refs are sanitized or replaced with deterministic opaque labels before rendering. See `docs/dashboard-and-review-surfaces.md` for the route contract and privacy checklist.
 
+Held artifacts remain observable as compact verification and delivery-state pointers only; raw bodies stay hidden. The dashboard has no triage controls or write endpoint, so any review decision must go through the conscious/admin path.
+
 ---
 
 ## Profiles and configuration
@@ -345,7 +347,7 @@ sensorium(action="status")
 - **No autonomous outbound delivery.** Prepared artifacts remain local until an operator or external system explicitly chooses what to do with them.
 - **Conscious-tier receipts required.** Any mediated artifact (message draft, task, external action) requires a conscious review path. The pipeline cannot self-authorize delivery.
 - **Dashboard output is compact-only.** Dashboard/API GET routes treat persisted legacy rows, metrics sidecars, paths, and corrupt scalars as hostile. Raw transcripts, raw logs, secrets, and secret-shaped identifiers are replaced with deterministic opaque labels before leaving the process.
-- **Read-only means read-only.** Dashboard routes are limited to `GET`; state mutation remains in the explicit live/admin tools and receipt-writing code paths.
+- **Read-only means read-only.** Dashboard routes are limited to `GET`; held-artifact cards are observability pointers, not triage controls. State mutation remains in the explicit live/admin tools and receipt-writing code paths.
 
 ---
 
