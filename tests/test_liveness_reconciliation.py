@@ -95,3 +95,48 @@ def test_liveness_receipts_are_opaque_idempotent_and_decision_only(tmp_path):
     assert receipt["related_refs"] == []
     assert sentinel not in json.dumps(receipt, sort_keys=True)
     assert before == {name: store.read_jsonl(name) for name in before}
+
+
+def test_liveness_timestamp_and_state_transition_receipts_are_safe_and_idempotent(tmp_path):
+    sentinel = "RAW_TIME_SENTINEL"
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.ensure_dirs()
+    fresh = _conscious_candidate("transition", status="in_conscious_aperture")
+    fresh["conscious_aperture"] = {"id": "cap", "opened_at": "2026-07-09T11:59:00Z", "state": "open"}
+    before = {name: store.read_jsonl(name) for name in ("candidates", "worker_requests", "threads", "thread_actions", "outbox")}
+
+    fresh_findings = plan_liveness_reconciliation([fresh], now="2026-07-09T12:00:00Z")["classification"]["findings"]
+    fresh_findings[0]["observed_at"] = sentinel
+    assert fresh_findings[0]["reason_code"] == "reviewing_open_aperture"
+    assert append_liveness_receipts(store, fresh_findings) == {"written": 1, "skipped": 0}
+    assert append_liveness_receipts(store, fresh_findings) == {"written": 0, "skipped": 1}
+
+    stale = dict(fresh)
+    stale["conscious_aperture"] = {"id": "cap", "opened_at": "2026-07-09T08:00:00Z", "state": "open"}
+    stale_findings = plan_liveness_reconciliation([stale], now="2026-07-09T12:00:00Z")["classification"]["findings"]
+    assert stale_findings[0]["reason_code"] == "stale_aperture"
+    assert append_liveness_receipts(store, stale_findings) == {"written": 1, "skipped": 0}
+    assert append_liveness_receipts(store, stale_findings) == {"written": 0, "skipped": 1}
+
+    receipts = [row for row in store.read_jsonl("decisions") if row.get("schema") == LIVENESS_RECEIPT_SCHEMA]
+    assert len(receipts) == 2
+    assert {row["reason_code"] for row in receipts} == {"reviewing_open_aperture", "stale_aperture"}
+    assert receipts[0]["ts"] != sentinel
+    assert receipts[1]["ts"] == "2026-07-09T12:00:00Z"
+    assert sentinel not in json.dumps(receipts, sort_keys=True)
+    assert before == {name: store.read_jsonl(name) for name in before}
+
+
+def test_candidate_liveness_reasons_distinguish_terminal_and_nonterminal_states():
+    rows = [
+        _candidate("held", status="held"),
+        _candidate("prepared", status="prepared_external_work"),
+        _candidate("settled", status="reviewed"),
+    ]
+    findings = plan_liveness_reconciliation(rows, now="2026-07-09T12:00:00Z")["classification"]["findings"]
+
+    assert [(finding["state"], finding["reason_code"]) for finding in findings] == [
+        ("held", "candidate_held"),
+        ("prepared", "candidate_prepared"),
+        ("settled", "candidate_settled"),
+    ]

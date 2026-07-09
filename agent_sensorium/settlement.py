@@ -50,14 +50,31 @@ LIVENESS_STATES = frozenset({
 LIVENESS_REASON_CODES = frozenset({
     "above_threshold_unrepresented", "already_represented_in_kanban",
     "feedback_self_loop", "truncated_intake_capacity", "reviewed_open_intake",
-    "reviewed_open_intake_missing_decision", "stale_aperture",
+    "reviewed_open_intake_missing_decision", "reviewing_open_aperture", "stale_aperture",
     "historical_prepared_pointer", "candidate_below_threshold",
+    "candidate_held", "candidate_prepared", "candidate_settled",
     "candidate_unknown_status", "outbox_prepared", "outbox_failed",
     "outbox_dispatched", "outbox_unknown_status",
 })
 LIVENESS_RECEIPT_SCHEMA = "sensorium.liveness_receipt.v1"
 LIVENESS_RECEIPT_KIND = "liveness_reconciliation"
 LIVENESS_RECEIPT_VERSION = 1
+
+
+def _safe_liveness_timestamp(value: Any) -> str | None:
+    """Return a bounded, UTC-normalized ISO-8601 timestamp or ``None``."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 40:
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 1970 <= parsed.year <= 2100:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 # Status applied to the originating candidate per decision. DROP suppresses so
 # the dispatcher's `select_candidate` filter (status == "candidate") cannot
@@ -1072,13 +1089,13 @@ def classify_liveness_snapshot(
         elif candidate_id in stale:
             state, reason = "stale", "stale_aperture"
         elif status == "in_conscious_aperture":
-            state, reason = "reviewing", "stale_aperture"
+            state, reason = "reviewing", "reviewing_open_aperture"
         elif status == "held":
-            state, reason = "held", "candidate_below_threshold"
+            state, reason = "held", "candidate_held"
         elif status == "prepared_external_work":
-            state, reason = "prepared", "candidate_below_threshold"
+            state, reason = "prepared", "candidate_prepared"
         elif status in {"reviewed", "suppressed", "cancelled", "archived"}:
-            state, reason = "settled", "candidate_below_threshold"
+            state, reason = "settled", "candidate_settled"
         else:
             try:
                 above = float(candidate.get("pressure", 0) or 0) >= threshold
@@ -1165,12 +1182,12 @@ def append_liveness_receipts(store: SensoriumStore, findings: list[dict[str, Any
         if key in existing:
             skipped += 1
             continue
-        observed_at = finding.get("observed_at")
+        observed_at = _safe_liveness_timestamp(finding.get("observed_at"))
         receipt = {
             "schema": LIVENESS_RECEIPT_SCHEMA,
             "receipt_kind": LIVENESS_RECEIPT_KIND,
             "idempotency_key": key,
-            "ts": observed_at if isinstance(observed_at, str) and len(observed_at) <= 60 else utc_now_iso(),
+            "ts": observed_at or utc_now_iso(),
             "subject_ref": safe_subject,
             "old_liveness": "unknown",
             "new_liveness": state,

@@ -314,6 +314,22 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
+def _safe_liveness_timestamp(value: Any) -> str | None:
+    """Project only bounded offset-aware ISO-8601 timestamps onto GET output."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 40:
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 1970 <= parsed.year <= 2100:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _current_budgets(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     try:
         import sys
@@ -413,7 +429,8 @@ def _liveness_item(*, state: str, reason_code: str, observed_at: Any, source: st
     allowed_states = {"active", "reviewing", "blocked", "held", "prepared", "settled", "stale", "error", "quiet", "unknown"}
     allowed_reasons = {
         "above_threshold_unrepresented", "candidate_below_threshold", "candidate_unknown_status",
-        "stale_aperture", "historical_prepared_pointer", "outbox_prepared", "outbox_failed",
+        "reviewing_open_aperture", "stale_aperture", "candidate_held", "candidate_prepared",
+        "candidate_settled", "historical_prepared_pointer", "outbox_prepared", "outbox_failed",
         "outbox_dispatched", "outbox_unknown_status",
         "thread_dormant", "thread_held", "thread_closed", "thread_archived", "thread_unknown_status",
         "action_proposed", "action_prepared", "action_offered", "action_acted", "action_closed",
@@ -422,7 +439,7 @@ def _liveness_item(*, state: str, reason_code: str, observed_at: Any, source: st
     return {
         "state": state if state in allowed_states else "unknown",
         "reason_code": reason_code if reason_code in allowed_reasons else "candidate_unknown_status",
-        "observed_at": observed_at if isinstance(observed_at, str) and len(observed_at) <= 60 else None,
+        "observed_at": _safe_liveness_timestamp(observed_at),
         "source": source if source in {"candidate_status", "thread_status", "action_status", "outbox_lineage"} else "candidate_status",
         "actionable": bool(actionable), "terminal": bool(terminal), "related_refs": [],
     }
@@ -436,7 +453,7 @@ def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
         opened = _parse_dt(aperture.get("opened_at") or candidate.get("updated_at"))
         stale = aperture.get("state") == "stale" or opened is None or (datetime.now(timezone.utc) - opened).total_seconds() >= 180 * 60
         state = "stale" if stale else "reviewing"
-        return _liveness_item(state=state, reason_code="stale_aperture", observed_at=observed_at, source="candidate_status", actionable=stale, terminal=False)
+        return _liveness_item(state=state, reason_code="stale_aperture" if stale else "reviewing_open_aperture", observed_at=observed_at, source="candidate_status", actionable=stale, terminal=False)
     if status == "candidate":
         try:
             above = float(candidate.get("pressure", 0) or 0) >= 0.5
@@ -444,11 +461,11 @@ def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
             above = False
         return _liveness_item(state="active" if above else "quiet", reason_code="above_threshold_unrepresented" if above else "candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=above, terminal=False)
     if status == "held":
-        return _liveness_item(state="held", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+        return _liveness_item(state="held", reason_code="candidate_held", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
     if status == "prepared_external_work":
-        return _liveness_item(state="prepared", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+        return _liveness_item(state="prepared", reason_code="candidate_prepared", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
     if status in {"reviewed", "suppressed", "cancelled", "archived"}:
-        return _liveness_item(state="settled", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=True)
+        return _liveness_item(state="settled", reason_code="candidate_settled", observed_at=observed_at, source="candidate_status", actionable=False, terminal=True)
     return _liveness_item(state="unknown", reason_code="candidate_unknown_status", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
 
 
