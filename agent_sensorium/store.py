@@ -5,8 +5,6 @@ import os
 import tempfile
 from pathlib import Path
 
-from .schemas import sanitize_profile_name
-
 _STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
     "events": "events.jsonl",
@@ -78,13 +76,11 @@ def atomic_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
 
 class SensoriumStore:
     def __init__(self, instance: str = "default", state_dir: str | None = None):
+        self.instance = instance
         if state_dir:
-            self.instance = instance
             self._root = Path(state_dir)
         else:
-            safe_instance = sanitize_profile_name(instance)
-            self.instance = safe_instance
-            self._root = Path(_DEFAULT_BASE) / safe_instance
+            self._root = Path(_DEFAULT_BASE) / instance
 
     @property
     def root(self) -> Path:
