@@ -55,6 +55,9 @@ LIVENESS_REASON_CODES = frozenset({
     "candidate_unknown_status", "outbox_prepared", "outbox_failed",
     "outbox_dispatched", "outbox_unknown_status",
 })
+LIVENESS_RECEIPT_SCHEMA = "sensorium.liveness_receipt.v1"
+LIVENESS_RECEIPT_KIND = "liveness_reconciliation"
+LIVENESS_RECEIPT_VERSION = 1
 
 # Status applied to the originating candidate per decision. DROP suppresses so
 # the dispatcher's `select_candidate` filter (status == "candidate") cannot
@@ -1113,6 +1116,74 @@ def classify_liveness_snapshot(
             "related_refs": [],
         })
     return {"version": 1, "now": now, "findings": findings}
+
+
+def _liveness_receipt_key(subject_ref: dict[str, Any], reason_code: str) -> str:
+    """Stable opaque identity for a classification-only reconciliation receipt."""
+    material = {
+        "subject_type": subject_ref["type"],
+        "subject_id": subject_ref["id"],
+        "reason_code": reason_code,
+        "version": LIVENESS_RECEIPT_VERSION,
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"liveness:{digest}"
+
+
+def append_liveness_receipts(store: SensoriumStore, findings: list[dict[str, Any]]) -> dict[str, int]:
+    """Append compact liveness findings once, without owning any transition.
+
+    Findings are already a privacy-safe classification boundary. This writer
+    validates each field again so legacy/corrupt callers fail closed rather than
+    turning a receipt into a raw state projection.
+    """
+    existing = {
+        str(row.get("idempotency_key") or "")
+        for row in store.read_jsonl("decisions")
+        if row.get("schema") == LIVENESS_RECEIPT_SCHEMA
+    }
+    written = skipped = 0
+    for finding in findings:
+        raw_subject = finding.get("subject_ref")
+        subject: dict[str, Any] = raw_subject if isinstance(raw_subject, dict) else {}
+        subject_type = str(subject.get("type") or "")
+        subject_id = str(subject.get("id") or "")
+        state = str(finding.get("state") or "")
+        reason_code = str(finding.get("reason_code") or "")
+        source = str(finding.get("source") or "")
+        if (
+            subject_type not in {"candidate", "outbox"}
+            or not re.fullmatch(r"[a-z_]+#[0-9a-f]{16}", subject_id)
+            or state not in LIVENESS_STATES
+            or reason_code not in LIVENESS_REASON_CODES
+            or source not in {"liveness_snapshot", "outbox_lineage"}
+        ):
+            skipped += 1
+            continue
+        safe_subject = {"type": subject_type, "id": subject_id}
+        key = _liveness_receipt_key(safe_subject, reason_code)
+        if key in existing:
+            skipped += 1
+            continue
+        observed_at = finding.get("observed_at")
+        receipt = {
+            "schema": LIVENESS_RECEIPT_SCHEMA,
+            "receipt_kind": LIVENESS_RECEIPT_KIND,
+            "idempotency_key": key,
+            "ts": observed_at if isinstance(observed_at, str) and len(observed_at) <= 60 else utc_now_iso(),
+            "subject_ref": safe_subject,
+            "old_liveness": "unknown",
+            "new_liveness": state,
+            "reason_code": reason_code,
+            "source": source,
+            "action": "none",
+            "related_refs": [],
+            "version": LIVENESS_RECEIPT_VERSION,
+        }
+        store.append_jsonl("decisions", receipt)
+        existing.add(key)
+        written += 1
+    return {"written": written, "skipped": skipped}
 
 
 def plan_liveness_reconciliation(

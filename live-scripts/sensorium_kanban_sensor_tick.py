@@ -59,6 +59,7 @@ from agent_sensorium.settlement import (  # noqa: E402
     apply_kanban_settlement,
     apply_settlement_record,
     candidate_intake_idempotency_key,
+    append_liveness_receipts,
     coalesce_suppression_reason as _coalesced_suppression_reason,
     event_incident_key as _event_incident_key,
     extract_kanban_intake_payload,
@@ -802,6 +803,7 @@ def _reconcile_active_candidates(
         threshold=DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
         represented_candidate_ids=represented,
     )
+    liveness_receipts = append_liveness_receipts(store, liveness_plan["classification"]["findings"])
     plan = liveness_plan["candidate_reconciliation"]
 
     minted: list[dict[str, Any]] = []
@@ -872,6 +874,7 @@ def _reconcile_active_candidates(
         "truncated": plan["truncated"],
         "active_above_threshold_count": plan["active_count"],
         "last_liveness_reconcile": liveness_plan["summary"],
+        "liveness_receipts": liveness_receipts,
         "created_tasks": created_tasks,
     }
 

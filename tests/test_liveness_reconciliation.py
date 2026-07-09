@@ -3,7 +3,13 @@
 import json
 
 from agent_sensorium.conscious_aperture import open_conscious_aperture
-from agent_sensorium.settlement import LIVENESS_REASON_CODES, LIVENESS_STATES, plan_liveness_reconciliation
+from agent_sensorium.settlement import (
+    LIVENESS_REASON_CODES,
+    LIVENESS_RECEIPT_SCHEMA,
+    LIVENESS_STATES,
+    append_liveness_receipts,
+    plan_liveness_reconciliation,
+)
 from agent_sensorium.store import SensoriumStore
 
 
@@ -62,3 +68,30 @@ def test_historical_pointer_is_settled_and_non_actionable():
     assert finding["reason_code"] == "historical_prepared_pointer"
     assert finding["actionable"] is False
     assert plan["summary"]["mint"] == 0
+
+
+def test_liveness_receipts_are_opaque_idempotent_and_decision_only(tmp_path):
+    sentinel = "RAW_SECRET_SENTINEL_SHOULD_NOT_LEAK"
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.ensure_dirs()
+    store.append_jsonl("candidates", _candidate(sentinel, 0.9, "totally_corrupt"))
+    plan = plan_liveness_reconciliation(store.read_jsonl("candidates"), now="2026-07-09T12:00:00Z")
+    before = {name: store.read_jsonl(name) for name in ("candidates", "worker_requests", "threads", "thread_actions", "outbox")}
+
+    first = append_liveness_receipts(store, plan["classification"]["findings"])
+    receipt_rows = [row for row in store.read_jsonl("decisions") if row.get("schema") == LIVENESS_RECEIPT_SCHEMA]
+    second = append_liveness_receipts(store, plan["classification"]["findings"])
+
+    assert first == {"written": 1, "skipped": 0}
+    assert second == {"written": 0, "skipped": 1}
+    assert len(receipt_rows) == 1
+    receipt = receipt_rows[0]
+    assert receipt["receipt_kind"] == "liveness_reconciliation"
+    assert receipt["action"] == "none"
+    assert receipt["subject_ref"]["type"] == "candidate"
+    assert receipt["subject_ref"]["id"].startswith("candidate#")
+    assert receipt["reason_code"] in LIVENESS_REASON_CODES
+    assert receipt["new_liveness"] in LIVENESS_STATES
+    assert receipt["related_refs"] == []
+    assert sentinel not in json.dumps(receipt, sort_keys=True)
+    assert before == {name: store.read_jsonl(name) for name in before}

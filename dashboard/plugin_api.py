@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 router = APIRouter()
 
@@ -415,12 +415,15 @@ def _liveness_item(*, state: str, reason_code: str, observed_at: Any, source: st
         "above_threshold_unrepresented", "candidate_below_threshold", "candidate_unknown_status",
         "stale_aperture", "historical_prepared_pointer", "outbox_prepared", "outbox_failed",
         "outbox_dispatched", "outbox_unknown_status",
+        "thread_dormant", "thread_held", "thread_closed", "thread_archived", "thread_unknown_status",
+        "action_proposed", "action_prepared", "action_offered", "action_acted", "action_closed",
+        "action_expired", "action_cancelled", "action_rejected", "action_unknown_status",
     }
     return {
         "state": state if state in allowed_states else "unknown",
         "reason_code": reason_code if reason_code in allowed_reasons else "candidate_unknown_status",
         "observed_at": observed_at if isinstance(observed_at, str) and len(observed_at) <= 60 else None,
-        "source": source if source in {"candidate_status", "outbox_lineage"} else "candidate_status",
+        "source": source if source in {"candidate_status", "thread_status", "action_status", "outbox_lineage"} else "candidate_status",
         "actionable": bool(actionable), "terminal": bool(terminal), "related_refs": [],
     }
 
@@ -449,6 +452,34 @@ def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
     return _liveness_item(state="unknown", reason_code="candidate_unknown_status", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
 
 
+def _thread_liveness(thread: dict[str, Any]) -> dict[str, Any]:
+    status = str(thread.get("status") or "").lower()
+    observed_at = thread.get("updated_at") or thread.get("created_at")
+    mapped = {
+        "dormant": ("active", "thread_dormant", True, False),
+        "held": ("held", "thread_held", False, False),
+        "closed": ("settled", "thread_closed", False, True),
+        "archived": ("settled", "thread_archived", False, True),
+    }.get(status, ("unknown", "thread_unknown_status", False, False))
+    return _liveness_item(state=mapped[0], reason_code=mapped[1], observed_at=observed_at, source="thread_status", actionable=mapped[2], terminal=mapped[3])
+
+
+def _action_liveness(action: dict[str, Any]) -> dict[str, Any]:
+    status = str(action.get("status") or "").lower()
+    observed_at = action.get("updated_at") or action.get("ts")
+    mapped = {
+        "proposed": ("active", "action_proposed", True, False),
+        "prepared": ("prepared", "action_prepared", True, False),
+        "offered": ("held", "action_offered", True, False),
+        "acted": ("settled", "action_acted", False, True),
+        "closed": ("settled", "action_closed", False, True),
+        "expired": ("settled", "action_expired", False, True),
+        "cancelled": ("settled", "action_cancelled", False, True),
+        "rejected": ("settled", "action_rejected", False, True),
+    }.get(status, ("unknown", "action_unknown_status", False, False))
+    return _liveness_item(state=mapped[0], reason_code=mapped[1], observed_at=observed_at, source="action_status", actionable=mapped[2], terminal=mapped[3])
+
+
 def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_surface_atom("thread", thread.get("id")),
@@ -463,6 +494,7 @@ def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
         "pinned": bool(thread.get("pinned")),
         "dirty": bool(thread.get("dirty_since")),
         "interaction_refs": len(thread.get("interaction_refs") or []),
+        "liveness": _thread_liveness(thread),
     }
 
 
@@ -523,6 +555,7 @@ def _action_item(action: dict[str, Any]) -> dict[str, Any]:
         "attachment_kinds": dict(attachment_kinds),
         "result_summary": _safe_surface_text("action_result", action.get("result_summary"), limit=180),
         "updated_at": action.get("updated_at") or action.get("ts"),
+        "liveness": _action_liveness(action),
     }
 
 

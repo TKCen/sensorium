@@ -128,7 +128,7 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
         },
     )
 
-    data = _snapshot(api)
+    data = asyncio.run(api.snapshot(instance="demo"))
 
     assert data["ok"] is True
     assert data["counts"]["prepared_outbox"] == 0
@@ -140,6 +140,9 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     assert data["counts"]["lifecycle_warnings"] == 0
     assert data["health"]["status"] == "quiet"
     assert data["outbox"][0]["safety"]["label"] == "historical_prepared_pointer"
+    assert data["outbox"][0]["liveness"]["state"] == "settled"
+    assert data["outbox"][0]["liveness"]["reason_code"] == "historical_prepared_pointer"
+    assert data["actions"][0]["liveness"]["state"] == "settled"
     assert data["outbox"][0]["safety"]["outbound_delivery"] is False
     assert data["outbox"][0]["safety"]["dispatch_requires_execute"] is False
     assert data["outbox"][0]["safety"]["attached_action_id"] == "tact_lakmus"
@@ -154,6 +157,44 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     assert data["artifact_groups"][0]["id"] == "action:tact_lakmus"
     assert data["artifact_groups"][0]["count"] == 2
     assert data["artifact_groups"][0]["kinds"] == {"audio": 1, "text": 1}
+
+
+def test_snapshot_projects_closed_liveness_for_all_families_and_fails_closed(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    root = tmp_path / "demo"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "demo")
+    sentinel = "RAW_SECRET_SENTINEL_SHOULD_NOT_LEAK"
+    _append_jsonl(root, "candidates.jsonl", {"id": "candidate_1", "status": "candidate", "pressure": 0.9, "updated_at": "2026-07-09T12:00:00Z"})
+    _append_jsonl(root, "candidates.jsonl", {"id": sentinel, "status": sentinel, "summary": sentinel})
+    _append_jsonl(root, "threads.jsonl", {"id": "thread_held", "status": "held", "updated_at": "2026-07-09T12:00:00Z"})
+    _append_jsonl(root, "threads.jsonl", {"id": "thread_hostile", "status": sentinel})
+    _append_jsonl(root, "thread_actions.jsonl", {"id": "action_acted", "status": "acted", "updated_at": "2026-07-09T12:00:00Z"})
+    _append_jsonl(root, "thread_actions.jsonl", {"id": "action_hostile", "status": sentinel})
+    _append_jsonl(root, "outbox.jsonl", {"id": "outbox_prepared", "status": "prepared", "updated_at": "2026-07-09T12:00:00Z"})
+    _append_jsonl(root, "outbox.jsonl", {"id": "outbox_hostile", "status": sentinel})
+
+    data = asyncio.run(api.snapshot(instance="demo"))
+    assert data.get("ok") is True, data
+    expected = {"state", "reason_code", "observed_at", "source", "actionable", "terminal", "related_refs"}
+    families = {"candidate": "top_candidates", "thread": "threads", "action": "actions", "outbox": "outbox"}
+    for family in families.values():
+        assert data[family]
+        for item in data[family]:
+            assert set(item["liveness"]) == expected
+            assert item["liveness"]["state"] in {"active", "reviewing", "blocked", "held", "prepared", "settled", "stale", "error", "quiet", "unknown"}
+            assert item["liveness"]["related_refs"] == []
+    assert next(item for item in data["threads"] if item["id"] == "thread_held")["liveness"]["state"] == "held"
+    assert next(item for item in data["actions"] if item["id"] == "action_acted")["liveness"] == {
+        "state": "settled", "reason_code": "action_acted", "observed_at": "2026-07-09T12:00:00Z",
+        "source": "action_status", "actionable": False, "terminal": True, "related_refs": [],
+    }
+    assert next(item for item in data["outbox"] if item["id"] == "outbox_prepared")["liveness"]["state"] == "prepared"
+    assert api._thread_item({"id": "closed_thread", "status": "closed"})["liveness"]["state"] == "settled"
+    assert api._thread_item({"id": "archived_thread", "status": "archived"})["liveness"]["terminal"] is True
+    assert api._thread_item({"id": "hostile_thread", "status": sentinel})["liveness"]["state"] == "unknown"
+    assert sentinel not in json.dumps(data, sort_keys=True)
 
 
 def test_snapshot_open_outbox_counts_exclude_historical_prepared_pointer_only(tmp_path, monkeypatch):
