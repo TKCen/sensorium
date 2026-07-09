@@ -5,6 +5,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from .schemas import sanitize_profile_name
+
 _STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
     "events": "events.jsonl",
@@ -80,7 +82,7 @@ class SensoriumStore:
         if state_dir:
             self._root = Path(state_dir)
         else:
-            self._root = Path(_DEFAULT_BASE) / instance
+            self._root = Path(_DEFAULT_BASE) / sanitize_profile_name(instance)
 
     @property
     def root(self) -> Path:

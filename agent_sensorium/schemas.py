@@ -1,5 +1,6 @@
 """Pure helpers for IDs, timestamps, validation, and normalization."""
 
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -16,6 +17,32 @@ VALID_FEEDBACK_SCOPES = {"thread", "candidate", "delivery", "operator_evaluation
 DELIVERY_ONLY_OUTCOMES = frozenset({
     "delivered", "sent", "posted", "dispatched", "queued",
 })
+
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def sanitize_profile_name(name: str) -> str:
+    """Validate and return a safe profile (instance) name, else raise ValueError.
+
+    Names address direct children of the Sensorium state root, never nested or
+    parent paths.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise ValueError("profile name must not be blank")
+    if len(candidate) > 64:
+        raise ValueError("profile name must be at most 64 characters")
+    if candidate.startswith(".") or candidate in {".", ".."}:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
+        raise ValueError(f"invalid profile name: {name!r}")
+    if not PROFILE_NAME_RE.match(candidate):
+        raise ValueError(
+            "profile name may only contain letters, digits, '.', '_', '-': "
+            f"{name!r}"
+        )
+    return candidate
+
 
 SUCCESS_OUTCOMES = frozenset({
     "operator_approved", "completed", "response_received", "acknowledged",
