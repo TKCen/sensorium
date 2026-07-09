@@ -2,6 +2,7 @@
 
 import pytest
 
+import agent_sensorium.store as store_module
 from agent_sensorium.store import SensoriumStore
 
 
@@ -93,3 +94,37 @@ class TestPaths:
         assert "signals" in paths
         assert "events" in paths
         assert str(paths["signals"]).endswith("signals/inbox.jsonl")
+
+
+class TestImplicitRootContainment:
+    @pytest.mark.parametrize("instance", ["default", "team-a", "p_1", "v0.1"])
+    def test_valid_direct_child_names_stay_under_default_root(self, monkeypatch, tmp_path, instance):
+        base = tmp_path / "agent-sensorium"
+        monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(base))
+
+        store = SensoriumStore(instance)
+
+        assert store.root == base / instance
+        assert store.root.resolve().parent == base.resolve()
+
+    @pytest.mark.parametrize(
+        "instance",
+        ["", "   ", ".", "..", "../outside", "a/b", r"a\b", ".hidden", "\x00", "bad name", "x" * 65],
+    )
+    def test_invalid_implicit_instance_names_are_rejected_before_path_join(
+        self, monkeypatch, tmp_path, instance
+    ):
+        base = tmp_path / "agent-sensorium"
+        monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(base))
+
+        with pytest.raises(ValueError):
+            SensoriumStore(instance)
+
+        assert not base.exists()
+
+    def test_explicit_state_dir_remains_caller_authoritative(self, tmp_path):
+        explicit_root = tmp_path / "chosen" / "../outside"
+
+        store = SensoriumStore(instance="../outside", state_dir=str(explicit_root))
+
+        assert store.root == explicit_root
