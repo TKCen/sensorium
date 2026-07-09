@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -153,23 +153,24 @@ def _read_json(path: Path, default: Any) -> Any:
 def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    rows: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        with open(path, "r", errors="ignore") as f:
+            # Efficient tail-read: deque(f, maxlen=limit) avoids reading the entire
+            # file into memory and only parses the requested trailing lines into JSON.
+            lines = deque(f, maxlen=limit) if limit is not None else f
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(value, dict):
+                    rows.append(value)
     except Exception:
         return []
-    if limit is not None:
-        lines = lines[-limit:]
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
     return rows
 
 
@@ -192,25 +193,24 @@ def _read_jsonl(root: Path, name: str, limit: int | None = None) -> tuple[list[d
     path = root / rel
     if not path.exists():
         return [], 0
-    try:
-        lines = path.read_text(errors="ignore").splitlines()
-    except Exception:
-        return [], 0
-    if limit is not None:
-        lines = lines[-limit:]
     rows: list[dict[str, Any]] = []
     bad = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            bad += 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
+    try:
+        with open(path, "r", errors="ignore") as f:
+            lines = deque(f, maxlen=limit) if limit is not None else f
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    bad += 1
+                    continue
+                if isinstance(value, dict):
+                    rows.append(value)
+    except Exception:
+        return [], 0
     return rows, bad
 
 
@@ -2225,13 +2225,14 @@ def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, A
         return []
     rows: list[dict[str, Any]] = []
     try:
-        for line in path.read_text(errors="ignore").splitlines()[-limit:]:
-            try:
-                value = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(value, dict):
-                rows.append(value)
+        with open(path, "r", errors="ignore") as f:
+            for line in deque(f, maxlen=limit):
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(value, dict):
+                    rows.append(value)
     except Exception:
         return []
     return rows

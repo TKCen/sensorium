@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from collections import deque
 from pathlib import Path
 
 from .schemas import sanitize_profile_name
@@ -167,7 +168,10 @@ class SensoriumStore:
             return []
         results: list[dict] = []
         with open(path) as f:
-            for line in f:
+            # Efficient tail-read: deque(f, maxlen=limit) avoids reading the
+            # entire file and only parses the requested trailing lines.
+            lines = deque(f, maxlen=limit) if limit is not None else f
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -175,8 +179,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def append_blocker_effect(self, effect: dict) -> None:
@@ -195,7 +197,8 @@ class SensoriumStore:
             return []
         results: list[dict] = []
         with open(path) as f:
-            for line in f:
+            lines = deque(f, maxlen=limit) if limit is not None else f
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -203,8 +206,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def read_sensor_policy(self) -> dict:
@@ -246,7 +247,8 @@ class SensoriumStore:
             return []
         results: list[dict] = []
         with open(path) as f:
-            for line in f:
+            lines = deque(f, maxlen=limit) if limit is not None else f
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -254,8 +256,6 @@ class SensoriumStore:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue  # skip corrupted lines
-        if limit is not None:
-            results = results[-limit:]
         return results
 
     def write_state(self, obj: dict) -> None:
