@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
@@ -3337,61 +3337,5 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "decisions": [_decision_item(d) for d in decisions[-14:]][::-1],
         "budgets": _current_budgets(root, config),
         "metrics": metrics_data,
-    }
-
-
-@router.post("/artifacts/{artifact_id}/triage")
-async def triage_artifact(
-    artifact_id: str,
-    payload: dict = Body(...),
-    instance: str | None = None,
-) -> dict[str, Any]:
-    resolved = _resolve_instance(instance)
-    if resolved is None:
-        raise HTTPException(status_code=400, detail="invalid_instance")
-    
-    effective_instance, root = resolved
-    config = _read_json(root / "instance.config.json", {})
-    
-    from agent_sensorium.store import SensoriumStore
-    store = SensoriumStore(instance=effective_instance, state_dir=str(root))
-    
-    decision = payload.get("decision")
-    why_now = payload.get("why_now") or ""
-    surface = payload.get("surface") or ""
-    target_ref = payload.get("target_ref") or ""
-    
-    from agent_sensorium.media_gifts import apply_media_gift_choice, _update_artifact_delivery_state
-    
-    res = apply_media_gift_choice(
-        store=store,
-        decision=decision,
-        why_now=why_now,
-        artifact_id=artifact_id,
-        surface=surface,
-        target_ref=target_ref,
-        config=config,
-    )
-    
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=400,
-            detail=res.get("error") or "triage_failed",
-        )
-    
-    # Successful choice. Let's make sure the delivery_state of the artifact is updated properly
-    # for decisions other than approve_delivery (which is handled inside apply_media_gift_choice).
-    if decision == "decline":
-        _update_artifact_delivery_state(store, artifact_id, "delivery_cancelled", _now())
-    elif decision == "block_delivery":
-        _update_artifact_delivery_state(store, artifact_id, "delivery_blocked", _now())
-    elif decision == "choose_silence":
-        _update_artifact_delivery_state(store, artifact_id, "silenced", _now())
-        
-    return {
-        "success": True,
-        "decision": decision,
-        "artifact_id": artifact_id,
-        "data": res.get("data"),
     }
 

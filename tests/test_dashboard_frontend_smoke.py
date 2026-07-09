@@ -82,15 +82,14 @@ def test_flow_dag_is_the_default_primary_view():
     assert 'useState("flow_dag")' in source
 
 
-def test_bundle_exposes_held_artifact_triage_panel_and_endpoint():
+def test_bundle_keeps_compact_held_artifact_observability_without_mutation_controls():
     manifest = _manifest()
     entry_path = DASHBOARD_DIR / manifest["entry"]
     source = entry_path.read_text()
 
-    assert "/api/plugins/agent-sensorium/artifacts/" in source
-    assert "/triage" in source
     assert "held_for_review" in source
-    assert "approve_delivery" in source
-    assert "choose_silence" in source
-    assert "block_delivery" in source
-    assert "Review queue" in source
+    assert "Held artifacts" in source
+    assert "conscious/admin path" in source
+    assert "raw artifact bodies stay hidden" in source
+    for forbidden in ("postJSON", "/triage", "approve_delivery", "why_now"):
+        assert forbidden not in source

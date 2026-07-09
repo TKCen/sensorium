@@ -299,12 +299,10 @@ def test_dashboard_inner_life_routes_are_read_only_and_privacy_safe(tmp_path, mo
 
     for path in ["/registry", "/probe-audit", "/dampeners", "/blockers"]:
         assert routes[path] == ["GET"]
-    write_routes = {"/artifacts/{artifact_id}/triage"}
-    assert all(
-        set(methods) <= {"GET", "HEAD"} or path in write_routes
-        for path, methods in routes.items()
-    )
-    assert routes["/artifacts/{artifact_id}/triage"] == ["POST"]
+    assert all(set(methods) <= {"GET", "HEAD"} for methods in routes.values())
+    # A direct dashboard triage POST has no handler; review mutations belong to
+    # the conscious/admin path, never to this read-only router.
+    assert "/artifacts/{artifact_id}/triage" not in routes
 
     payloads = [
         asyncio.run(mod.registry(instance="demo")),
