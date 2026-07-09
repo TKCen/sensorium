@@ -40,6 +40,7 @@ The pre-LLM hook may inject a pointer. There are three pointer shapes:
 1. **Thread pointer** — `Pointer type: thread — <thread_id>`. There IS an openable
    conscious thread. If the user says "take it up", call
    `sensorium(action="open", id="<thread_id>")` and surface the capsule content.
+   Human-facing: `🧠 I have a conscious thread waiting: <title>. Say "take it up" if you want me to open it. 🧵`
 2. **Candidate pointer** — `Pointer type: candidate (NOT an openable thread) — <candidate_id>`.
    There is a salience candidate in the attention inbox but no thread capsule.
    If the user says "take a look" / "check the inbox", call
@@ -50,6 +51,7 @@ The pre-LLM hook may inject a pointer. There are three pointer shapes:
    selection can advance and return a different candidate/residue than the one
    the user is responding to. Do NOT improvise "thread X is waiting" when the
    pointer says candidate.
+   Human-facing: `🧠✨ I have a salience candidate waiting (not an openable thread): <title>. Say "take a look" or "check the inbox" if you want me to surface it.`
 3. **Saved-residue pointer** — `Pointer type: saved_residue (Kanban SAVE/PROMOTE_CONSCIOUS; NOT an openable thread) — <candidate_id>`.
    This was previously saved to Kanban but never became a thread. Conscious
    access is preserved via an honest doorway that links to the saved intake
@@ -60,6 +62,7 @@ The pre-LLM hook may inject a pointer. There are three pointer shapes:
    a presented saved-residue pointer, because cooldown selection can advance
    and show a different saved residue. Do NOT improvise "thread X is waiting
    for you" — say honestly that this was saved, not opened.
+   Human-facing: `🧠✨ I previously saved a salience residue (Kanban <decision>): <title>. This is not an openable thread — say "check saved residue" if you want me to recap the intake.`
 
    Operators can dial the saved-residue pathway down via two opt-in pointer
    config keys (both default `None` = unlimited):

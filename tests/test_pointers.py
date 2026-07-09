@@ -136,7 +136,7 @@ def test_pointer_context_is_door_handle_not_capsule():
         "pointer_type": "thread",
         "thread_id": "sth_x",
         "title": "A small title",
-        "invitation": "I have a conscious thread waiting: A small title. Say ‘take it up’ if you want me to open it.",
+        "invitation": "🧠 I have a conscious thread waiting: A small title. Say \"take it up\" if you want me to open it. 🧵",
     }
     context = pointer_context_for_llm(pointer)
     assert "continuity_summary" not in context
@@ -159,7 +159,7 @@ def test_candidate_fallback_pointer_when_no_threads(tmp_path):
     assert pointer["action"] == "pointer_available"
     assert pointer["pointer_type"] == "candidate"
     assert pointer["candidate_id"] == "cand_livepointer"
-    assert "I have a salience candidate" in pointer["invitation"]
+    assert "🧠✨ I have a salience candidate" in pointer["invitation"]
     # Honest copy: the candidate pointer must never claim to be a thread.
     assert "not an openable thread" in pointer["invitation"].lower()
 
@@ -170,7 +170,7 @@ def test_candidate_pointer_context_uses_exact_candidate_open_not_rotating_status
         "candidate_id": "cand_x",
         "title": "Live salience",
         "surface": "discord",
-        "invitation": "I have a salience candidate waiting (not an openable thread): Live salience.",
+        "invitation": "🧠✨ I have a salience candidate waiting (not an openable thread): Live salience.",
     }
     context = pointer_context_for_llm(pointer)
     assert "Pointer type: candidate" in context
@@ -381,6 +381,8 @@ def test_high_urgency_candidate_pointer_can_still_inject_without_user_text(tmp_p
     receipts = store.read_jsonl("decisions")
     assert receipts[-1]["type"] == "pointer.presented"
     assert receipts[-1]["foreground_turn_index"] == 1
+
+
 
 
 def test_saved_residue_pointer_requires_explicit_pathway_or_relevance(tmp_path):
