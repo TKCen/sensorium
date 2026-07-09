@@ -24,6 +24,26 @@ def _append_jsonl(path: Path, row: dict):
         f.write(json.dumps(row) + "\n")
 
 
+def test_liveness_timestamp_projection_and_candidate_reasons_are_closed(tmp_path, monkeypatch):
+    mod = _load_dashboard(monkeypatch, tmp_path / "sensorium" / "demo")
+    hostile = mod._liveness_item(
+        state="reviewing", reason_code="reviewing_open_aperture", observed_at="RAW_TIME_SENTINEL",
+        source="candidate_status", actionable=False, terminal=False,
+    )
+    valid = mod._liveness_item(
+        state="held", reason_code="candidate_held", observed_at="2026-07-09T14:00:00+02:00",
+        source="candidate_status", actionable=False, terminal=False,
+    )
+    fresh = mod._candidate_liveness({"status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"opened_at": "2099-01-01T00:00:00Z"}})
+    stale = mod._candidate_liveness({"status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"state": "stale"}})
+
+    assert hostile["observed_at"] is None
+    assert valid["observed_at"] == "2026-07-09T12:00:00Z"
+    assert fresh["reason_code"] == "reviewing_open_aperture"
+    assert stale["reason_code"] == "stale_aperture"
+    assert "RAW_TIME_SENTINEL" not in json.dumps([hostile, valid, fresh, stale], sort_keys=True)
+
+
 def test_snapshot_exposes_recent_signals_for_dashboard_drilldown(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     _append_jsonl(root / "signals" / "inbox.jsonl", {

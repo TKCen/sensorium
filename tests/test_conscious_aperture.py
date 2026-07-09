@@ -91,7 +91,7 @@ def test_active_aperture_guard_prevents_second_open(tmp_path):
     assert len(decisions) == 1
 
 
-def test_stale_active_aperture_allows_new_open(tmp_path):
+def test_stale_active_aperture_blocks_replacement_open(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
     stale = _candidate("stale", pressure=0.9)
@@ -108,9 +108,11 @@ def test_stale_active_aperture_allows_new_open(tmp_path):
         stale_after_minutes=60,
     )
 
-    assert result["action"] == "opened_aperture"
+    assert result["action"] == "stale_aperture_requires_settlement"
     assert result["stale_active_candidate_ids"] == ["stale"]
-    assert result["candidate_ids"] == ["fresh"]
+    assert result["candidate_ids"] == []
+    assert [row["status"] for row in store.read_jsonl("candidates")] == ["in_conscious_aperture", "candidate"]
+    assert store.read_jsonl("decisions") == []
 
 
 def test_cli_opens_aperture_packet(tmp_path):

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from .gate import is_feedback_self_loop
@@ -38,6 +39,42 @@ DEFAULT_DISPATCH_PRESSURE_THRESHOLD = 0.5
 # single tick. Overflow is reported (never silently dropped) so a backlog spike
 # cannot flood the board, and the next tick drains the remainder.
 MAX_RECONCILE_INTAKES_PER_TICK = 25
+
+# Projection-only vocabulary. These values deliberately do not replace the
+# entity-specific persisted status enums: canonical owners remain the only
+# transition writers.
+LIVENESS_STATES = frozenset({
+    "active", "reviewing", "blocked", "held", "prepared", "settled",
+    "stale", "error", "quiet", "unknown",
+})
+LIVENESS_REASON_CODES = frozenset({
+    "above_threshold_unrepresented", "already_represented_in_kanban",
+    "feedback_self_loop", "truncated_intake_capacity", "reviewed_open_intake",
+    "reviewed_open_intake_missing_decision", "reviewing_open_aperture", "stale_aperture",
+    "historical_prepared_pointer", "candidate_below_threshold",
+    "candidate_held", "candidate_prepared", "candidate_settled",
+    "candidate_unknown_status", "outbox_prepared", "outbox_failed",
+    "outbox_dispatched", "outbox_unknown_status",
+})
+LIVENESS_RECEIPT_SCHEMA = "sensorium.liveness_receipt.v1"
+LIVENESS_RECEIPT_KIND = "liveness_reconciliation"
+LIVENESS_RECEIPT_VERSION = 1
+
+
+def _safe_liveness_timestamp(value: Any) -> str | None:
+    """Return a bounded, UTC-normalized ISO-8601 timestamp or ``None``."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 40:
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 1970 <= parsed.year <= 2100:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 # Status applied to the originating candidate per decision. DROP suppresses so
 # the dispatcher's `select_candidate` filter (status == "candidate") cannot
@@ -985,14 +1022,214 @@ def select_active_above_threshold(
     whole set (highest pressure first) rather than only the top one, because
     every one of them is an activation the bridge must account for.
     """
-    eligible = [
-        c
-        for c in candidates
-        if c.get("status") == "candidate"
-        and float(c.get("pressure", 0) or 0) >= threshold
-    ]
-    eligible.sort(key=lambda c: float(c.get("pressure", 0) or 0), reverse=True)
+    def pressure(candidate: dict) -> float:
+        try:
+            return float(candidate.get("pressure", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    eligible = [c for c in candidates if c.get("status") == "candidate" and pressure(c) >= threshold]
+    # Stable pressure-desc/id-asc ordering is an idempotency property: capacity
+    # truncation must choose the same candidates on every identical re-run.
+    eligible.sort(key=lambda c: (-pressure(c), str(c.get("id") or "")))
     return eligible
+
+
+def _derived_stale_aperture_ids(candidates: list[dict], now: str, stale_after_minutes: int = 180) -> set[str]:
+    """Fail-safe stale aperture detection for the pure reconciliation snapshot."""
+    try:
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return set()
+    stale: set[str] = set()
+    for candidate in candidates:
+        if candidate.get("status") != "in_conscious_aperture":
+            continue
+        aperture = (candidate.get("conscious_aperture") if isinstance(candidate.get("conscious_aperture"), dict) else {}) or {}
+        opened = aperture.get("opened_at") or candidate.get("updated_at")
+        try:
+            opened_dt = datetime.fromisoformat(str(opened).replace("Z", "+00:00"))
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            # An unparseable open aperture is unsafe to replace, so it is stale.
+            stale.add(str(candidate.get("id") or ""))
+            continue
+        if (now_dt - opened_dt.astimezone(timezone.utc)).total_seconds() >= stale_after_minutes * 60:
+            stale.add(str(candidate.get("id") or ""))
+    return stale
+
+
+def classify_liveness_snapshot(
+    candidates: list[dict],
+    *,
+    now: str,
+    threshold: float = DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
+    represented_candidate_ids: set[str] | list[str] | None = None,
+    stale_aperture_ids: set[str] | list[str] | None = None,
+    historical_outbox_ids: set[str] | list[str] | None = None,
+    outbox: list[dict] | None = None,
+) -> dict:
+    """Return a pure, bounded liveness projection with opaque subject refs."""
+    represented = {str(value) for value in (represented_candidate_ids or [])}
+    stale = _derived_stale_aperture_ids(candidates, now) | {str(value) for value in (stale_aperture_ids or [])}
+    historical = {str(value) for value in (historical_outbox_ids or [])}
+    findings: list[dict] = []
+    candidate_statuses = {
+        "candidate", "in_conscious_aperture", "held", "prepared_external_work",
+        "reviewed", "suppressed", "cancelled", "archived",
+    }
+    for candidate in sorted(candidates, key=lambda row: str(row.get("id") or "")):
+        candidate_id = str(candidate.get("id") or "")
+        status = str(candidate.get("status") or "")
+        if not candidate_id or status not in candidate_statuses:
+            state, reason = "unknown", "candidate_unknown_status"
+        elif candidate_id in stale:
+            state, reason = "stale", "stale_aperture"
+        elif status == "in_conscious_aperture":
+            state, reason = "reviewing", "reviewing_open_aperture"
+        elif status == "held":
+            state, reason = "held", "candidate_held"
+        elif status == "prepared_external_work":
+            state, reason = "prepared", "candidate_prepared"
+        elif status in {"reviewed", "suppressed", "cancelled", "archived"}:
+            state, reason = "settled", "candidate_settled"
+        else:
+            try:
+                above = float(candidate.get("pressure", 0) or 0) >= threshold
+            except (TypeError, ValueError):
+                above = False
+            if candidate_id in represented:
+                state, reason = "blocked", "already_represented_in_kanban"
+            elif above:
+                state, reason = "active", "above_threshold_unrepresented"
+            else:
+                state, reason = "quiet", "candidate_below_threshold"
+        findings.append({
+            "subject_ref": {"type": "candidate", "id": candidate_ref_label(candidate_id)},
+            "state": state, "reason_code": reason, "observed_at": now,
+            "source": "liveness_snapshot", "actionable": state in {"active", "blocked", "stale"},
+            "terminal": state == "settled", "related_refs": [],
+        })
+    for row in sorted(outbox or [], key=lambda item: str(item.get("id") or "")):
+        outbox_id = str(row.get("id") or "")
+        status = str(row.get("status") or "").lower()
+        if outbox_id in historical:
+            state, reason, actionable, terminal = "settled", "historical_prepared_pointer", False, True
+        elif status == "prepared":
+            state, reason, actionable, terminal = "prepared", "outbox_prepared", True, False
+        elif status == "failed":
+            state, reason, actionable, terminal = "error", "outbox_failed", True, False
+        elif status == "dispatched":
+            state, reason, actionable, terminal = "settled", "outbox_dispatched", False, True
+        else:
+            state, reason, actionable, terminal = "unknown", "outbox_unknown_status", False, False
+        findings.append({
+            "subject_ref": {"type": "outbox", "id": evidence_ref_label("outbox", outbox_id)},
+            "state": state, "reason_code": reason, "observed_at": now,
+            "source": "outbox_lineage", "actionable": actionable, "terminal": terminal,
+            "related_refs": [],
+        })
+    return {"version": 1, "now": now, "findings": findings}
+
+
+def _liveness_receipt_key(subject_ref: dict[str, Any], reason_code: str) -> str:
+    """Stable opaque identity for a classification-only reconciliation receipt."""
+    material = {
+        "subject_type": subject_ref["type"],
+        "subject_id": subject_ref["id"],
+        "reason_code": reason_code,
+        "version": LIVENESS_RECEIPT_VERSION,
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"liveness:{digest}"
+
+
+def append_liveness_receipts(store: SensoriumStore, findings: list[dict[str, Any]]) -> dict[str, int]:
+    """Append compact liveness findings once, without owning any transition.
+
+    Findings are already a privacy-safe classification boundary. This writer
+    validates each field again so legacy/corrupt callers fail closed rather than
+    turning a receipt into a raw state projection.
+    """
+    existing = {
+        str(row.get("idempotency_key") or "")
+        for row in store.read_jsonl("decisions")
+        if row.get("schema") == LIVENESS_RECEIPT_SCHEMA
+    }
+    written = skipped = 0
+    for finding in findings:
+        raw_subject = finding.get("subject_ref")
+        subject: dict[str, Any] = raw_subject if isinstance(raw_subject, dict) else {}
+        subject_type = str(subject.get("type") or "")
+        subject_id = str(subject.get("id") or "")
+        state = str(finding.get("state") or "")
+        reason_code = str(finding.get("reason_code") or "")
+        source = str(finding.get("source") or "")
+        if (
+            subject_type not in {"candidate", "outbox"}
+            or not re.fullmatch(r"[a-z_]+#[0-9a-f]{16}", subject_id)
+            or state not in LIVENESS_STATES
+            or reason_code not in LIVENESS_REASON_CODES
+            or source not in {"liveness_snapshot", "outbox_lineage"}
+        ):
+            skipped += 1
+            continue
+        safe_subject = {"type": subject_type, "id": subject_id}
+        key = _liveness_receipt_key(safe_subject, reason_code)
+        if key in existing:
+            skipped += 1
+            continue
+        observed_at = _safe_liveness_timestamp(finding.get("observed_at"))
+        receipt = {
+            "schema": LIVENESS_RECEIPT_SCHEMA,
+            "receipt_kind": LIVENESS_RECEIPT_KIND,
+            "idempotency_key": key,
+            "ts": observed_at or utc_now_iso(),
+            "subject_ref": safe_subject,
+            "old_liveness": "unknown",
+            "new_liveness": state,
+            "reason_code": reason_code,
+            "source": source,
+            "action": "none",
+            "related_refs": [],
+            "version": LIVENESS_RECEIPT_VERSION,
+        }
+        store.append_jsonl("decisions", receipt)
+        existing.add(key)
+        written += 1
+    return {"written": written, "skipped": skipped}
+
+
+def plan_liveness_reconciliation(
+    candidates: list[dict],
+    *,
+    now: str,
+    threshold: float = DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
+    represented_candidate_ids: set[str] | list[str] | None = None,
+    stale_aperture_ids: set[str] | list[str] | None = None,
+    max_intakes: int = MAX_RECONCILE_INTAKES_PER_TICK,
+) -> dict:
+    """Build the deterministic first-slice plan without mutating any store."""
+    resolved_stale = _derived_stale_aperture_ids(candidates, now) | {str(value) for value in (stale_aperture_ids or [])}
+    candidate_plan = plan_candidate_reconciliation(
+        candidates, threshold=threshold, represented_candidate_ids=represented_candidate_ids, max_intakes=max_intakes
+    )
+    return {
+        "version": 1,
+        "classification": classify_liveness_snapshot(
+            candidates, now=now, threshold=threshold,
+            represented_candidate_ids=represented_candidate_ids, stale_aperture_ids=resolved_stale,
+        ),
+        "candidate_reconciliation": candidate_plan,
+        "summary": {
+            "active": candidate_plan["active_count"], "mint": len(candidate_plan["mint"]),
+            "settle": len(candidate_plan["settle"]), "truncated": candidate_plan["truncated"],
+            "stale_apertures": len(resolved_stale),
+        },
+    }
 
 
 def plan_candidate_reconciliation(

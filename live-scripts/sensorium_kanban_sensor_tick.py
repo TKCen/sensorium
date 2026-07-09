@@ -59,10 +59,11 @@ from agent_sensorium.settlement import (  # noqa: E402
     apply_kanban_settlement,
     apply_settlement_record,
     candidate_intake_idempotency_key,
+    append_liveness_receipts,
     coalesce_suppression_reason as _coalesced_suppression_reason,
     event_incident_key as _event_incident_key,
     extract_kanban_intake_payload,
-    plan_candidate_reconciliation,
+    plan_liveness_reconciliation,
     plan_completed_intake_settlements,
     plan_reviewed_open_intake_settlements,
     represented_candidate_ids as _represented_candidate_ids,
@@ -796,11 +797,14 @@ def _reconcile_active_candidates(
     open_intake_ids = {str(t.get("id")) for t in open_intakes if t.get("id")}
     represented = _represented_candidate_ids(reconciled_candidates, open_intake_ids)
 
-    plan = plan_candidate_reconciliation(
+    liveness_plan = plan_liveness_reconciliation(
         candidates,
+        now=_now_iso(),
         threshold=DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
         represented_candidate_ids=represented,
     )
+    liveness_receipts = append_liveness_receipts(store, liveness_plan["classification"]["findings"])
+    plan = liveness_plan["candidate_reconciliation"]
 
     minted: list[dict[str, Any]] = []
     settled: list[dict[str, Any]] = []
@@ -869,6 +873,8 @@ def _reconcile_active_candidates(
         "skipped": plan["skip"],
         "truncated": plan["truncated"],
         "active_above_threshold_count": plan["active_count"],
+        "last_liveness_reconcile": liveness_plan["summary"],
+        "liveness_receipts": liveness_receipts,
         "created_tasks": created_tasks,
     }
 
@@ -1225,6 +1231,7 @@ def main() -> int:
                 "incident_context": incident_context,
                 "reconciled_candidates": reconciled_candidates,
                 "last_reconcile": reconcile_summary,
+                "last_liveness_reconcile": reconcile.get("last_liveness_reconcile", {}),
                 "last_post_review_settlement": post_review_settlement,
                 "last_reviewed_open_settlement": reviewed_open_settlement,
                 "last_improvement_collect": improvement_collect,
