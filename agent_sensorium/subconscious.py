@@ -24,6 +24,7 @@ from .schemas import (
     new_id,
     truncate_text,
     utc_now_iso,
+    validate_http_url,
 )
 from .store import SensoriumStore
 
@@ -269,6 +270,7 @@ def _model_api_key(cfg: dict) -> str | None:
 
 
 def _post_openai_chat_completion(url: str, payload: dict, headers: dict, timeout: int | float) -> dict:
+    validate_http_url(url)
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=float(timeout)) as response:

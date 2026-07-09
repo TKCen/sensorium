@@ -44,6 +44,15 @@ def sanitize_profile_name(name: str) -> str:
     return candidate
 
 
+def validate_http_url(url: str) -> str:
+    """Validate that a URL uses http or https scheme to mitigate SSRF/LFI."""
+    if not isinstance(url, str):
+        raise ValueError(f"URL must be a string, got {type(url)}")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(f"URL must use http or https scheme: {url!r}")
+    return url
+
+
 SUCCESS_OUTCOMES = frozenset({
     "operator_approved", "completed", "response_received", "acknowledged",
 })
