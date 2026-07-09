@@ -85,7 +85,7 @@ from .config import (
 
 ARCHIVED_STATUSES = {"archived", "closed"}
 
-VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "cancel", "mark_reviewed"}
+VALID_CANDIDATE_ACTIONS = {"suppress", "hold", "resume", "cancel", "mark_reviewed"}
 VALID_THREAD_ACTIONS = {"close", "hold", "resume", "archive", "pin", "unpin", "mark_reviewed"}
 _VISIBLE_STATUSES = {"dormant", "held"}
 _ALLOWED_THREAD_TRANSITIONS: dict[str, set[str]] = {
@@ -979,10 +979,14 @@ def handle_sensorium_candidate_update(
         return _err(instance, f"Candidate '{candidate_id}' not found.")
 
     old_status = target.get("status", "candidate")
+    if action == "resume" and old_status != "held":
+        return _err(instance, f"Candidate '{candidate_id}' is {old_status} and cannot be resumed.")
     if action == "suppress":
         new_status = "suppressed"
     elif action == "hold":
         new_status = "held"
+    elif action == "resume":
+        new_status = "candidate"
     elif action == "cancel":
         new_status = "cancelled"
     elif action == "mark_reviewed":
@@ -992,6 +996,10 @@ def handle_sensorium_candidate_update(
 
     target["status"] = new_status
     target["updated_at"] = utc_now_iso()
+    if action == "hold":
+        target["hold_reason"] = reason
+    elif action == "resume":
+        target["hold_reason"] = ""
     if action in {"suppress", "cancel", "mark_reviewed"}:
         reason_lower = reason.lower()
         if action == "suppress" or "reject" in reason_lower or "silence" in reason_lower:
