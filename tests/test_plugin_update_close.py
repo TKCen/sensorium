@@ -88,6 +88,20 @@ def _write_thread(store, thread_id="sth_close", origin_candidate_id=None, **over
     return base
 
 
+def _write_candidate(store, candidate_id="cand_update", **overrides):
+    base = {
+        "id": candidate_id,
+        "status": "candidate",
+        "kind": "validation",
+        "pressure": 0.8,
+        "summary": "Candidate for live update routing tests.",
+        "updated_at": "2026-07-04T10:00:00Z",
+    }
+    base.update(overrides)
+    store.append_jsonl("candidates", base)
+    return base
+
+
 @pytest.fixture
 def ctx_and_store(tmp_path):
     """Register the plugin with a fake context and return (ctx, store)."""
@@ -182,6 +196,85 @@ def test_plugin_update_hold_thread_records_resume_trigger(ctx_and_store):
     hold_receipts = [d for d in decisions if d.get("type") == "thread.updated"]
     assert hold_receipts[-1]["action"] == "hold"
     assert hold_receipts[-1]["thread_id"] == "sth_hold_1"
+
+
+def test_plugin_update_candidate_mark_reviewed_records_candidate_receipt(ctx_and_store):
+    ctx, store, instance, state_dir = ctx_and_store
+    _write_candidate(store, candidate_id="cand_reviewed_1")
+
+    result = _call(
+        ctx,
+        action="update",
+        keyword="mark_reviewed",
+        id="cand_reviewed_1",
+        text="consciously reviewed",
+        instance=instance,
+        state_dir=str(state_dir),
+    )
+
+    assert result["success"] is True
+    assert result["data"]["old_status"] == "candidate"
+    assert result["data"]["new_status"] == "reviewed"
+    assert store.read_jsonl("candidates")[0]["status"] == "reviewed"
+    receipt = [d for d in store.read_jsonl("decisions") if d.get("type") == "candidate.updated"][-1]
+    assert receipt["candidate_id"] == "cand_reviewed_1"
+    assert receipt["action"] == "mark_reviewed"
+
+
+def test_plugin_update_candidate_hold_then_resume_clears_hold_context(ctx_and_store):
+    ctx, store, instance, state_dir = ctx_and_store
+    _write_candidate(store, candidate_id="cand_hold_resume_1")
+
+    held = _call(
+        ctx,
+        action="update",
+        keyword="hold",
+        id="cand_hold_resume_1",
+        text="awaiting evidence",
+        instance=instance,
+        state_dir=str(state_dir),
+    )
+    assert held["success"] is True
+    candidate = store.read_jsonl("candidates")[0]
+    assert candidate["status"] == "held"
+    assert candidate["hold_reason"] == "awaiting evidence"
+
+    resumed = _call(
+        ctx,
+        action="update",
+        keyword="resume",
+        id="cand_hold_resume_1",
+        text="evidence arrived",
+        instance=instance,
+        state_dir=str(state_dir),
+    )
+    assert resumed["success"] is True
+    assert resumed["data"]["old_status"] == "held"
+    assert resumed["data"]["new_status"] == "candidate"
+    candidate = store.read_jsonl("candidates")[0]
+    assert candidate["status"] == "candidate"
+    assert candidate["hold_reason"] == ""
+    receipts = [d for d in store.read_jsonl("decisions") if d.get("type") == "candidate.updated"]
+    assert [receipt["action"] for receipt in receipts[-2:]] == ["hold", "resume"]
+
+
+def test_plugin_update_candidate_resume_requires_held_state(ctx_and_store):
+    ctx, store, instance, state_dir = ctx_and_store
+    _write_candidate(store, candidate_id="cand_resume_unheld_1")
+
+    result = _call(
+        ctx,
+        action="update",
+        keyword="resume",
+        id="cand_resume_unheld_1",
+        instance=instance,
+        state_dir=str(state_dir),
+    )
+
+    assert result["success"] is False
+    assert "cannot be resumed" in result["error"]
+    assert store.read_jsonl("candidates")[0]["status"] == "candidate"
+    assert not store.read_jsonl("decisions")
 
 
 # --- Test 3: unknown thread id ------------------------------------------

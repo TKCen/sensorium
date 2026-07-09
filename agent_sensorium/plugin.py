@@ -51,6 +51,7 @@ def register(ctx) -> None:
     from .tools import (
         handle_sensorium_attention_pointer,
         handle_sensorium_candidate_open,
+        handle_sensorium_candidate_update,
         handle_sensorium_ingest_signal,
         handle_sensorium_status,
         handle_sensorium_thread_open,
@@ -214,6 +215,14 @@ def register(ctx) -> None:
 
         if action == "update":
             keyword = str(args.get("keyword") or "mark_reviewed").strip().lower()
+            if target_id.startswith("cand_"):
+                return handle_sensorium_candidate_update(
+                    candidate_id=target_id,
+                    action=keyword,
+                    reason=text,
+                    instance=instance,
+                    state_dir=state_dir,
+                )
             return handle_sensorium_thread_update(
                 thread_id=target_id,
                 action=keyword,
