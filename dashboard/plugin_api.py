@@ -408,6 +408,47 @@ def _thread_title(thread: dict[str, Any]) -> str:
     return _truncate(task.get("title") or thread.get("title") or thread.get("id"), 140)
 
 
+def _liveness_item(*, state: str, reason_code: str, observed_at: Any, source: str, actionable: bool, terminal: bool) -> dict[str, Any]:
+    """Closed, bounded GET projection for reconciliation state."""
+    allowed_states = {"active", "reviewing", "blocked", "held", "prepared", "settled", "stale", "error", "quiet", "unknown"}
+    allowed_reasons = {
+        "above_threshold_unrepresented", "candidate_below_threshold", "candidate_unknown_status",
+        "stale_aperture", "historical_prepared_pointer", "outbox_prepared", "outbox_failed",
+        "outbox_dispatched", "outbox_unknown_status",
+    }
+    return {
+        "state": state if state in allowed_states else "unknown",
+        "reason_code": reason_code if reason_code in allowed_reasons else "candidate_unknown_status",
+        "observed_at": observed_at if isinstance(observed_at, str) and len(observed_at) <= 60 else None,
+        "source": source if source in {"candidate_status", "outbox_lineage"} else "candidate_status",
+        "actionable": bool(actionable), "terminal": bool(terminal), "related_refs": [],
+    }
+
+
+def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
+    status = str(candidate.get("status") or "")
+    observed_at = candidate.get("updated_at") or candidate.get("created_at")
+    if status == "in_conscious_aperture":
+        aperture = (candidate.get("conscious_aperture") if isinstance(candidate.get("conscious_aperture"), dict) else {}) or {}
+        opened = _parse_dt(aperture.get("opened_at") or candidate.get("updated_at"))
+        stale = aperture.get("state") == "stale" or opened is None or (datetime.now(timezone.utc) - opened).total_seconds() >= 180 * 60
+        state = "stale" if stale else "reviewing"
+        return _liveness_item(state=state, reason_code="stale_aperture", observed_at=observed_at, source="candidate_status", actionable=stale, terminal=False)
+    if status == "candidate":
+        try:
+            above = float(candidate.get("pressure", 0) or 0) >= 0.5
+        except (TypeError, ValueError):
+            above = False
+        return _liveness_item(state="active" if above else "quiet", reason_code="above_threshold_unrepresented" if above else "candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=above, terminal=False)
+    if status == "held":
+        return _liveness_item(state="held", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+    if status == "prepared_external_work":
+        return _liveness_item(state="prepared", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+    if status in {"reviewed", "suppressed", "cancelled", "archived"}:
+        return _liveness_item(state="settled", reason_code="candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=False, terminal=True)
+    return _liveness_item(state="unknown", reason_code="candidate_unknown_status", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+
+
 def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_surface_atom("thread", thread.get("id")),
@@ -435,6 +476,7 @@ def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
         "sensitivity": _safe_surface_atom("sensitivity", candidate.get("sensitivity")),
         "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (candidate.get("allowed_surfaces") or [])][:8],
         "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
+        "liveness": _candidate_liveness(candidate),
     }
 
 
@@ -798,6 +840,12 @@ def _outbox_item(
         "created_at": req.get("created_at"),
         "updated_at": req.get("updated_at"),
         "safety": safety,
+        "liveness": _liveness_item(
+            state=("settled" if safety.get("label") == "historical_prepared_pointer" else {"prepared": "prepared", "failed": "error", "dispatched": "settled"}.get(str(req.get("status") or "").lower(), "unknown")),
+            reason_code=("historical_prepared_pointer" if safety.get("label") == "historical_prepared_pointer" else {"prepared": "outbox_prepared", "failed": "outbox_failed", "dispatched": "outbox_dispatched"}.get(str(req.get("status") or "").lower(), "outbox_unknown_status")),
+            observed_at=req.get("updated_at") or req.get("created_at"), source="outbox_lineage",
+            actionable=bool(safety.get("actionable")), terminal=safety.get("label") == "historical_prepared_pointer" or str(req.get("status") or "").lower() == "dispatched",
+        ),
     }
 
 

@@ -141,6 +141,20 @@ def open_conscious_aperture(
         and _is_stale_active(c, now=now_dt, stale_after_minutes=stale_after_minutes)
     ]
 
+    # A stale open aperture is still open. Reconciliation can report it, but
+    # only this aperture owner may settle/reclaim it; never open a replacement.
+    # This guard intentionally precedes selection in dry-run and write modes.
+    if stale_active:
+        return {
+            "success": False,
+            "action": "stale_aperture_requires_settlement",
+            "dry_run": dry_run,
+            "active_count": len(active),
+            "stale_active_candidate_ids": sorted(str(c.get("id") or "") for c in stale_active),
+            "candidate_ids": [],
+            "aperture": [],
+        }
+
     if len(active) >= active_limit:
         return {
             "success": True,
