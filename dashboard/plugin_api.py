@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -154,11 +154,14 @@ def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, An
     if not path.exists():
         return []
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        if limit is not None:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = deque(f, maxlen=limit)
+        else:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = list(f)
     except Exception:
         return []
-    if limit is not None:
-        lines = lines[-limit:]
     rows: list[dict[str, Any]] = []
     for line in lines:
         line = line.strip()
@@ -193,11 +196,14 @@ def _read_jsonl(root: Path, name: str, limit: int | None = None) -> tuple[list[d
     if not path.exists():
         return [], 0
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        if limit is not None:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = deque(f, maxlen=limit)
+        else:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = list(f)
     except Exception:
         return [], 0
-    if limit is not None:
-        lines = lines[-limit:]
     rows: list[dict[str, Any]] = []
     bad = 0
     for line in lines:
@@ -2223,17 +2229,22 @@ def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, A
     path = root / "inner_life" / name
     if not path.exists():
         return []
-    rows: list[dict[str, Any]] = []
     try:
-        for line in path.read_text(errors="ignore").splitlines()[-limit:]:
-            try:
-                value = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(value, dict):
-                rows.append(value)
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = deque(f, maxlen=limit)
     except Exception:
         return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
     return rows
 
 
