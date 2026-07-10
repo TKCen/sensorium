@@ -200,6 +200,126 @@ def test_settle_aperture_item_dry_run_does_not_mutate(tmp_path):
     assert store.read_jsonl("worker_requests") == []
 
 
+def test_held_checkpoint_returns_only_when_due_and_retains_context_once(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
+    store.ensure_dirs()
+    original = _candidate("returning", pressure=0.8)
+    original["source_candidate_ids"] = ["source-private"]
+    original["correlation_keys"] = ["continuity"]
+    store.append_jsonl("candidates", original)
+    opened = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z")
+
+    held = settle_conscious_aperture_item(
+        store, candidate_id="returning", aperture_id=opened["aperture_id"], decision="HELD",
+        reason="Return this to conscious attention later.", return_at="2026-06-07T13:00:00Z",
+        dry_run=False, now="2026-06-07T12:05:00Z",
+    )
+    assert held["new_status"] == "held"
+    persisted = store.read_jsonl("candidates")[0]
+    assert persisted["held_return"] == {"not_before": "2026-06-07T13:00:00Z", "reason_code": "time_checkpoint"}
+    assert open_conscious_aperture(store, dry_run=True, now="2026-06-07T12:59:59Z")["candidate_ids"] == []
+
+    due = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T13:00:00Z")
+    repeated = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T13:01:00Z")
+    candidate = store.read_jsonl("candidates")[0]
+    returned = [row for row in store.read_jsonl("decisions") if row.get("type") == "conscious.aperture.returned"]
+
+    assert due["candidate_ids"] == ["returning"]
+    assert repeated["action"] == "active_aperture_exists"
+    assert candidate["status"] == "in_conscious_aperture"
+    assert "held_return" not in candidate
+    assert candidate["source_candidate_ids"] == ["source-private"]
+    assert candidate["correlation_keys"] == ["continuity"]
+    assert candidate["conscious_task"] == original["conscious_task"]
+    assert len(returned) == 1
+    assert returned[0]["return_reason_code"] == "time_checkpoint"
+    assert store.read_jsonl("worker_requests") == []
+    assert store.read_jsonl("outbox") == []
+    assert store.read_jsonl("threads") == []
+
+
+def test_fractional_held_checkpoint_preserves_precision_until_due(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
+    store.ensure_dirs()
+    store.append_jsonl("candidates", _candidate("fractional", pressure=0.8))
+    opened = open_conscious_aperture(
+        store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z"
+    )
+
+    result = settle_conscious_aperture_item(
+        store,
+        candidate_id="fractional",
+        aperture_id=opened["aperture_id"],
+        decision="HELD",
+        reason="Preserve the exact checkpoint instant.",
+        return_at="2026-06-07T13:00:00.123456Z",
+        dry_run=False,
+        now="2026-06-07T12:05:00Z",
+    )
+
+    assert result["new_status"] == "held"
+    assert store.read_jsonl("candidates")[0]["held_return"]["not_before"] == (
+        "2026-06-07T13:00:00.123456Z"
+    )
+    assert open_conscious_aperture(
+        store, dry_run=True, now="2026-06-07T13:00:00Z"
+    )["candidate_ids"] == []
+    assert open_conscious_aperture(
+        store, dry_run=True, now="2026-06-07T13:00:00.123456Z"
+    )["candidate_ids"] == ["fractional"]
+
+
+def test_due_held_checkpoint_respects_active_and_stale_aperture_guards(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
+    store.ensure_dirs()
+    held = _candidate("returning", pressure=0.8)
+    held["status"] = "held"
+    held["held_return"] = {"not_before": "2026-06-07T11:00:00Z", "reason_code": "time_checkpoint"}
+    active = _candidate("active", pressure=0.7)
+    active["status"] = "in_conscious_aperture"
+    active["conscious_aperture"] = {"id": "cap_active", "opened_at": "2026-06-07T11:59:00Z", "state": "open"}
+    store.append_jsonl("candidates", held)
+    store.append_jsonl("candidates", active)
+
+    blocked = open_conscious_aperture(store, dry_run=False, now="2026-06-07T12:00:00Z")
+    assert blocked["action"] == "active_aperture_exists"
+    assert store.read_jsonl("candidates")[0]["status"] == "held"
+
+    active["conscious_aperture"]["opened_at"] = "2026-06-07T08:00:00Z"
+    store.rewrite_jsonl("candidates", [held, active])
+    stale = open_conscious_aperture(store, dry_run=False, now="2026-06-07T12:00:00Z", stale_after_minutes=60)
+    assert stale["action"] == "stale_aperture_requires_settlement"
+    assert store.read_jsonl("candidates")[0]["status"] == "held"
+    assert [row for row in store.read_jsonl("decisions") if row.get("type") == "conscious.aperture.returned"] == []
+
+
+def test_held_checkpoint_rejects_malformed_or_nonfuture_timestamp(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
+    store.ensure_dirs()
+    store.append_jsonl("candidates", _candidate("one", pressure=0.8))
+    opened = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z")
+
+    for value in (
+        "not-a-time",
+        "2026-06-07T12:00:00Z",
+        "2026-06-07T13:00:00+01:00",
+        "2027-06-07Z",
+        "2026-06-07 13:00:00Z",
+        "2026-06-07T13:00Z",
+        "2026-06-07T13:00:00.1234567Z",
+        " 2026-06-07T13:00:00Z",
+        "2026-06-07T13:00:00Z ",
+    ):
+        result = settle_conscious_aperture_item(
+            store, candidate_id="one", aperture_id=opened["aperture_id"], decision="HELD",
+            reason="Hold only with a valid future UTC checkpoint.", return_at=value,
+            dry_run=False, now="2026-06-07T12:00:00Z",
+        )
+        assert result["error"] == "invalid_return_at"
+    assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
+    assert store.read_jsonl("decisions")[-1]["type"] == "conscious.aperture.opened"
+
+
 def test_settle_aperture_item_records_external_work_spec_without_worker_request(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
@@ -377,4 +497,53 @@ def test_wake_tick_opens_and_applies_settlement_without_worker_request(tmp_path)
     candidate = store.read_jsonl("candidates")[0]
     assert candidate["status"] == "reviewed"
     assert candidate["conscious_aperture"]["decision"] == "REVIEWED"
+    assert store.read_jsonl("worker_requests") == []
+
+
+def test_wake_tick_applies_held_return_checkpoint(tmp_path):
+    state_dir = tmp_path / "sensorium"
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    store.ensure_dirs()
+    store.append_jsonl("candidates", _candidate("wake_return", pressure=0.8))
+    settlement_file = tmp_path / "settlement.json"
+    settlement_file.write_text(json.dumps({
+        "candidate_id": "wake_return",
+        "decision": "HELD",
+        "reason": "Return this through the aperture later.",
+        "return_at": "2026-06-07T13:00:00Z",
+    }))
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(WAKE_SCRIPT),
+            "--instance",
+            "test",
+            "--state-dir",
+            str(state_dir),
+            "--aperture-size",
+            "1",
+            "--open",
+            "--settlements",
+            str(settlement_file),
+            "--apply-settlements",
+            "--now",
+            "2026-06-07T12:00:00Z",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    payload = json.loads(proc.stdout)
+    candidate = store.read_jsonl("candidates")[0]
+    assert payload["success"] is True
+    assert payload["settlements"]["applied"] == 1
+    assert payload["settlement_record_shape"]["return_at"] == "optional future UTC-Z checkpoint for HELD"
+    assert candidate["status"] == "held"
+    assert candidate["held_return"] == {
+        "not_before": "2026-06-07T13:00:00Z",
+        "reason_code": "time_checkpoint",
+    }
     assert store.read_jsonl("worker_requests") == []

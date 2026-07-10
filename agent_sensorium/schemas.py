@@ -19,6 +19,9 @@ DELIVERY_ONLY_OUTCOMES = frozenset({
 })
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+UTC_Z_CHECKPOINT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
+)
 
 
 def sanitize_profile_name(name: str) -> str:
@@ -55,6 +58,22 @@ FAILURE_OUTCOMES = frozenset({
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc_z_checkpoint(value: object) -> tuple[str, datetime] | None:
+    """Return canonical UTC-Z text and time, rejecting every other timestamp form."""
+    if not isinstance(value, str):
+        return None
+    text = value
+    if UTC_Z_CHECKPOINT_RE.fullmatch(text) is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError:
+        return None
+    parsed_utc = parsed.astimezone(timezone.utc)
+    canonical = parsed_utc.isoformat(timespec="auto").replace("+00:00", "Z")
+    return canonical, parsed_utc
 
 
 def new_id(prefix: str) -> str:

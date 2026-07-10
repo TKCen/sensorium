@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .gate import is_feedback_self_loop
-from .schemas import truncate_text, utc_now_iso
+from .schemas import parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 VALID_SETTLEMENT_DECISIONS = {"DROP", "SAVE", "PROMOTE_CONSCIOUS"}
@@ -45,14 +45,14 @@ MAX_RECONCILE_INTAKES_PER_TICK = 25
 # transition writers.
 LIVENESS_STATES = frozenset({
     "active", "reviewing", "blocked", "held", "prepared", "settled",
-    "stale", "error", "quiet", "unknown",
+    "stale", "error", "quiet", "unknown", "awaiting_checkpoint", "overdue",
 })
 LIVENESS_REASON_CODES = frozenset({
     "above_threshold_unrepresented", "already_represented_in_kanban",
     "feedback_self_loop", "truncated_intake_capacity", "reviewed_open_intake",
     "reviewed_open_intake_missing_decision", "reviewing_open_aperture", "stale_aperture",
     "historical_prepared_pointer", "candidate_below_threshold",
-    "candidate_held", "candidate_prepared", "candidate_settled",
+    "candidate_held", "candidate_prepared", "candidate_settled", "time_checkpoint",
     "candidate_unknown_status", "outbox_prepared", "outbox_failed",
     "outbox_dispatched", "outbox_unknown_status",
 })
@@ -61,8 +61,8 @@ LIVENESS_RECEIPT_KIND = "liveness_reconciliation"
 LIVENESS_RECEIPT_VERSION = 1
 
 
-def _safe_liveness_timestamp(value: Any) -> str | None:
-    """Return a bounded, UTC-normalized ISO-8601 timestamp or ``None``."""
+def _safe_liveness_datetime(value: Any) -> datetime | None:
+    """Return a bounded, UTC-normalized datetime or ``None``."""
     if not isinstance(value, str) or not 1 <= len(value) <= 40:
         return None
     try:
@@ -74,7 +74,15 @@ def _safe_liveness_timestamp(value: Any) -> str | None:
         return None
     if parsed.tzinfo is None or not 1970 <= parsed.year <= 2100:
         return None
-    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_liveness_timestamp(value: Any) -> str | None:
+    """Return a bounded, UTC-normalized ISO-8601 timestamp or ``None``."""
+    parsed = _safe_liveness_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat(timespec="auto").replace("+00:00", "Z")
 
 # Status applied to the originating candidate per decision. DROP suppresses so
 # the dispatcher's `select_candidate` filter (status == "candidate") cannot
@@ -1091,7 +1099,21 @@ def classify_liveness_snapshot(
         elif status == "in_conscious_aperture":
             state, reason = "reviewing", "reviewing_open_aperture"
         elif status == "held":
-            state, reason = "held", "candidate_held"
+            checkpoint = candidate.get("held_return")
+            not_before = parse_utc_z_checkpoint(
+                checkpoint.get("not_before")
+                if isinstance(checkpoint, dict) and checkpoint.get("reason_code") == "time_checkpoint"
+                else None
+            )
+            now_checkpoint = _safe_liveness_datetime(now)
+            if not_before and now_checkpoint:
+                state, reason = (
+                    ("overdue", "time_checkpoint")
+                    if not_before[1] <= now_checkpoint
+                    else ("awaiting_checkpoint", "time_checkpoint")
+                )
+            else:
+                state, reason = "held", "candidate_held"
         elif status == "prepared_external_work":
             state, reason = "prepared", "candidate_prepared"
         elif status in {"reviewed", "suppressed", "cancelled", "archived"}:

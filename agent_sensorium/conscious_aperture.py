@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .schemas import new_id, truncate_text, utc_now_iso
+from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 OPEN_STATUS = "in_conscious_aperture"
@@ -58,6 +58,20 @@ def _is_pending_conscious_task(candidate: dict) -> bool:
         and candidate.get("kind") == CONSCIOUS_KIND
         and isinstance(candidate.get("conscious_task"), dict)
     )
+
+
+def _is_due_held_checkpoint(candidate: dict, *, now: datetime) -> bool:
+    checkpoint = candidate.get("held_return")
+    if not (
+        candidate.get("status") == "held"
+        and candidate.get("kind") == CONSCIOUS_KIND
+        and isinstance(candidate.get("conscious_task"), dict)
+        and isinstance(checkpoint, dict)
+        and checkpoint.get("reason_code") == "time_checkpoint"
+    ):
+        return False
+    parsed = parse_utc_z_checkpoint(checkpoint.get("not_before"))
+    return parsed is not None and parsed[1] <= now
 
 
 def _task_type_priority(candidate: dict) -> int:
@@ -166,8 +180,11 @@ def open_conscious_aperture(
             "aperture": [_aperture_item(c) for c in sorted(active, key=_candidate_sort_key)[:size]],
         }
 
-    pending = sorted([c for c in candidates if _is_pending_conscious_task(c)], key=_candidate_sort_key)
-    selected = pending[:size]
+    eligible = sorted([
+        candidate for candidate in candidates
+        if _is_pending_conscious_task(candidate) or _is_due_held_checkpoint(candidate, now=now_dt)
+    ], key=_candidate_sort_key)
+    selected = eligible[:size]
     aperture_id = new_id("cap")
     packet = {
         "success": True,
@@ -177,7 +194,7 @@ def open_conscious_aperture(
         "opened_at": now_iso,
         "aperture_size": size,
         "selected_count": len(selected),
-        "pending_count": len(pending),
+        "pending_count": len(eligible),
         "active_count": len(active),
         "stale_active_candidate_ids": [c.get("id") for c in stale_active],
         "candidate_ids": [c.get("id") for c in selected],
@@ -191,6 +208,10 @@ def open_conscious_aperture(
         return packet
 
     selected_ids = set(packet["candidate_ids"])
+    returned_ids = {
+        str(candidate.get("id") or "") for candidate in selected
+        if candidate.get("status") == "held"
+    }
     rewritten: list[dict] = []
     for candidate in candidates:
         if candidate.get("id") in selected_ids:
@@ -202,6 +223,8 @@ def open_conscious_aperture(
                 "opened_at": now_iso,
                 "state": "open",
             }
+            if str(candidate.get("id") or "") in returned_ids:
+                updated.pop("held_return", None)
             rewritten.append(updated)
         else:
             rewritten.append(candidate)
@@ -212,10 +235,18 @@ def open_conscious_aperture(
         "aperture_id": aperture_id,
         "candidate_ids": packet["candidate_ids"],
         "selected_count": len(selected),
-        "pending_count": len(pending),
+        "pending_count": len(eligible),
         "max_active_sessions": active_limit,
         "aperture_size": size,
     })
+    for candidate_id in sorted(returned_ids):
+        store.append_jsonl("decisions", {
+            "ts": now_iso,
+            "type": "conscious.aperture.returned",
+            "candidate_id": candidate_id,
+            "aperture_id": aperture_id,
+            "return_reason_code": "time_checkpoint",
+        })
     return packet
 
 
@@ -246,6 +277,7 @@ def settle_conscious_aperture_item(
     decision: str,
     reason: str,
     aperture_id: str | None = None,
+    return_at: str | None = None,
     external_work: dict | None = None,
     dry_run: bool = True,
     now: str | None = None,
@@ -269,6 +301,13 @@ def settle_conscious_aperture_item(
         }
     if not str(reason or "").strip():
         return {"success": False, "error": "reason_required"}
+    now_iso = now or utc_now_iso()
+    now_dt = _parse_iso(now_iso) or datetime.now(timezone.utc)
+    checkpoint = parse_utc_z_checkpoint(return_at) if return_at is not None else None
+    if return_at is not None and (
+        normalized_decision != "HELD" or checkpoint is None or checkpoint[1] <= now_dt
+    ):
+        return {"success": False, "error": "invalid_return_at"}
 
     candidates = store.read_jsonl("candidates")
     idx = _find_candidate_index(candidates, candidate_id)
@@ -310,7 +349,6 @@ def settle_conscious_aperture_item(
             "aperture_id": aperture_id,
         }
 
-    now_iso = now or utc_now_iso()
     receipt = {
         "ts": now_iso,
         "type": "conscious.aperture.settled",
@@ -322,6 +360,8 @@ def settle_conscious_aperture_item(
         "conscious_task_id": (candidate.get("conscious_task") or {}).get("id", ""),
         "request_type": (candidate.get("conscious_task") or {}).get("request_type", ""),
     }
+    if checkpoint is not None:
+        receipt.update({"return_state": "held_checkpoint_set", "return_reason_code": "time_checkpoint"})
     if external_work:
         receipt["external_work"] = {
             "title": truncate_text(external_work.get("title", ""), 200),
@@ -352,6 +392,10 @@ def settle_conscious_aperture_item(
         "reason": truncate_text(reason, 240),
     })
     updated["conscious_aperture"] = updated_aperture
+    if checkpoint is not None:
+        updated["held_return"] = {"not_before": checkpoint[0], "reason_code": "time_checkpoint"}
+    elif normalized_decision == "HELD":
+        updated.pop("held_return", None)
     updated.setdefault("conscious_settlements", []).append(receipt)
     candidates[idx] = updated
     store.rewrite_jsonl("candidates", candidates)
