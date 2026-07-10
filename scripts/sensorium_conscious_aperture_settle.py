@@ -8,6 +8,7 @@ Input shape (single object or list via --record, --file, or stdin):
       "aperture_id": "cap_...",          # optional; checked when supplied
       "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
       "reason": "short Conscious decision rationale",
+      "return_at": "2026-06-07T13:00:00Z", # optional; HELD-only future UTC checkpoint
       "external_work": {                 # optional, recorded only; no dispatch
         "title": "...",
         "summary": "...",
@@ -68,6 +69,7 @@ def main() -> int:
             aperture_id=record.get("aperture_id"),
             decision=record.get("decision", ""),
             reason=record.get("reason", ""),
+            return_at=record.get("return_at"),
             external_work=record.get("external_work"),
             dry_run=not args.apply,
             now=args.now,

@@ -14,6 +14,7 @@ sensorium_conscious_aperture_settle.py:
       "aperture_id": "cap_...",  # optional; inferred from candidate when absent
       "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
       "reason": "short Conscious decision rationale",
+      "return_at": "2026-06-07T13:00:00Z",  # optional; HELD-only future UTC checkpoint
       "external_work": { ... }     # optional recorded spec; no dispatch
     }
 """
@@ -89,6 +90,7 @@ def main() -> int:
             aperture_id=record.get("aperture_id"),
             decision=record.get("decision", ""),
             reason=record.get("reason", ""),
+            return_at=record.get("return_at"),
             external_work=record.get("external_work"),
             dry_run=not args.apply_settlements,
             now=args.now,
@@ -124,6 +126,7 @@ def main() -> int:
             "aperture_id": "optional cap_...",
             "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
             "reason": "short Conscious decision rationale",
+            "return_at": "optional future UTC-Z checkpoint for HELD",
             "external_work": "optional prepared spec",
         },
     }

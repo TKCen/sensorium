@@ -140,3 +140,68 @@ def test_candidate_liveness_reasons_distinguish_terminal_and_nonterminal_states(
         ("prepared", "candidate_prepared"),
         ("settled", "candidate_settled"),
     ]
+
+
+def test_held_checkpoint_liveness_is_time_bounded_opaque_and_non_mutating():
+    sentinel = "PRIVATE_HOLD_REASON_MUST_NOT_LEAK"
+    held = _candidate("checkpoint", status="held")
+    held["summary"] = sentinel
+    held["held_return"] = {"not_before": "2026-07-09T13:00:00Z", "reason_code": "time_checkpoint"}
+
+    before = json.loads(json.dumps(held))
+    early = plan_liveness_reconciliation([held], now="2026-07-09T12:00:00Z")["classification"]["findings"]
+    due = plan_liveness_reconciliation([held], now="2026-07-09T13:00:00Z")["classification"]["findings"]
+
+    assert [(row["state"], row["reason_code"]) for row in early] == [("awaiting_checkpoint", "time_checkpoint")]
+    assert [(row["state"], row["reason_code"]) for row in due] == [("overdue", "time_checkpoint")]
+    assert held == before
+    assert sentinel not in json.dumps({"early": early, "due": due}, sort_keys=True)
+
+
+def test_fractional_held_checkpoint_liveness_matches_aperture_due_time():
+    held = _candidate("fractional-checkpoint", status="held")
+    held["held_return"] = {
+        "not_before": "2026-07-09T13:00:00.123456Z",
+        "reason_code": "time_checkpoint",
+    }
+
+    early = plan_liveness_reconciliation(
+        [held], now="2026-07-09T13:00:00Z"
+    )["classification"]["findings"]
+    due = plan_liveness_reconciliation(
+        [held], now="2026-07-09T13:00:00.123456Z"
+    )["classification"]["findings"]
+
+    assert [(row["state"], row["reason_code"]) for row in early] == [
+        ("awaiting_checkpoint", "time_checkpoint")
+    ]
+    assert [(row["state"], row["reason_code"]) for row in due] == [
+        ("overdue", "time_checkpoint")
+    ]
+
+
+def test_malformed_held_checkpoint_liveness_fails_closed_as_ordinary_hold():
+    malformed_values = (
+        "2026-07-09T13:00:00+01:00",
+        "2027-06-07Z",
+        "2026-07-09 13:00:00Z",
+        "2026-07-09T13:00Z",
+        "2026-07-09T13:00:00.1234567Z",
+        " 2026-07-09T13:00:00Z",
+        "2026-07-09T13:00:00Z ",
+    )
+
+    for index, value in enumerate(malformed_values):
+        held = _candidate(f"malformed-checkpoint-{index}", status="held")
+        held["held_return"] = {
+            "not_before": value,
+            "reason_code": "time_checkpoint",
+        }
+
+        findings = plan_liveness_reconciliation(
+            [held], now="2026-07-09T12:00:00Z"
+        )["classification"]["findings"]
+
+        assert [(row["state"], row["reason_code"]) for row in findings] == [
+            ("held", "candidate_held")
+        ]
