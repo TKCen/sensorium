@@ -1939,7 +1939,57 @@ def kanban_pressure_sample(*, board_paths: list[str] | None = None, now_epoch: i
     now = int(now_epoch if now_epoch is not None else time.time())
     status_counts: dict[str, int] = {}
     failed = blocked = stale = total = boards = 0
-    for raw in board_paths if board_paths is not None else _default_kanban_paths():
+    paths = board_paths if board_paths is not None else _default_kanban_paths()
+
+    # To avoid N+1 query loop, we try to open a single in-memory SQLite connection
+    # and ATTACH all the boards, then query them with a single UNION ALL query.
+    # We restrict this to 1 < len(paths) <= 10 because SQLite has a default maximum limit of 10
+    # attached databases, and for 1 board it is more efficient to query directly.
+    if 1 < len(paths) <= 10:
+        try:
+            con = sqlite3.connect(":memory:")
+            attached_paths = []
+            for i, raw in enumerate(paths):
+                # String formatting with escaped single quotes is used instead of parameter binding
+                # because some older or standard SQLite environments do not support parameter binding in ATTACH DATABASE.
+                raw_escaped = raw.replace("'", "''")
+                try:
+                    con.execute(f"ATTACH DATABASE '{raw_escaped}' AS db{i}")
+                    attached_paths.append((i, raw))
+                except sqlite3.Error:
+                    continue
+
+            if attached_paths and len(attached_paths) == len(paths):
+                sub_queries = [f"SELECT status, consecutive_failures, last_heartbeat_at FROM db{i}.tasks" for i, _ in attached_paths]
+                union_query = " UNION ALL ".join(sub_queries)
+                try:
+                    for row in con.execute(union_query):
+                        status = str(row[0] or "unknown")
+                        status_counts[status] = status_counts.get(status, 0) + 1
+                        total += 1
+                        if status not in {"done", "archived"} and (
+                            status in {"failed", "crashed", "timed_out"}
+                            or int(row[1] or 0) > 0
+                        ):
+                            failed += 1
+                        if status in {"blocked", "stuck"}:
+                            blocked += 1
+                        heartbeat = row[2]
+                        if status == "running" and heartbeat and now - int(heartbeat) >= stale_running_seconds:
+                            stale += 1
+                    boards = len(attached_paths)
+                    return {"board_count": boards, "task_count": total, "status_counts": status_counts, "failed_tasks": failed, "blocked_tasks": blocked, "stale_running_tasks": stale}
+                finally:
+                    con.close()
+            con.close()
+        except (OSError, sqlite3.Error, ValueError):
+            # Fallback to sequential query loop on any attachment or unified query error
+            pass
+
+    # Fallback sequential loop
+    status_counts.clear()
+    failed = blocked = stale = total = boards = 0
+    for raw in paths:
         try:
             con = sqlite3.connect(f"file:{raw}?mode=ro", uri=True, timeout=1)
             con.row_factory = sqlite3.Row
