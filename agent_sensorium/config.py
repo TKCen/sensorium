@@ -22,6 +22,10 @@ from .schemas import (
     sanitize_profile_name,
     utc_now_iso,
 )
+from .world_model_provider import (
+    DEFAULT_WORLD_MODEL_PROVIDER_CONFIG,
+    sanitized_world_model_provider_config,
+)
 
 DEFAULT_ATTENTION_POLICY: dict = {
     "evidence_rules": {
@@ -130,6 +134,9 @@ SAFE_DEFAULTS: dict = {
     "outbox": {},
     "attention_policy": DEFAULT_ATTENTION_POLICY,
     "media_gift_policy": DEFAULT_MEDIA_GIFT_POLICY,
+    # Disabled generic seam only. A private installation may configure its own
+    # local bundle/provider; the plugin stores no world-model corpus.
+    "world_model_provider": DEFAULT_WORLD_MODEL_PROVIDER_CONFIG,
 }
 
 
@@ -426,6 +433,9 @@ def _validate_config(raw: dict) -> dict:
         "outbox": dict(SAFE_DEFAULTS["outbox"]),
         "attention_policy": sanitize_attention_policy(SAFE_DEFAULTS["attention_policy"]),
         "media_gift_policy": sanitize_media_gift_policy(SAFE_DEFAULTS["media_gift_policy"]),
+        "world_model_provider": sanitized_world_model_provider_config(
+            SAFE_DEFAULTS["world_model_provider"]
+        ),
     }
     if isinstance(raw.get("conscious_reachout"), dict):
         # Preserve the raw subtree for the conscious reach-out policy gate; the
@@ -516,6 +526,15 @@ def _validate_config(raw: dict) -> dict:
         config["attention_policy"] = sanitize_attention_policy(raw.get("attention_policy"))
     if "media_gift_policy" in raw:
         config["media_gift_policy"] = sanitize_media_gift_policy(raw.get("media_gift_policy"))
+    if "world_model_provider" in raw:
+        try:
+            config["world_model_provider"] = sanitized_world_model_provider_config(
+                raw.get("world_model_provider")
+            )
+        except ValueError:
+            # Invalid provider configuration remains unavailable rather than
+            # accepting an unknown protocol field or broadening access.
+            config["world_model_provider"] = sanitized_world_model_provider_config({})
     return config
 
 
