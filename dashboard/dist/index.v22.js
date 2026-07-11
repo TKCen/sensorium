@@ -1902,6 +1902,114 @@
     ));
   }
 
+  function WorldModelView() {
+    const [query, setQuery] = useState("");
+    const [search, setSearch] = useState(null);
+    const [selected, setSelected] = useState(null);
+    const [page, setPage] = useState(null);
+    const [relations, setRelations] = useState(null);
+    const [trace, setTrace] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState("");
+
+    function request(path) {
+      return SDK.fetchJSON(path).then(function (response) {
+        if (!response || response.ok !== true) throw new Error("World Model is unavailable.");
+        return response;
+      });
+    }
+
+    function runSearch(event) {
+      if (event) event.preventDefault();
+      const value = query.trim();
+      if (!value || value.length > 256) {
+        setError("Enter a search between 1 and 256 characters.");
+        return;
+      }
+      setLoading(true); setError(""); setSelected(null); setPage(null); setRelations(null); setTrace(null);
+      request("/api/plugins/agent-sensorium/world-model/search?query=" + encodeURIComponent(value) + "&limit=20")
+        .then(function (response) { setSearch(response); })
+        .catch(function () { setSearch(null); setError("World Model is unavailable or degraded."); })
+        .finally(function () { setLoading(false); });
+    }
+
+    function selectResult(result) {
+      if (!result || !result.object_id) return;
+      const id = encodeURIComponent(result.object_id);
+      setSelected(result); setPage(null); setRelations(null); setTrace(null); setError(""); setLoading(true);
+      Promise.all([
+        request("/api/plugins/agent-sensorium/world-model/pages/" + id),
+        request("/api/plugins/agent-sensorium/world-model/pages/" + id + "/relations?hops=1"),
+        request("/api/plugins/agent-sensorium/world-model/pages/" + id + "/trace"),
+      ]).then(function (responses) {
+        setPage(responses[0]); setRelations(responses[1]); setTrace(responses[2]);
+      }).catch(function () { setError("Selected accepted page is currently unavailable."); })
+        .finally(function () { setLoading(false); });
+    }
+
+    const searchResults = (search && search.data && search.data.results) || [];
+    const pageData = page && page.data;
+    const relationData = relations && relations.data;
+    const traceData = trace && trace.data;
+    const corpus = (page || search || relations || trace || {}).corpus || {};
+    const nodes = relationData && relationData.graph ? relationData.graph.nodes || [] : [];
+    const names = {};
+    nodes.forEach(function (node) { names[node.object_id] = node.title || node.object_id; });
+    function edgeText(edge) { return (names[edge.source] || edge.source) + " — " + (edge.relation || "related") + " → " + (names[edge.target] || edge.target); }
+
+    return h(Section, { title: "World Model", subtitle: "Accepted knowledge only. Find a page, then select it to lazy-read canonical Markdown, local typed relations, and provenance." },
+      h("div", { className: "sx-world-model" },
+        h("form", { className: "sx-world-model-search", onSubmit: runSearch },
+          h("label", { htmlFor: "sx-world-model-query" }, "Find accepted knowledge"),
+          h("div", { className: "sx-row" },
+            h("input", { id: "sx-world-model-query", value: query, maxLength: 256, onChange: function (event) { setQuery(event.target.value); }, placeholder: "Search accepted page titles", "aria-label": "Search accepted knowledge" }),
+            h(Button, { type: "submit", variant: "outline", disabled: loading }, loading ? "Loading…" : "Find"),
+          ),
+        ),
+        error ? h(Card, { className: "sx-card sx-error", role: "status" }, h(CardContent, null, error)) : null,
+        search ? h("div", { className: "sx-world-model-identity" },
+          h(Pill, { band: "green" }, search.accepted_knowledge || "accepted knowledge"),
+          h(Pill, null, "privacy " + (search.privacy_label || "unknown")),
+          h(Pill, null, "build " + (corpus.source_build_name || "unknown")),
+          h(Pill, null, "bundle " + (corpus.bundle_name || "unknown")),
+          h(Pill, null, "current " + (corpus.source_current_digest || "unknown")),
+        ) : null,
+        search && !searchResults.length ? h(Empty, { text: "No accepted knowledge matched this title-only query." }) : null,
+        searchResults.length ? h("div", { className: "sx-world-model-results", role: "listbox", "aria-label": "World Model search results" }, searchResults.map(function (result) {
+          const active = selected && selected.object_id === result.object_id;
+          const match = result.match || {};
+          return h("button", { key: result.object_id, type: "button", role: "option", "aria-selected": active ? "true" : "false", className: "sx-world-model-result" + (active ? " sx-world-model-result-active" : ""), onClick: function () { selectResult(result); } },
+            h("strong", null, result.title || "Accepted canonical page"),
+            h("span", null, result.page_type || "canonical_page", " · ", result.status || "accepted", " · ", result.privacy || "private"),
+            h("span", { className: "sx-muted" }, "match: ", (match.fields || []).join(", ") || "title", " · terms: ", (match.terms || []).join(", ") || "exact"),
+          );
+        })) : null,
+        selected && !pageData && loading ? h(Empty, { text: "Loading the selected accepted page only…" }) : null,
+        pageData ? h(React.Fragment, null,
+          h("div", { className: "sx-world-model-identity" },
+            h(Pill, { band: "green" }, "Accepted knowledge"), h(Pill, null, pageData.status || "accepted"), h(Pill, null, "privacy " + (pageData.privacy || "private")), h(Pill, null, pageData.page_type || "canonical_page"),
+          ),
+          h(Section, { title: pageData.title || "Accepted canonical page", subtitle: "Canonical Markdown is lazy-loaded only after selection; this view has no edits or promotion controls." },
+            h("pre", { className: "sx-world-model-markdown" }, pageData.markdown || "No canonical content available."),
+          ),
+          h("div", { className: "sx-grid" },
+            h(Section, { title: "Typed local relations", subtitle: "Bounded local graph only; no global traversal." },
+              relationData ? h("div", { className: "sx-world-model-relations" },
+                h("p", { className: "sx-muted" }, "outgoing ", (relationData.outgoing || []).length, " · backlinks ", (relationData.backlinks || []).length, " · local edges ", ((relationData.graph || {}).edges || []).length),
+                (relationData.outgoing || []).concat(relationData.backlinks || []).concat(((relationData.graph || {}).edges || [])).slice(0, 50).map(function (edge, index) { return h("div", { key: index, className: "sx-world-model-edge" }, edgeText(edge)); }),
+              ) : h(Empty, { text: "Relations are unavailable." }),
+            ),
+            h(Section, { title: "Source and provenance trace", subtitle: "Opaque verification receipts, not raw source paths." },
+              traceData ? h("div", { className: "sx-world-model-trace" },
+                (traceData.provenance || []).length ? traceData.provenance.map(function (entry) { return h("div", { key: entry.provenance_id, className: "sx-world-model-edge" }, entry.provenance_id, " · ", entry.link_status || "unverified"); }) : h("p", { className: "sx-muted" }, "No provenance receipt is available for this accepted page."),
+              ) : h(Empty, { text: "Trace is unavailable." }),
+            ),
+          ),
+        ) : null,
+      ),
+    );
+  }
+
   function SensoriumPage() {
     const state = useSnapshot(60 * 1000);
     const graphState = usePluginJson("/api/plugins/agent-sensorium/graph", 60 * 1000);
@@ -1939,7 +2047,7 @@
     });
 
     const flowDagNavCount = (topoNavState.data && topoNavState.data.meta && topoNavState.data.meta.node_count) || 0;
-    const viewCards = [{ id: "flow_dag", label: "Flow DAG", summary: "Configured topology + runtime status, with /trace provenance on selection.", count: flowDagNavCount, band: "violet" }]
+    const viewCards = [{ id: "flow_dag", label: "Flow DAG", summary: "Configured topology + runtime status, with /trace provenance on selection.", count: flowDagNavCount, band: "violet" }, { id: "world_model", label: "World Model", summary: "Accepted knowledge explorer: title search, lazy page reads, local relations, and provenance.", count: 0, band: "green" }]
       .concat((data && data.views) ? data.views : [])
       .concat([{ id: "inner_life", label: "Inner-life (debug)", summary: "Older /snapshot-shaped lane graph; kept as fallback/debug, not primary.", count: ((graphState.data && graphState.data.meta && graphState.data.meta.node_count) || 0) + (perceptionTraces.length || 0), band: wrongTurns ? "yellow" : "neutral" }]);
     const innerGraph = buildInnerLifeGraph(data, graphState.data, innerFilters);
@@ -1983,6 +2091,7 @@
         ),
         h(ViewNav, { views: viewCards, active: activeView, onChange: setActiveView }),
         activeView === "flow_dag" ? h(FlowDagView, null) : null,
+        activeView === "world_model" ? h(WorldModelView, null) : null,
         activeView === "overview" ? h(React.Fragment, null,
           h("div", { className: "sx-focus-grid" },
             h(Section, { title: "What matters now", subtitle: "Live pressure only. Residue is counted separately so old artifacts do not look like work." },

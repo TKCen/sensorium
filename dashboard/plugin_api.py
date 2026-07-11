@@ -89,6 +89,33 @@ def _resolve_instance(instance: str | None) -> tuple[str, Path] | None:
     return effective_instance, DEFAULT_ROOT.parent / effective_instance
 
 
+async def _world_model_read(instance: str | None, request: dict[str, Any]) -> dict[str, Any]:
+    """Serve a bounded configured World Model read without exposing setup details."""
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        return {"ok": False, "degradation_state": "unavailable", "error": "world_model_unavailable"}
+    _, root = resolved
+    config = _read_json(root / "instance.config.json", {})
+    allowed_surfaces = config.get("allowed_surfaces", ["local"]) if isinstance(config, dict) else []
+    max_sensitivity = config.get("max_sensitivity", "private") if isinstance(config, dict) else "private"
+    # The dashboard is a local surface. Never use this route to weaken an
+    # instance's configured surface or sensitivity policy.
+    if not isinstance(allowed_surfaces, list) or "local" not in allowed_surfaces or max_sensitivity not in {"private", "public_safe"}:
+        return {"ok": False, "degradation_state": "unavailable", "error": "world_model_unavailable"}
+    try:
+        from agent_sensorium.world_model_dashboard import (
+            WorldModelDashboardUnavailable,
+            configured_world_model_service,
+        )
+
+        response = await configured_world_model_service(config).read_bounded(request)
+        return {"ok": True, **response}
+    except Exception:
+        # Dashboard errors are deliberately non-diagnostic: provider paths,
+        # configuration and source details remain private implementation state.
+        return {"ok": False, "degradation_state": "unavailable", "error": "world_model_unavailable"}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -3249,6 +3276,26 @@ async def explanation(subject_id: str, instance: str | None = None) -> dict[str,
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "generated_at": _now(), "instance": effective_instance, "explanation": built}
+
+
+@router.get("/world-model/search")
+async def world_model_search(query: str, limit: int = 10, instance: str | None = None) -> dict[str, Any]:
+    return await _world_model_read(instance, {"operation": "search", "query": query, "limit": limit})
+
+
+@router.get("/world-model/pages/{object_id}")
+async def world_model_page(object_id: str, instance: str | None = None) -> dict[str, Any]:
+    return await _world_model_read(instance, {"operation": "page", "object_id": object_id})
+
+
+@router.get("/world-model/pages/{object_id}/relations")
+async def world_model_relations(object_id: str, hops: int = 1, instance: str | None = None) -> dict[str, Any]:
+    return await _world_model_read(instance, {"operation": "relations", "object_id": object_id, "hops": hops})
+
+
+@router.get("/world-model/pages/{object_id}/trace")
+async def world_model_trace(object_id: str, instance: str | None = None) -> dict[str, Any]:
+    return await _world_model_read(instance, {"operation": "trace", "object_id": object_id})
 
 
 @router.get("/snapshot")
