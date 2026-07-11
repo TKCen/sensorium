@@ -24,6 +24,11 @@ def test_world_model_view_is_lazy_keyboard_accessible_and_get_only():
     assert 'type: "button"' in source
     assert "Canonical Markdown is lazy-loaded only after selection" in source
     assert "source_current_digest" in source
+    assert "function renderCanonicalMarkdown" in source
+    assert "Raw canonical Markdown" in source
+    assert "Verification details" in source
+    assert "sx-world-model-layout" in source
+    assert 'h(Pill, { band: "green" }, "read-only")' in source
     view_source = source.split("function WorldModelView", 1)[1].split("function SensoriumPage", 1)[0]
     for forbidden in ("postJSON", "putJSON", "deleteJSON", "fetch(", "/triage", "approve_delivery", "promote"):
         assert forbidden not in view_source

@@ -82,6 +82,21 @@ def test_flow_dag_is_the_default_primary_view():
     assert 'useState("flow_dag")' in source
 
 
+def test_cockpit_prioritizes_living_state_over_diagnostic_inventory():
+    manifest = _manifest()
+    source = (DASHBOARD_DIR / manifest["entry"]).read_text()
+    css = (DASHBOARD_DIR / manifest["css"]).read_text()
+
+    assert "const nowLine = quiet" in source
+    assert 'label: "Foreground-settled"' in source
+    assert 'countLabel: "read"' in source
+    assert 'label: "Debug"' in source
+    assert "sx-secondary-metrics" in source
+    assert "Runtime verification" in source
+    assert ".sx-view-nav" in css and "overflow-x: auto" in css
+    assert ".sx-priority-metrics" in css and "repeat(4" in css
+
+
 def test_bundle_keeps_compact_held_artifact_observability_without_mutation_controls():
     manifest = _manifest()
     entry_path = DASHBOARD_DIR / manifest["entry"]

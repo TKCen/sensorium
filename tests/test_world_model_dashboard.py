@@ -21,7 +21,7 @@ from agent_sensorium.world_model_provider import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WIKI_ROOT = Path(os.environ.get("S2A_WIKI_ROOT", REPO_ROOT.parents[5] / "wiki"))
+WIKI_ROOT = Path(os.environ["S2A_WIKI_ROOT"]) if "S2A_WIKI_ROOT" in os.environ else REPO_ROOT.parents[5] / "wiki"
 
 
 def _envelope(operation, data, *, privacy="private"):
