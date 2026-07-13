@@ -23,6 +23,9 @@ During normal operation exactly one tool is exposed: `sensorium`. It always oper
 | `ingest` | Record deferred salience from the current session as a compact signal. Pass `text`, `kind`, and optionally `strength` (0–1). The tool fills correlation keys and metadata internally. |
 | `open` | Open a dormant conscious thread capsule. Pass `id` of the thread (visible from `status`). Returns the capsule content if the surface/sensitivity gate allows it. |
 | `update` | Apply a lifecycle keyword to an open thread. Pass `id` and `keyword` (e.g. `close`, `hold`, `archive`, `mark_reviewed`). |
+| `reach_out` | Record or prepare a Conscious reach-out decision with a compact receipt. The ordinary live call is fixed to `execute=False`; it cannot deliver. |
+
+`reach_out` belongs to the Conscious tier only. It may record or prepare a chosen decision subject to policy, target, sensitivity, and cooldown gates, but it never dispatches from the ordinary live tool. Actual delivery requires separate explicit configuration with direct delivery disabled by default and an adapter-backed actuator outside this live call. Receipts remain compact and exclude message bodies.
 
 ### When to use `ingest`
 
@@ -207,7 +210,7 @@ These are admin/CLI surfaces — never the live `sensorium` tool. Load `agent-se
 ## Key boundaries
 
 - **Pull-based.** Nothing is pushed. The agent and user/admin request status; the pipeline does not deliver unsolicited messages.
-- **No autonomous outbound delivery.** Artifacts queued in the outbox are never delivered without a conscious receipt and explicit user/admin-configured dispatch rules.
+- **No autonomous outbound delivery.** `reach_out` records/prepares with `execute=False`; artifacts queued in the outbox are never delivered without separate explicit configuration, a conscious receipt, and an adapter-backed dispatch path outside the ordinary live tool.
 - **No external task creation without explicit approval.**
 - **Subconscious advisory is disabled by default.** The cheap model lane is explicit opt-in (`--subconscious-model` flag on tick).
 - **Missing config fails safe.** Local-only surfaces, private sensitivity.

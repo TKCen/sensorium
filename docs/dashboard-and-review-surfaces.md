@@ -2,11 +2,11 @@
 
 Agent Sensorium has three different review surfaces. They deliberately do different jobs:
 
-1. **Live tool (`sensorium`)** — the small foreground aperture available to the ordinary agent session: `status`, `ingest`, `open`, `update`.
+1. **Live tool (`sensorium`)** — the small foreground aperture available to the ordinary agent session: exactly `status`, `ingest`, `open`, `update`, `reach_out`.
 2. **Admin toolset (`agent-sensorium-admin`)** — setup, diagnostics, policy/config management, and controlled intervention.
 3. **Dashboard plugin (`dashboard/`)** — read-only operator observability over compact state projections.
 
-The dashboard is not a control plane. It must not mutate Sensorium state, dispatch work, send messages, broaden privacy surfaces, or add actions to the live tool enum.
+The dashboard is not a control plane. It must not mutate Sensorium state, dispatch work, send messages, broaden privacy surfaces, or add actions to the five-action live tool enum. The live `reach_out` action may only record/prepare a conscious decision with `execute=False`; actual delivery remains separately configured, adapter-backed, and outside the ordinary live call.
 
 ---
 
@@ -127,7 +127,7 @@ The smoke should cover at least:
 - `/registry`, `/probe-audit`, `/dampeners`, `/blockers`;
 - invalid `instance` values, including path traversal and newline variants;
 - route matrix: only expected GET routes, no mutation methods;
-- static authority checks: live tool enum remains `status|ingest|open|update`, no graph/vector DB dependency, no dashboard write route.
+- static authority checks: live tool enum remains exactly `status|ingest|open|update|reach_out`, the ordinary live `reach_out` path uses `execute=False` with no adapter dispatch, no graph/vector DB dependency, and no dashboard write route.
 
 Useful local commands:
 

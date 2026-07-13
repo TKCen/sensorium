@@ -122,7 +122,7 @@ No threshold permits autonomous memory writes or delivery.
 
 - `review_synthesis`: the intended evidence-contract primitive underneath this protocol. If it is not available or accepted, proposals remain doctrine/design-only or must carry equivalent explicit evidence refs.
 - `volunteer_cards`: read-only orientation handles. Their `confidence` field is a navigational hint, not truth, memory, or delivery authority.
-- `sensorium(status/open/update)`: pull-based conscious aperture. Opening/reviewing a thread is not the same as authorizing durable memory or outbound action.
+- `sensorium(status|ingest|open|update|reach_out)`: exactly five pull-based conscious actions. `reach_out` records or prepares a Conscious decision with `execute=False`; it is not delivery. Opening/reviewing a thread or preparing reach-out is not the same as authorizing durable memory or outbound action, which requires separate explicit configuration and an adapter-backed actuator outside the ordinary live call.
 - Prepare-only actuators: may prepare artifacts only after a conscious decision ref; output remains not delivered until a separate explicit delivery gate.
 
 ## Acceptance probes for implementation

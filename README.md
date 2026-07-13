@@ -33,7 +33,7 @@ Hermes runtime / cron / operator / sensors
 Signals  →  Events  →  Candidates  →  Conscious thread capsules
         |        |          |                    |
         |        |          |                    v
-        |        |          |         live sensorium(status/open/update)
+        |        |          |         live sensorium(status/ingest/open/update/reach_out)
         |        |          |
         |        |          v
         |        |    pre-LLM pointer hook
@@ -87,7 +87,7 @@ Plain setup properties:
 
 - **Sensing:** `scripts/sensorium_tick.py --heartbeat --all-sensors`.
 - **Pressure:** transition sensors emit only when levels change; heartbeat emits a low-strength liveness signal.
-- **Exposure:** only `sensorium(status|ingest|open|update)` in the live toolset.
+- **Exposure:** only `sensorium(status|ingest|open|update|reach_out)` in the live toolset.
 - **Executive authority:** none in the sensing loop; the conscious agent/operator must review and update.
 
 ### Built-out review loop example
@@ -144,8 +144,8 @@ Typical flow:
 3. **Register or seed sensors and actuators** into that profile's `sensors/registry.json` and optional `actuators/registry.json`.
 4. **Run ticks deliberately** — manually, cron, or another operator-controlled scheduler. Ticks emit compact signals and receipts; they do not reach out by themselves.
 5. **Before LLM calls**, hooks may inject a compact pointer that something is waiting for review.
-6. **During normal conversation**, the agent only gets the live `sensorium` aperture: `status`, `ingest`, `open`, `update`.
-7. **When a candidate needs attention**, the agent opens the thread capsule, reviews it consciously, and either marks it reviewed/held/closed or prepares a local artifact for an explicit operator/system handoff.
+6. **During normal conversation**, the agent only gets the live `sensorium` aperture: `status`, `ingest`, `open`, `update`, `reach_out`.
+7. **When a candidate needs attention**, the agent opens the thread capsule, reviews it consciously, and either marks it reviewed/held/closed, prepares a local artifact, or records/prepares a conscious reach-out decision for an explicit operator/system handoff.
 
 The live tool is deliberately small; setup, diagnostics, and policy changes belong to the admin toolset.
 
@@ -155,7 +155,7 @@ The live tool is deliberately small; setup, diagnostics, and policy changes belo
 
 ### Live surface — `agent-sensorium-live`
 
-A single tool `sensorium` with four actions. This is the only surface exposed to the agent during normal operation. It always operates on the active/default profile — no profile argument is needed for ordinary use:
+A single tool `sensorium` with exactly five actions. This is the only surface exposed to the agent during normal operation. It always operates on the active/default profile — no profile argument is needed for ordinary use:
 
 | Action | Purpose |
 |--------|---------|
@@ -163,8 +163,9 @@ A single tool `sensorium` with four actions. This is the only surface exposed to
 | `ingest` | Record deferred salience from the current session as a compact signal. The live tool can also carry a closed-vocabulary foreground/residue receipt (`foreground_action_taken`, `foreground_resolution`, `residue`, `durable_capture`, `background_action_allowed`) so foreground-owned work can be recorded as intentionally **not** ingested when no residue remains. |
 | `open` | Open a dormant conscious thread capsule by id |
 | `update` | Apply a lifecycle keyword to an open thread |
+| `reach_out` | Record or prepare a conscious reach-out decision with compact receipt; the ordinary live call always uses `execute=False` |
 
-The live surface is intentionally tiny. The agent cannot diagnose internals, reconfigure sensors, or dispatch artifacts through it.
+The live surface is intentionally tiny. The agent cannot diagnose internals, reconfigure sensors, or dispatch artifacts through it. `reach_out` may record or prepare a conscious decision only; actual delivery requires separate explicit configuration and an adapter-backed actuator outside the ordinary live call. Direct delivery is disabled by default, and policy, target, sensitivity, cooldown, and compact-receipt gates remain in force.
 
 ### Admin surface — `agent-sensorium-admin`
 

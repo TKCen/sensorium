@@ -60,11 +60,47 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert "pointer" in status["data"]
 
     live_schema = ctx.tools["sensorium"]["schema"]["parameters"]["properties"]
+    assert live_schema["action"]["enum"] == [
+        "status", "ingest", "open", "update", "reach_out",
+    ]
     assert "foreground_action_taken" in live_schema
     assert "foreground_resolution" in live_schema
     assert "residue" in live_schema
     assert "durable_capture" in live_schema
     assert "background_action_allowed" in live_schema
+
+
+def test_live_reach_out_records_with_execute_false_without_adapter_dispatch(tmp_path, monkeypatch):
+    """The ordinary aperture can prepare a conscious decision, never deliver it."""
+    from agent_sensorium import conscious_reachout
+    from agent_sensorium.plugin import register
+
+    calls = []
+
+    def _record_only(store, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["actor_tier"] == "conscious"
+        assert kwargs["execute"] is False
+        assert "adapter" not in kwargs
+        return {"success": True, "receipt": {"outbound_delivery": False}}
+
+    monkeypatch.setattr(conscious_reachout, "apply_conscious_reachout_decision", _record_only)
+    ctx = FakePluginContext()
+    register(ctx)
+
+    result = json.loads(ctx.tools["sensorium"]["handler"]({
+        "action": "reach_out",
+        "instance": "plugin-test",
+        "state_dir": str(tmp_path),
+        "text": "bounded prepared message",
+        "decision": "reach_out",
+        "surface": "discord",
+        "target": {"channel_id": "chan_1"},
+    }))
+
+    assert result["success"] is True
+    assert result["data"]["receipt"]["outbound_delivery"] is False
+    assert len(calls) == 1
 
 
 def test_live_ingest_receipt_suppresses_foreground_owned_no_residue(tmp_path):
