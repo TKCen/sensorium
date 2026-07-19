@@ -107,6 +107,15 @@ class TestImplicitRootContainment:
         assert store.root == base / instance
         assert store.root.resolve().parent == base.resolve()
 
+    def test_store_canonicalizes_identity_and_implicit_root(self, monkeypatch, tmp_path):
+        base = tmp_path / "agent-sensorium"
+        monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(base))
+
+        store = SensoriumStore("  canonical-name  ")
+
+        assert store.instance == "canonical-name"
+        assert store.root == base / "canonical-name"
+
     @pytest.mark.parametrize(
         "instance",
         ["", "   ", ".", "..", "../outside", "a/b", r"a\b", ".hidden", "\x00", "bad name", "x" * 65],
@@ -122,9 +131,14 @@ class TestImplicitRootContainment:
 
         assert not base.exists()
 
-    def test_explicit_state_dir_remains_caller_authoritative(self, tmp_path):
+    def test_explicit_state_dir_remains_caller_authoritative_for_valid_instance(self, tmp_path):
         explicit_root = tmp_path / "chosen" / "../outside"
 
-        store = SensoriumStore(instance="../outside", state_dir=str(explicit_root))
+        store = SensoriumStore(instance="trusted-test", state_dir=str(explicit_root))
 
         assert store.root == explicit_root
+        assert store.instance == "trusted-test"
+
+    def test_explicit_state_dir_does_not_allow_invalid_instance(self, tmp_path):
+        with pytest.raises(ValueError):
+            SensoriumStore(instance="../outside", state_dir=str(tmp_path / "outside"))

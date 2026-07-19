@@ -349,16 +349,18 @@ def test_saved_residue_pointer_includes_kanban_settlement_block():
 # ---------- end-to-end live dispatch via the plugin handler ----------
 
 
-def test_plugin_handler_routes_open_to_candidate_when_id_prefixes_cand(tmp_path):
+def test_plugin_handler_routes_open_to_candidate_when_id_prefixes_cand(tmp_path, monkeypatch):
     """The live aperture must mirror the offline handler: ``sensorium`` with
     ``action="open"`` and an explicit candidate id should return the
     candidate capsule, not a fake thread error.
     """
     from agent_sensorium.plugin import register
+    import agent_sensorium.store as store_module
 
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(tmp_path / "implicit-state"))
+    store = SensoriumStore(instance="test")
     store.ensure_dirs()
-    _write_config(tmp_path)
+    _write_config(store.root)
     store.append_jsonl("candidates", _arxiv_candidate())
 
     captured: dict = {}

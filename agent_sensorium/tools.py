@@ -1,6 +1,8 @@
 """Tool handlers for Agent Sensorium — callable without live Hermes runtime."""
 
 import json
+from functools import wraps
+from inspect import signature
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from .schemas import (
     intersect_allowed_surfaces,
     merge_sensitivity,
     normalize_signal,
+    sanitize_profile_name,
     truncate_text,
     utc_now_iso,
     validate_event,
@@ -100,6 +103,11 @@ def _ok(instance: str, data) -> str:
 
 def _err(instance: str, error: str) -> str:
     return json.dumps({"success": False, "instance": instance, "data": None, "error": error})
+
+
+def _invalid_instance() -> str:
+    """Stable public-boundary response for an unusable instance name."""
+    return json.dumps({"success": False, "instance": None, "data": None, "error": "invalid_instance"})
 
 
 def _file_mtime_iso(path: Path) -> str | None:
@@ -2232,3 +2240,40 @@ def handle_sensorium_conscious_complete(
         instance,
         result.get("detail") or result.get("error", "conscious_complete_failed"),
     )
+
+
+def _guard_public_instance(handler):
+    """Validate and canonicalize tool instance names before handler effects.
+
+    Tool handlers deliberately retain ``state_dir`` as a trusted direct-Python
+    seam for tests and local scripts.  Instance names, however, are a public
+    namespace selector and must be rejected before a handler can instantiate a
+    store, create directories, or invoke downstream logic.
+    """
+    @wraps(handler)
+    def guarded(*args, **kwargs):
+        try:
+            raw_instance = kwargs.get("instance", "default")
+            safe_instance = sanitize_profile_name(raw_instance)
+        except (TypeError, ValueError):
+            return _invalid_instance()
+        # Public callers must supply the canonical spelling.  Direct store
+        # construction still canonicalizes harmless surrounding whitespace.
+        if raw_instance != safe_instance:
+            return _invalid_instance()
+        kwargs["instance"] = safe_instance
+        return handler(*args, **kwargs)
+
+    return guarded
+
+
+# Keep the direct Python API stable while applying the public-boundary rule to
+# every exported Sensorium tool handler.  This runs after all handlers above
+# are defined, so internal handler-to-handler calls receive the same gate.
+for _name, _handler in tuple(globals().items()):
+    if (
+        _name.startswith("handle_sensorium_")
+        and callable(_handler)
+        and "instance" in signature(_handler).parameters
+    ):
+        globals()[_name] = _guard_public_instance(_handler)

@@ -16,11 +16,25 @@ def _default_instance() -> str:
     return default_instance_name("default")
 
 
-def _arg_instance(args: dict[str, Any]) -> str:
+def _arg_instance(args: dict[str, Any]) -> str | None:
+    """Return a strictly valid public instance name, or ``None``.
+
+    Store construction may canonicalize a trusted Python value.  The live
+    plugin aperture instead requires callers to provide the canonical spelling
+    so malformed names are rejected before any handler side effect.
+    """
+    from .schemas import sanitize_profile_name
+
+    if "instance" not in args:
+        return _default_instance()
     value = args.get("instance")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return _default_instance()
+    if not isinstance(value, str):
+        return None
+    try:
+        safe = sanitize_profile_name(value)
+    except ValueError:
+        return None
+    return safe if value == safe else None
 
 
 def _schema(name: str, description: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -75,7 +89,8 @@ def register(ctx) -> None:
         """
         action = str(args.get("action") or "status").strip().lower()
         instance = _arg_instance(args)
-        state_dir = args.get("state_dir")
+        if instance is None:
+            return _live_result({"success": False, "instance": None, "data": None, "error": "invalid_instance"})
         surface = str(args.get("surface") or kw.get("platform") or "local").strip() or "local"
         text = str(args.get("text") or "").strip()
         target_id = str(args.get("id") or "latest").strip() or "latest"
@@ -88,14 +103,14 @@ def register(ctx) -> None:
             # Live surface keyword may already be present; only pass it if it
             # is non-empty to preserve the default for callers that did not
             # set it.
-            status_kwargs: dict = {"instance": instance, "state_dir": state_dir}
+            status_kwargs: dict = {"instance": instance}
             if ref_id and ref_id != "latest":
                 status_kwargs["reference_id"] = ref_id
             if surface:
                 status_kwargs["surface"] = surface
             status = _loads_result(handle_sensorium_status(**status_kwargs))
             pointer = _loads_result(handle_sensorium_attention_pointer(
-                instance=instance, state_dir=state_dir, surface=surface,
+                instance=instance, surface=surface,
             ))
             data = status.get("data") or {}
             response_data = {
@@ -133,7 +148,7 @@ def register(ctx) -> None:
                 background_action_allowed=args.get("background_action_allowed", False),
             )
             should_ingest, ingest_reason = should_ingest_live_residue(intent)
-            store = SensoriumStore(instance=instance, state_dir=state_dir)
+            store = SensoriumStore(instance=instance)
             store.ensure_dirs()
             if not should_ingest:
                 receipt = build_live_ingest_receipt(
@@ -172,7 +187,7 @@ def register(ctx) -> None:
                 ],
                 "live_turn_intent": intent,
             }
-            raw_result = handle_sensorium_ingest_signal(signal=signal, instance=instance, state_dir=state_dir)
+            raw_result = handle_sensorium_ingest_signal(signal=signal, instance=instance)
             parsed = _loads_result(raw_result)
             data = parsed.get("data") or {}
             signal_id = str(data.get("signal_id") or "")
@@ -199,14 +214,14 @@ def register(ctx) -> None:
             # openable" to surface saved-research residue. We always try the
             # thread first so existing callers/tests keep working.
             thread_result = _loads_result(handle_sensorium_thread_open(
-                thread_id=target_id, surface=surface, instance=instance, state_dir=state_dir,
+                thread_id=target_id, surface=surface, instance=instance,
             ))
             if thread_result.get("success"):
                 return _live_result(thread_result)
             if target_id and target_id.startswith("cand_"):
                 cand_result = _loads_result(handle_sensorium_candidate_open(
                     candidate_id=target_id, surface=surface,
-                    instance=instance, state_dir=state_dir,
+                    instance=instance,
                 ))
                 if cand_result.get("success"):
                     return _live_result(cand_result)
@@ -221,21 +236,19 @@ def register(ctx) -> None:
                     action=keyword,
                     reason=text,
                     instance=instance,
-                    state_dir=state_dir,
                 )
             return handle_sensorium_thread_update(
                 thread_id=target_id,
                 action=keyword,
                 reason=text,
                 instance=instance,
-                state_dir=state_dir,
             )
 
         if action == "reach_out":
             # Foreground/conscious lane only. This records/prepares a bounded
             # reach-out decision; direct delivery still requires explicit config
             # and an adapter-backed dispatch path outside this tiny live surface.
-            store = SensoriumStore(instance=instance, state_dir=state_dir)
+            store = SensoriumStore(instance=instance)
             store.ensure_dirs()
             instance_config, _ = load_instance_config(state_dir=str(store.root))
             decision = str(args.get("decision") or "prepare_message").strip().lower()

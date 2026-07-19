@@ -29,6 +29,13 @@ def _ingest_strong(state_dir):
 
 
 class TestStatusCommand:
+    @pytest.mark.parametrize("instance", ["../outside", " spaced", "line\nbreak", "\x00bad"])
+    def test_invalid_instance_is_rejected_before_state_creation(self, tmp_path, instance):
+        state_dir = tmp_path / "must-not-exist"
+
+        assert handle_sensorium_command("status", instance=instance, state_dir=str(state_dir)) == "Sensorium: invalid_instance"
+        assert not state_dir.exists()
+
     def test_empty_status(self, state_dir):
         out = handle_sensorium_command("status", instance="test", state_dir=state_dir)
         assert "Sensorium [test]" in out

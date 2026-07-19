@@ -32,6 +32,17 @@ class TestSensoriumStatus:
         assert result["data"]["counts"]["threads"] == 0
         assert result["data"]["top_candidates"] == []
 
+    @pytest.mark.parametrize("instance", ["../outside", " spaced", "line\nbreak", "\x00bad"])
+    def test_invalid_instance_returns_structured_error_before_state_creation(self, tmp_path, instance):
+        state_dir = tmp_path / "must-not-exist"
+
+        result = json.loads(handle_sensorium_status(instance=instance, state_dir=str(state_dir)))
+
+        assert result == {
+            "success": False, "instance": None, "data": None, "error": "invalid_instance",
+        }
+        assert not state_dir.exists()
+
     def test_status_after_ingest(self, state_dir):
         signal = {
             "sensor": "test",

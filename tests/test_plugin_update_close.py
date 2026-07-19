@@ -103,16 +103,18 @@ def _write_candidate(store, candidate_id="cand_update", **overrides):
 
 
 @pytest.fixture
-def ctx_and_store(tmp_path):
+def ctx_and_store(tmp_path, monkeypatch):
     """Register the plugin with a fake context and return (ctx, store)."""
     from agent_sensorium.store import SensoriumStore
 
     instance = "plugin-update-close-test"
-    state_dir = tmp_path
+    state_dir = tmp_path / "implicit-state" / instance
+    import agent_sensorium.store as store_module
+    monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(tmp_path / "implicit-state"))
 
     # Pre-create store dirs and write config BEFORE registering, so any
     # boot-time handlers can find it.
-    store = SensoriumStore(instance=instance, state_dir=str(state_dir))
+    store = SensoriumStore(instance=instance)
     store.ensure_dirs()
     _write_config(state_dir, surfaces=["local"])
 
