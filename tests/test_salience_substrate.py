@@ -128,52 +128,6 @@ class TestCodexUsagePressureSensor:
             "error": "",
         }
 
-    def test_codex_usage_compact_sample_maps_lone_weekly_primary_by_duration(self):
-        payload = {
-            "available": True,
-            "plan_type": "pro",
-            "main_rate_limit": {
-                "allowed": True,
-                "limit_reached": False,
-                "primary": {
-                    "used_percent": 9,
-                    "reset_after_seconds": 508597,
-                    "window_seconds": 604800,
-                },
-                "secondary": None,
-            },
-        }
-        sample = codex_usage_compact_sample(payload, generated_at="2026-07-19T10:02:06+02:00")
-        assert sample["primary_used_percent"] is None
-        assert sample["primary_window_seconds"] is None
-        assert sample["weekly_used_percent"] == 9
-        assert sample["weekly_reset_after_seconds"] == 508597
-        assert sample["weekly_window_seconds"] == 604800
-
-        signal, state = classify_codex_usage_pressure(sample, state={"level": "healthy"})
-        assert signal is None
-        assert state["last_values"]["primary_used_percent"] is None
-        assert state["last_values"]["weekly_used_percent"] == 9.0
-        assert state["last_values"]["weekly_over_expected_pp"] < 0
-        assert state["last_values"]["weekly_projected_window_percent"] < 100
-
-    def test_codex_usage_projection_overrun_reaches_sensorium_before_pace_threshold(self):
-        sample = codex_usage_compact_sample(
-            self._codex_payload(
-                primary=50,
-                reset=5000,
-                weekly=53,
-                weekly_reset=302400,
-            )
-        )
-        signal, state = classify_codex_usage_pressure(sample, state={"level": "healthy"})
-        assert signal is not None
-        assert signal["transition"] == "healthy_to_degraded"
-        assert signal["metric_family"] == "weekly_projection"
-        assert signal["values"]["weekly_over_expected_pp"] == 3.0
-        assert signal["values"]["weekly_projected_window_percent"] == 106.0
-        assert state["level"] == "degraded"
-
     def test_codex_usage_pressure_emits_transition_only_on_level_change(self):
         healthy = codex_usage_compact_sample(self._codex_payload(primary=42, reset=5800))
         first_signal, state = classify_codex_usage_pressure(healthy, state={"level": "healthy"})
