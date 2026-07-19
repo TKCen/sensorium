@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .gate import candidate_fingerprint
+from .http_urls import validate_http_endpoint_url
 from .schemas import (
     intersect_allowed_surfaces,
     merge_sensitivity,
@@ -269,6 +270,7 @@ def _model_api_key(cfg: dict) -> str | None:
 
 
 def _post_openai_chat_completion(url: str, payload: dict, headers: dict, timeout: int | float) -> dict:
+    validate_http_endpoint_url(url)
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=float(timeout)) as response:

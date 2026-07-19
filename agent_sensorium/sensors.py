@@ -26,6 +26,7 @@ from .provider_budget import (
     evaluate_provider_budget_sample,
     format_budget_event,
 )
+from .http_urls import validate_http_endpoint_url
 from .schemas import VALID_SENSITIVITIES, truncate_text
 
 MAX_SUMMARY_CHARS = 200
@@ -1425,6 +1426,7 @@ def tts_sidecar_pressure_sample(
     health_error = ""
     if health_url:
         try:
+            validate_http_endpoint_url(health_url)
             req = urllib.request.Request(health_url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - fixed loopback health URL by default
                 health_available = 200 <= int(resp.status) < 500
@@ -1580,6 +1582,7 @@ def _local_health_sample(*, url: str | None, timeout_seconds: float) -> dict:
     if not url:
         return {"available": False, "error": "disabled"}
     try:
+        validate_http_endpoint_url(url)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - fixed loopback health URL by default
             return {"available": 200 <= int(resp.status) < 500, "error": ""}
@@ -1744,6 +1747,7 @@ def replay_media_capacity(samples: list[dict], *, config: dict | None = None) ->
 
 
 def _http_json(url: str, *, timeout_seconds: float) -> dict | list:
+    validate_http_endpoint_url(url)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310 - localhost/admin API by caller config
         return json.loads(resp.read(200_000).decode("utf-8", errors="ignore") or "{}")
