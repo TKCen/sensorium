@@ -10,10 +10,10 @@ import json
 import os
 import re
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import APIRouter
 
@@ -194,26 +194,46 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _physical_tail_lines(path: Path, limit: int | None) -> Iterator[str]:
+    """Yield the same physical line slice as ``read_text().splitlines()[-limit:]``.
+
+    A zero limit intentionally remains unbounded: Python's ``lines[-0:]`` is
+    the entire list. Positive limits retain the last physical lines before
+    callers discard malformed or blank JSONL rows.
+    """
+    with path.open(errors="ignore") as stream:
+        if limit is None or limit == 0:
+            yield from stream
+        elif limit > 0:
+            yield from deque(stream, maxlen=limit)
+        else:
+            # Preserve list slicing's less common negative-limit behavior.
+            for _ in range(-limit):
+                next(stream, None)
+            yield from stream
+
+
 def _read_plain_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        lines = _physical_tail_lines(path, limit)
     except Exception:
         return []
-    if limit is not None:
-        lines = lines[-limit:]
     rows: list[dict[str, Any]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
+    try:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+    except Exception:
+        return []
     return rows
 
 
@@ -237,24 +257,25 @@ def _read_jsonl(root: Path, name: str, limit: int | None = None) -> tuple[list[d
     if not path.exists():
         return [], 0
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        lines = _physical_tail_lines(path, limit)
     except Exception:
         return [], 0
-    if limit is not None:
-        lines = lines[-limit:]
     rows: list[dict[str, Any]] = []
     bad = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except Exception:
-            bad += 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
+    try:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except Exception:
+                bad += 1
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+    except Exception:
+        return [], 0
     return rows, bad
 
 
@@ -2270,7 +2291,7 @@ def _read_inner_life_rows(root: Path, name: str, limit: int) -> list[dict[str, A
         return []
     rows: list[dict[str, Any]] = []
     try:
-        for line in path.read_text(errors="ignore").splitlines()[-limit:]:
+        for line in _physical_tail_lines(path, limit):
             try:
                 value = json.loads(line)
             except Exception:
