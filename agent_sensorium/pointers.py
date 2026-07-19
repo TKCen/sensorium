@@ -296,9 +296,10 @@ def _foreground_injection_gate(
 
     min_turn_gap = max(0, int(cfg.get("min_turn_gap", 2) or 0))
     if not explicit and min_turn_gap > 0:
+        min_gap_receipts = session_receipts if session_id else prior_presented
         last_presented = next(
             (
-                receipt for receipt in reversed(prior_presented)
+                receipt for receipt in reversed(min_gap_receipts)
                 if receipt.get("pointer_type") in {"candidate", "saved_residue"}
             ),
             None,

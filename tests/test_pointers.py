@@ -469,6 +469,36 @@ def test_candidate_pointer_min_turn_gap_uses_user_turn_index_not_pointer_count(t
     assert receipts[2]["foreground_turn_index"] == 4
 
 
+def test_candidate_pointer_min_turn_gap_is_local_to_session(tmp_path):
+    """A receipt from another session must not suppress this session's turn."""
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store.ensure_dirs()
+    _write_config(tmp_path, surfaces=["discord"])
+    store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"], pressure=0.96))
+
+    first_session = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-a",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(1, "general check-in"),
+    )
+    assert first_session is not None
+
+    second_session = handle_pointer_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="session-b",
+        state_dir=str(tmp_path),
+        config={"cooldown_minutes": 0},
+        messages=_messages_for_user_turn(1, "another general check-in"),
+    )
+
+    assert second_session is not None
+    assert "Pointer type: candidate" in second_session["context"]
+
+
 def test_max_cards_per_turn_counts_only_same_foreground_turn(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()

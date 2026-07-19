@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from agent_sensorium.store import SensoriumStore
+from agent_sensorium.settlement import apply_kanban_settlement
 from agent_sensorium.tools import handle_sensorium_status
 
 
@@ -231,6 +232,32 @@ def test_status_reference_id_pins_saved_residue(tmp_path):
     assert settlement["intake_task_id"] == "t_status_intake"
     assert settlement["review_task_id"] == "t_status_review"
     assert not exact.get("not_found")
+
+
+@pytest.mark.parametrize("decision", ["SAVE", "PROMOTE_CONSCIOUS"])
+def test_status_reference_id_classifies_reviewed_kanban_settlement_as_saved_residue(tmp_path, decision):
+    """Kanban SAVE/PROMOTE settlements leave reviewed candidates as residue."""
+    store = _seed_state(tmp_path, candidates=[_active_candidate()])
+    result = apply_kanban_settlement(
+        store,
+        decision=decision,
+        candidate_id="cand_active_status_ref",
+        intake_task_id="t_settlement_intake",
+        review_task_id="t_settlement_review",
+    )
+    assert result["action"] == "settled"
+
+    raw = handle_sensorium_status(
+        instance="test",
+        state_dir=str(tmp_path),
+        reference_id="cand_active_status_ref",
+    )
+    payload = json.loads(raw)
+    exact = payload["data"]["exact_subject"]
+    assert exact["status"] == "reviewed"
+    assert exact["kind"] == "saved_residue"
+    assert exact["kanban_settlement"]["decision"] == decision
+    assert exact["kanban_settlement"]["intake_task_id"] == "t_settlement_intake"
 
 
 # ---------- 4. unknown id → not_found ----------
