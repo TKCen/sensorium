@@ -1105,7 +1105,7 @@ def _resolve_exact_subject(
         settlement = candidate.get("kanban_settlement") or {}
         decision = str(settlement.get("decision") or "")
         is_saved_residue = (
-            candidate.get("status") == "archived"
+            candidate.get("status") in {"reviewed", "archived"}
             and decision in {"SAVE", "PROMOTE_CONSCIOUS"}
             and settlement.get("intake_task_id")
         )
