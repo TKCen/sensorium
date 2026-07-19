@@ -23,6 +23,7 @@ from typing import Callable
 
 from .artifacts import store_artifact
 from .config import DEFAULT_TTS_CONFIG
+from .http_urls import validate_http_endpoint_url
 from .schemas import utc_now_iso
 from .sensors import classify_media_capacity, media_capacity_sample
 from .store import SensoriumStore
@@ -192,6 +193,7 @@ def _generate_chatterbox_audio(req: TalkingHeadRequest, script_text: str, output
     }
     data = json.dumps(payload).encode("utf-8")
     endpoint = req.tts_base_url.rstrip("/") + "/audio/speech"
+    validate_http_endpoint_url(endpoint)
     http_req = urllib.request.Request(
         endpoint,
         data=data,

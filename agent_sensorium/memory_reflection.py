@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .http_urls import validate_http_endpoint_url
 from .schemas import VALID_SENSITIVITIES, truncate_text, utc_now_iso
 
 # --- Stable identifiers for the emitted compact signal --------------------------
@@ -383,6 +384,7 @@ class HttpHindsightMemoryClient:
     def _post_json(self, path: str, payload: dict, *, timeout_s: float) -> dict:
         data = json.dumps(payload).encode("utf-8")
         url = f"{self.base}{path}"
+        validate_http_endpoint_url(url)
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}
         )
