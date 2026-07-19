@@ -21,7 +21,10 @@ from agent_sensorium.world_model_provider import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WIKI_ROOT = Path(os.environ["S2A_WIKI_ROOT"]) if "S2A_WIKI_ROOT" in os.environ else REPO_ROOT.parents[5] / "wiki"
+# The accepted wiki is an external mission-owned checkout. CI does not have it,
+# so use a safe repo-local sentinel and let the integration tests skip unless an
+# explicit S2A_WIKI_ROOT is supplied.
+WIKI_ROOT = Path(os.environ.get("S2A_WIKI_ROOT", str(REPO_ROOT / ".missing-wiki")))
 
 
 def _envelope(operation, data, *, privacy="private"):
