@@ -6,6 +6,7 @@ the `sensorium_profile` admin handler.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +96,41 @@ class TestProfileHelpers:
     def test_profile_state_dir_rejects_traversal(self, tmp_path):
         with pytest.raises(ValueError):
             profile_state_dir("../evil", base_dir=str(tmp_path))
+
+
+class TestDefaultInstanceBoundary:
+    @pytest.mark.parametrize("source", ["../outside", "/tmp/outside", ".hidden", "bad/name"])
+    def test_unsafe_environment_default_falls_back_to_generic_default(self, monkeypatch, source):
+        monkeypatch.setenv("AGENT_SENSORIUM_DEFAULT_INSTANCE", source)
+        monkeypatch.delenv("SENSORIUM_INSTANCE", raising=False)
+        monkeypatch.setattr("agent_sensorium.config.read_active_profile", lambda: None)
+        monkeypatch.setattr("importlib.import_module", lambda _name: (_ for _ in ()).throw(ImportError()))
+        from agent_sensorium.config import default_instance_name
+
+        assert default_instance_name("default") == "default"
+
+    def test_unsafe_active_marker_is_skipped_for_safe_hermes_default(self, monkeypatch):
+        monkeypatch.delenv("AGENT_SENSORIUM_DEFAULT_INSTANCE", raising=False)
+        monkeypatch.delenv("SENSORIUM_INSTANCE", raising=False)
+        monkeypatch.setattr("agent_sensorium.config.read_active_profile", lambda: "../outside")
+        monkeypatch.setattr("importlib.import_module", lambda _name: (_ for _ in ()).throw(ImportError()))
+
+        from agent_sensorium.config import default_instance_name
+
+        assert default_instance_name("default") == "default"
+
+    def test_unsafe_hermes_default_falls_back_to_generic_default(self, monkeypatch):
+        monkeypatch.delenv("AGENT_SENSORIUM_DEFAULT_INSTANCE", raising=False)
+        monkeypatch.delenv("SENSORIUM_INSTANCE", raising=False)
+        monkeypatch.setattr("agent_sensorium.config.read_active_profile", lambda: None)
+        hermes_config = SimpleNamespace(
+            load_config=lambda: {},
+            cfg_get=lambda *_args, **_kwargs: "../outside",
+        )
+        monkeypatch.setattr("importlib.import_module", lambda _name: hermes_config)
+        from agent_sensorium.config import default_instance_name
+
+        assert default_instance_name("default") == "default"
 
 
 class TestProfileHandler:

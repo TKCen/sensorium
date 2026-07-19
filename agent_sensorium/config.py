@@ -372,13 +372,22 @@ def default_instance_name(default: str = "default") -> str:
     Resolution order: environment override, operator-set active-profile marker,
     Hermes config, then a safe generic fallback.
     """
+    def valid_name(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return sanitize_profile_name(value)
+        except ValueError:
+            return None
+
     for env_name in ("AGENT_SENSORIUM_DEFAULT_INSTANCE", "SENSORIUM_INSTANCE"):
         value = os.environ.get(env_name)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        safe = valid_name(value)
+        if safe is not None:
+            return safe
 
-    marker = read_active_profile()
-    if marker:
+    marker = valid_name(read_active_profile())
+    if marker is not None:
         return marker
 
     try:
@@ -388,12 +397,13 @@ def default_instance_name(default: str = "default") -> str:
         value = config_mod.cfg_get(
             config_mod.load_config(), "agent_sensorium", "default_instance", default=default
         )
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        safe = valid_name(value)
+        if safe is not None:
+            return safe
     except Exception:
         pass
 
-    return default
+    return valid_name(default) or SAFE_DEFAULTS["instance_name"]
 
 
 def resolve_config_path(

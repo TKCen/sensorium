@@ -530,6 +530,25 @@ def test_resolve_instance_rejects_traversal_and_unsafe_names(monkeypatch, tmp_pa
         assert api._resolve_instance(bad) is None, bad
 
 
+def test_resolve_instance_validates_unsafe_default_before_fast_path(monkeypatch, tmp_path):
+    api = _load_dashboard_api()
+    root = tmp_path / "default"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "../outside")
+
+    assert api._resolve_instance(None) is None
+    assert api._resolve_instance("../outside") is None
+
+
+def test_resolve_instance_accepts_valid_dotted_default(monkeypatch, tmp_path):
+    api = _load_dashboard_api()
+    root = tmp_path / "v0.1"
+    monkeypatch.setattr(api, "DEFAULT_ROOT", root)
+    monkeypatch.setattr(api, "DEFAULT_INSTANCE", "v0.1")
+
+    assert api._resolve_instance(None) == ("v0.1", root)
+
+
 def test_explanation_route_rejects_traversal_instance_without_filesystem_read(tmp_path, monkeypatch):
     api = _load_dashboard_api()
     root = tmp_path / "base" / "default"

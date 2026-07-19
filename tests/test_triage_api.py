@@ -150,7 +150,7 @@ def test_artifact_verification_via_snapshot(tmp_path, monkeypatch):
             "kind": "text",
             "status": "recorded",
             "delivery_state": "held_for_review",
-            "ref_path": "/home/entity/.hermes2/secret.txt",
+            "ref_path": str(Path.home() / ".hermes2" / "secret.txt"),
             "source_refs": {"thread_id": "sth_1"},
             "allowed_surfaces": ["local", "discord"],
             "updated_at": "2026-07-04T12:00:00Z",
@@ -220,3 +220,32 @@ def test_dashboard_has_no_triage_handler_and_snapshot_is_non_mutating(tmp_path, 
     assert artifact["verification"]["status"] == "VERIFIED_COMPLIANT"
     assert artifacts_path.read_bytes() == before
     assert not (root / "decisions.jsonl").exists()
+
+
+def test_artifact_header_read_is_bounded_and_large_single_line_is_noncompliant(tmp_path, monkeypatch):
+    api = _load_dashboard_api()
+    large_file = tmp_path / "large-single-line.md"
+    large_file.write_text("STATUS: DONE " + ("x" * (api.ARTIFACT_HEADER_PREFIX_BYTES * 2)), encoding="utf-8")
+
+    builtin_open = open
+
+    class BoundedReader:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def read(self, size=-1):
+            assert 0 <= size <= api.ARTIFACT_HEADER_PREFIX_BYTES
+            return self.file.read(size)
+
+    monkeypatch.setattr(api, "open", lambda *args, **kwargs: BoundedReader(builtin_open(*args, **kwargs)), raising=False)
+
+    result = api._verify_artifact_file(str(large_file), "text")
+
+    assert result == {"status": "NONCOMPLIANT", "error_details": "missing_status_marker"}

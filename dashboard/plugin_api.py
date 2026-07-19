@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,18 @@ from typing import Any
 from fastapi import APIRouter
 
 router = APIRouter()
+
+_INSTANCE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
+ARTIFACT_HEADER_PREFIX_BYTES = 8192
+
+
+def _safe_dashboard_instance(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value
+    if not candidate or candidate != candidate.strip() or len(candidate) > 64 or candidate.startswith("."):
+        return None
+    return candidate if _INSTANCE_NAME_RE.fullmatch(candidate) else None
 
 
 def _default_instance() -> str:
@@ -28,9 +41,13 @@ def _default_instance() -> str:
             sys.path.insert(0, str(plugin_root))
         from agent_sensorium.config import default_instance_name
 
-        return default_instance_name("default")
+        return _safe_dashboard_instance(default_instance_name("default")) or "default"
     except Exception:
-        return os.environ.get("AGENT_SENSORIUM_DEFAULT_INSTANCE") or os.environ.get("SENSORIUM_INSTANCE") or "default"
+        for env_name in ("AGENT_SENSORIUM_DEFAULT_INSTANCE", "SENSORIUM_INSTANCE"):
+            safe = _safe_dashboard_instance(os.environ.get(env_name))
+            if safe is not None:
+                return safe
+        return "default"
 
 
 DEFAULT_INSTANCE = _default_instance()
@@ -53,7 +70,6 @@ DIRECT_DELIVERY_MODES = {"discord_channel_thread", "discord_dm_bound_session"}
 OPEN_OUTBOX_STATUSES = {"prepared", "failed"}
 TERMINAL_THREAD_STATUSES = {"closed", "archived"}
 
-_INSTANCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CANDIDATE_REF_LABEL_RE = re.compile(r"^candidate#[0-9a-f]{16}$")
 _RECEIPT_EVIDENCE_REF_TYPES = {
     "candidate",
@@ -82,10 +98,11 @@ def _resolve_instance(instance: str | None) -> tuple[str, Path] | None:
     or hidden/dot names — so it can't escape DEFAULT_ROOT.parent via traversal.
     """
     effective_instance = instance if instance is not None else DEFAULT_INSTANCE
+    effective_instance = _safe_dashboard_instance(effective_instance)
+    if effective_instance is None:
+        return None
     if effective_instance in {"default", DEFAULT_INSTANCE}:
         return effective_instance, DEFAULT_ROOT
-    if not _INSTANCE_NAME_RE.fullmatch(effective_instance):
-        return None
     return effective_instance, DEFAULT_ROOT.parent / effective_instance
 
 
@@ -620,11 +637,10 @@ def _verify_artifact_file(ref_path: str, kind: str) -> dict[str, Any]:
     except Exception:
         return {"status": "UNVERIFIED", "error_details": "security_warning"}
 
-    # Must be located strictly within approved directories (e.g. /home/entity/.hermes/ or project workspace)
+    # Only inspect files in deployment-neutral local trust roots.
     allowed_prefixes = [
-        Path("/home/entity/.hermes").resolve(),
-        Path("/home/entity/.gemini/antigravity-cli/scratch").resolve(),
-        Path("/tmp").resolve(),
+        (Path.home() / ".hermes").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
     ]
     is_allowed = False
     for prefix in allowed_prefixes:
@@ -644,9 +660,11 @@ def _verify_artifact_file(ref_path: str, kind: str) -> dict[str, Any]:
     # Read compliance check
     try:
         with open(resolved_path, "r", encoding="utf-8", errors="ignore") as f:
-            line1 = f.readline()
-            line2 = f.readline()
-        
+            prefix = f.read(ARTIFACT_HEADER_PREFIX_BYTES)
+        lines = prefix.splitlines()
+        line1 = lines[0] if lines else ""
+        line2 = lines[1] if len(lines) > 1 else ""
+
         # Strip trailing newlines and whitespace
         line1 = line1.strip()
         line2 = line2.strip()
@@ -3483,4 +3501,3 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "budgets": _current_budgets(root, config),
         "metrics": metrics_data,
     }
-
