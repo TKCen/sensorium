@@ -14,6 +14,16 @@ from .tools import (
 def handle_sensorium_command(
     raw_args: str, *, instance: str = "default", state_dir: str | None = None
 ) -> str:
+    from .schemas import sanitize_profile_name
+
+    try:
+        safe_instance = sanitize_profile_name(instance)
+    except (TypeError, ValueError):
+        return "Sensorium: invalid_instance"
+    if instance != safe_instance:
+        return "Sensorium: invalid_instance"
+    instance = safe_instance
+
     parts = raw_args.strip().split()
     sub = parts[0] if parts else "status"
 

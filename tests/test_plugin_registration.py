@@ -2,6 +2,15 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_plugin_state_root(monkeypatch, tmp_path):
+    import agent_sensorium.store as store_module
+
+    monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(tmp_path / "implicit-state"))
+
 
 class FakePluginContext:
     def __init__(self):
@@ -52,7 +61,7 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
 
     status = json.loads(
         ctx.tools["sensorium"]["handler"](
-            {"action": "status", "instance": "plugin-test", "state_dir": str(tmp_path)}
+            {"action": "status", "instance": "plugin-test"}
         )
     )
     assert status["success"] is True
@@ -68,6 +77,53 @@ def test_plugin_registers_with_real_plugin_context_shape(tmp_path):
     assert "residue" in live_schema
     assert "durable_capture" in live_schema
     assert "background_action_allowed" in live_schema
+
+
+@pytest.mark.parametrize("instance", ["../outside", "  spaced", "line\nbreak", "\x00bad"])
+def test_live_tool_rejects_invalid_instance_before_side_effects(tmp_path, monkeypatch, instance):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    called = False
+
+    def fail_if_called(self):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid live input must not create state")
+
+    monkeypatch.setattr(SensoriumStore, "ensure_dirs", fail_if_called)
+    ctx = FakePluginContext()
+    register(ctx)
+
+    result = json.loads(ctx.tools["sensorium"]["handler"]({
+        "action": "ingest", "instance": instance, "text": "must not persist",
+    }))
+
+    assert result == {
+        "success": False, "instance": None, "data": None, "error": "invalid_instance",
+    }
+    assert called is False
+    assert not (tmp_path / "implicit-state").exists()
+
+
+def test_live_tool_ignores_untrusted_state_dir_argument(tmp_path):
+    from agent_sensorium.plugin import register
+    from agent_sensorium.store import SensoriumStore
+
+    ctx = FakePluginContext()
+    register(ctx)
+    redirected = tmp_path / "untrusted-state"
+
+    result = json.loads(ctx.tools["sensorium"]["handler"]({
+        "action": "ingest",
+        "instance": "plugin-test",
+        "text": "persist only under the canonical implicit root",
+        "state_dir": str(redirected),
+    }))
+
+    assert result["success"] is True
+    assert not redirected.exists()
+    assert SensoriumStore(instance="plugin-test").read_jsonl("signals")
 
 
 def test_live_reach_out_records_with_execute_false_without_adapter_dispatch(tmp_path, monkeypatch):
@@ -91,7 +147,6 @@ def test_live_reach_out_records_with_execute_false_without_adapter_dispatch(tmp_
     result = json.loads(ctx.tools["sensorium"]["handler"]({
         "action": "reach_out",
         "instance": "plugin-test",
-        "state_dir": str(tmp_path),
         "text": "bounded prepared message",
         "decision": "reach_out",
         "surface": "discord",
@@ -113,7 +168,6 @@ def test_live_ingest_receipt_suppresses_foreground_owned_no_residue(tmp_path):
     result = json.loads(ctx.tools["sensorium"]["handler"]({
         "action": "ingest",
         "instance": "plugin-test",
-        "state_dir": str(tmp_path),
         "text": "Documented foreground issue",
         "kind": "design_insight",
         "foreground_action_taken": True,
@@ -122,7 +176,7 @@ def test_live_ingest_receipt_suppresses_foreground_owned_no_residue(tmp_path):
         "durable_capture": "docs",
     }))
 
-    store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="plugin-test")
     assert result["success"] is True
     assert result["data"]["ingested"] is False
     assert result["data"]["reason"] == "foreground_owned_no_residue"
@@ -143,7 +197,6 @@ def test_live_ingest_records_residue_intent_on_signal_and_receipt(tmp_path):
     result = json.loads(ctx.tools["sensorium"]["handler"]({
         "action": "ingest",
         "instance": "plugin-test",
-        "state_dir": str(tmp_path),
         "text": "Watch this repeated pattern",
         "kind": "design_insight",
         "foreground_action_taken": True,
@@ -152,7 +205,7 @@ def test_live_ingest_records_residue_intent_on_signal_and_receipt(tmp_path):
         "durable_capture": "docs",
     }))
 
-    store = SensoriumStore(instance="plugin-test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="plugin-test")
     signals = store.read_jsonl("signals")
     receipts = store.read_jsonl("decisions")
     assert result["success"] is True
@@ -208,44 +261,31 @@ def test_thread_update_plugin_schema_and_handler_forward_resume_trigger(tmp_path
     assert thread["resume_trigger"] == "new_evidence"
 
 
-def test_pre_llm_hook_forwards_state_dir(tmp_path):
+def test_pre_llm_hooks_forward_trusted_runtime_state_dir(tmp_path, monkeypatch):
+    from agent_sensorium import pointers, pre_llm_salience
     from agent_sensorium.plugin import register
-    from agent_sensorium.store import SensoriumStore
 
-    store = SensoriumStore(instance="default", state_dir=str(tmp_path))
-    store.ensure_dirs()
-    store.append_jsonl("threads", {
-        "id": "sth_hooktest",
-        "status": "dormant",
-        "origin": "candidate",
-        "conscious_task": {"id": "ct_1", "request_type": "THINK", "title": "Hook test"},
-        "origin_candidate_id": "cand_1",
-        "continuity_summary": [],
-        "decision_log": [],
-        "interaction_refs": [],
-        "summary_dirty": False,
-        "open_questions": [],
-        "next_prompt_to_operator": "test",
-        "sensitivity": "private",
-        "allowed_surfaces": ["local"],
-        "created_at": "2026-05-24T10:00:00Z",
-        "updated_at": "2026-05-24T10:00:00Z",
-        "expires_at": "2099-05-31T10:00:00Z",
-    })
+    calls = []
 
+    def record_pointer(**kwargs):
+        calls.append(kwargs)
+        return {"context": "pointer"}
+
+    def record_salience(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(pointers, "handle_pointer_pre_llm", record_pointer)
+    monkeypatch.setattr(pre_llm_salience, "handle_salience_pre_llm", record_salience)
     ctx = FakePluginContext()
     register(ctx)
-    hook = ctx.hooks["pre_llm_call"]["handler"]
 
-    result = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
-    assert result is not None
-    assert "[Sensorium Pointer]" in result["context"]
-    assert "sensorium(action=\"open\"" in result["context"]
-    assert "id=\"sth_hooktest\"" in result["context"]
+    trusted_state_dir = str(tmp_path / "trusted-runtime-state")
+    for entry in ctx.hooks.values():
+        entry["handler"](platform="local", session_id="s1", state_dir=trusted_state_dir)
 
-    result2 = hook(platform="local", session_id="s1", state_dir=str(tmp_path))
-    assert result2 is not None
-    assert "id=\"sth_hooktest\"" in result2["context"]
+    assert len(calls) == 2
+    assert all(call["state_dir"] == trusted_state_dir for call in calls)
 
 
 def test_root_plugin_entrypoint_reexports_register():

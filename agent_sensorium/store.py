@@ -78,11 +78,14 @@ def atomic_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
 
 class SensoriumStore:
     def __init__(self, instance: str = "default", state_dir: str | None = None):
-        self.instance = instance
+        # Keep the logical identity and the implicit filesystem namespace in
+        # lockstep.  An explicit state_dir is a trusted Python injection seam,
+        # not permission to retain an invalid instance identity.
+        self.instance = sanitize_profile_name(instance)
         if state_dir:
             self._root = Path(state_dir)
         else:
-            self._root = Path(_DEFAULT_BASE) / sanitize_profile_name(instance)
+            self._root = Path(_DEFAULT_BASE) / self.instance
 
     @property
     def root(self) -> Path:
