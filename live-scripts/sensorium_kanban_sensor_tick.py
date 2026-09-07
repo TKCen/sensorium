@@ -37,10 +37,9 @@ INSTANCE = (
     or "default"
 )
 BOARD = os.environ.get("SENSORIUM_KANBAN_BOARD", "sensorium")
-# Default to the real `serasubconscious` Hermes profile so newly minted intake
-# rows are claimable by the dispatcher. Override with SENSORIUM_SUBCONSCIOUS_PROFILE
-# only when running against a deployment-specific reviewer profile.
-PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "serasubconscious")
+# Deployments inject the Hermes reviewer profile through configuration or the
+# environment; the reusable fallback contains no installation-specific identity.
+PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "subconscious-reviewer")
 
 # Resolve the package root without hardcoding a private checkout path. Prefer the
 # repository copy that ships alongside this script (``<repo>/agent_sensorium``);

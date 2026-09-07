@@ -6,6 +6,7 @@ Input shape (single object or list via --record, --file, or stdin):
     {
       "candidate_id": "cand_...",
       "aperture_id": "cap_...",          # optional; checked when supplied
+      "consumer_id": "foreground:...",   # optional; checked when supplied
       "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
       "reason": "short Conscious decision rationale",
       "return_at": "2026-06-07T13:00:00Z", # optional; HELD-only future UTC checkpoint
@@ -67,6 +68,7 @@ def main() -> int:
             store,
             candidate_id=record.get("candidate_id", ""),
             aperture_id=record.get("aperture_id"),
+            consumer_id=record.get("consumer_id"),
             decision=record.get("decision", ""),
             reason=record.get("reason", ""),
             return_at=record.get("return_at"),

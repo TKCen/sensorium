@@ -22,8 +22,17 @@
   ],
   "thread_ttl_hours": 168,
   "default_actor": "background_conscious",
-  "subconscious_profile": "serasubconscious",
+  "subconscious_profile": "subconscious-reviewer",
   "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
+  "conscious_doorway": {
+    "enabled": true,
+    "aperture_size": 2,
+    "max_active_items": 3,
+    "lease_minutes": 15,
+    "stale_after_minutes": 180,
+    "surfaces": ["local"],
+    "agent_label": "Demo Agent"
+  },
   "tts": {
     "base_url": "http://127.0.0.1:8892/v1",
     "model": "chatterbox-turbo",

@@ -3,9 +3,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_sensorium.conscious_aperture import open_conscious_aperture, settle_conscious_aperture_item
+from agent_sensorium.conscious_aperture import (
+    open_conscious_aperture,
+    settle_conscious_aperture_item,
+)
 from agent_sensorium.store import SensoriumStore
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "sensorium_conscious_aperture_tick.py"
@@ -91,7 +93,7 @@ def test_active_aperture_guard_prevents_second_open(tmp_path):
     assert len(decisions) == 1
 
 
-def test_stale_active_aperture_blocks_replacement_open(tmp_path):
+def test_stale_active_aperture_is_reclaimed_without_semantic_settlement(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
     stale = _candidate("stale", pressure=0.9)
@@ -108,11 +110,14 @@ def test_stale_active_aperture_blocks_replacement_open(tmp_path):
         stale_after_minutes=60,
     )
 
-    assert result["action"] == "stale_aperture_requires_settlement"
+    assert result["action"] == "opened_aperture"
     assert result["stale_active_candidate_ids"] == ["stale"]
-    assert result["candidate_ids"] == []
+    assert result["candidate_ids"] == ["stale"]
+    assert result["reclaimed_candidate_ids"] == ["stale"]
     assert [row["status"] for row in store.read_jsonl("candidates")] == ["in_conscious_aperture", "candidate"]
-    assert store.read_jsonl("decisions") == []
+    decisions = store.read_jsonl("decisions")
+    assert [row["type"] for row in decisions] == ["conscious.aperture.reclaimed", "conscious.aperture.opened"]
+    assert decisions[0]["decision_preserved"] is True
 
 
 def test_cli_opens_aperture_packet(tmp_path):
@@ -178,7 +183,7 @@ def test_settle_aperture_item_marks_reviewed_and_records_receipt(tmp_path):
     assert store.read_jsonl("worker_requests") == []
 
 
-def test_settle_aperture_item_dry_run_does_not_mutate(tmp_path):
+def test_settle_aperture_item_rejects_prose_only_hold_without_mutation(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
     store.append_jsonl("candidates", _candidate("one", pressure=0.8))
@@ -193,8 +198,7 @@ def test_settle_aperture_item_dry_run_does_not_mutate(tmp_path):
         now="2026-06-07T12:05:00Z",
     )
 
-    assert result["action"] == "would_settle_aperture_item"
-    assert result["receipt_preview"]["decision"] == "HELD"
+    assert result["error"] == "return_at_required_for_hold"
     assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
     assert [d for d in store.read_jsonl("decisions") if d.get("type") == "conscious.aperture.settled"] == []
     assert store.read_jsonl("worker_requests") == []
@@ -269,7 +273,7 @@ def test_fractional_held_checkpoint_preserves_precision_until_due(tmp_path):
     )["candidate_ids"] == ["fractional"]
 
 
-def test_due_held_checkpoint_respects_active_and_stale_aperture_guards(tmp_path):
+def test_due_held_checkpoint_respects_active_capacity_and_recovers_stale(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
     held = _candidate("returning", pressure=0.8)
@@ -288,9 +292,12 @@ def test_due_held_checkpoint_respects_active_and_stale_aperture_guards(tmp_path)
     active["conscious_aperture"]["opened_at"] = "2026-06-07T08:00:00Z"
     store.rewrite_jsonl("candidates", [held, active])
     stale = open_conscious_aperture(store, dry_run=False, now="2026-06-07T12:00:00Z", stale_after_minutes=60)
-    assert stale["action"] == "stale_aperture_requires_settlement"
-    assert store.read_jsonl("candidates")[0]["status"] == "held"
-    assert [row for row in store.read_jsonl("decisions") if row.get("type") == "conscious.aperture.returned"] == []
+    assert stale["action"] == "opened_aperture"
+    assert set(stale["candidate_ids"]) == {"returning", "active"}
+    assert stale["reclaimed_candidate_ids"] == ["active"]
+    assert stale["returned_candidate_ids"] == ["returning"]
+    assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
+    assert len([row for row in store.read_jsonl("decisions") if row.get("type") == "conscious.aperture.returned"]) == 1
 
 
 def test_held_checkpoint_rejects_malformed_or_nonfuture_timestamp(tmp_path):

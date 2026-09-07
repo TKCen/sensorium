@@ -60,6 +60,9 @@ def main() -> int:
     )
     ap.add_argument("--aperture-size", type=int, default=3)
     ap.add_argument("--max-active-sessions", type=int, default=1)
+    ap.add_argument("--max-active-items", type=int, default=None)
+    ap.add_argument("--lease-minutes", type=int, default=15)
+    ap.add_argument("--consumer-id", default=None)
     ap.add_argument("--stale-after-minutes", type=int, default=180)
     ap.add_argument("--open", action="store_true", help="Persist the aperture open transition; default previews only")
     ap.add_argument("--settlements", help="JSON settlement object/list to preview or apply")
@@ -76,6 +79,9 @@ def main() -> int:
         store,
         aperture_size=args.aperture_size,
         max_active_sessions=args.max_active_sessions,
+        max_active_items=args.max_active_items,
+        lease_minutes=args.lease_minutes,
+        consumer_id=args.consumer_id,
         stale_after_minutes=args.stale_after_minutes,
         dry_run=not args.open,
         now=args.now,
@@ -88,6 +94,7 @@ def main() -> int:
             store,
             candidate_id=record.get("candidate_id", ""),
             aperture_id=record.get("aperture_id"),
+            consumer_id=record.get("consumer_id") or args.consumer_id,
             decision=record.get("decision", ""),
             reason=record.get("reason", ""),
             return_at=record.get("return_at"),

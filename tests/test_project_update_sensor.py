@@ -125,6 +125,6 @@ def test_state_is_not_advanced_when_stdout_flush_fails(monkeypatch, tmp_path):
     else:
         raise AssertionError("main should surface the stdout failure")
 
-    state_file = tmp_path / ".hermes" / "agent-sensorium" / "sera" / "example_updates_state.json"
+    state_file = tmp_path / ".hermes" / "agent-sensorium" / "default" / "example_updates_state.json"
     assert not state_file.exists()
     assert "example_update_available" in stdout.buffer

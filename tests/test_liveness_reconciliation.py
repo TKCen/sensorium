@@ -41,7 +41,7 @@ def test_plan_is_deterministic_tie_sorted_capped_and_hostile_safe():
         assert finding["reason_code"] in LIVENESS_REASON_CODES
 
 
-def test_stale_aperture_blocks_dry_run_and_write_without_any_write(tmp_path):
+def test_stale_aperture_preview_is_inert_and_write_reclaims_without_settlement(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
     store.ensure_dirs()
     stale = _conscious_candidate("stale", status="in_conscious_aperture")
@@ -53,9 +53,17 @@ def test_stale_aperture_blocks_dry_run_and_write_without_any_write(tmp_path):
     dry = open_conscious_aperture(store, dry_run=True, now="2026-07-09T12:00:00Z", stale_after_minutes=60)
     write = open_conscious_aperture(store, dry_run=False, now="2026-07-09T12:00:00Z", stale_after_minutes=60)
 
-    assert dry["action"] == write["action"] == "stale_aperture_requires_settlement"
+    assert dry["action"] == "would_open_aperture"
+    assert write["action"] == "opened_aperture"
     assert write["stale_active_candidate_ids"] == ["stale"]
-    assert before == {name: store.read_jsonl(name) for name in before}
+    assert set(write["candidate_ids"]) == {"stale", "replacement"}
+    assert write["reclaimed_candidate_ids"] == ["stale"]
+    after = {name: store.read_jsonl(name) for name in before}
+    assert before["worker_requests"] == after["worker_requests"] == []
+    assert before["threads"] == after["threads"] == []
+    assert before["thread_actions"] == after["thread_actions"] == []
+    assert before["outbox"] == after["outbox"] == []
+    assert not [row for row in after["decisions"] if row.get("type") == "conscious.aperture.settled"]
 
 
 def test_historical_pointer_is_settled_and_non_actionable():
