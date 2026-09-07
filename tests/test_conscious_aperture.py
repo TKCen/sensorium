@@ -279,6 +279,7 @@ def test_fractional_held_checkpoint_preserves_precision_until_due(tmp_path):
 def test_due_held_checkpoint_respects_active_capacity_and_recovers_stale(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
+    store.write_conscious_aperture_state(store.new_conscious_aperture_state())
     held = _candidate("returning", pressure=0.8)
     held["status"] = "held"
     held["held_return"] = {"not_before": "2026-06-07T11:00:00Z", "reason_code": "time_checkpoint"}

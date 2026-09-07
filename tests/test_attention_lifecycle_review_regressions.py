@@ -405,6 +405,116 @@ def test_bounded_presentation_index_fails_closed_instead_of_evicting_replay_keys
     assert store.read_jsonl("decisions") == before
 
 
+def test_aperture_state_absence_is_distinct_from_initialized_empty(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    with pytest.raises(FileNotFoundError):
+        store.read_conscious_aperture_state()
+
+    empty_state = {
+        "version": 1,
+        "fairness_last_served_lane": None,
+        "presentation_attempts": [],
+    }
+    store.write_conscious_aperture_state(empty_state)
+    assert store.read_conscious_aperture_state() == empty_state
+
+
+def test_missing_state_exact_presentation_replay_fails_closed_without_mutation(
+    tmp_path, monkeypatch
+):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("missing-replay"))
+    packet = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    first = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-1",
+        surface="local", now="2026-06-07T12:01:00Z",
+    )
+    assert first["action"] == "presentation_attempt_recorded"
+    state_path = store.conscious_aperture_state_path
+    state_path.unlink()
+    before_candidates = (store.root / "candidates.jsonl").read_bytes()
+    before_decisions = (store.root / "decisions.jsonl").read_bytes()
+    original_read = store.read_jsonl
+
+    def reject_decision_reads(name, limit=None):
+        if name == "decisions":
+            raise AssertionError("missing-state replay scanned audit history")
+        return original_read(name, limit=limit)
+
+    monkeypatch.setattr(store, "read_jsonl", reject_decision_reads)
+    replay = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-1",
+        surface="local", now="2026-06-07T12:02:00Z",
+    )
+    assert replay == {"success": False, "error": "missing_aperture_state"}
+    assert not state_path.exists()
+    assert (store.root / "candidates.jsonl").read_bytes() == before_candidates
+    assert (store.root / "decisions.jsonl").read_bytes() == before_decisions
+
+
+def test_missing_state_open_refuses_active_lease_without_mutation(tmp_path, monkeypatch):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    active = _expired("active-boundary")
+    active["conscious_aperture"]["consumer_id"] = "owner"
+    active["conscious_aperture"]["lease_expires_at"] = "2026-06-07T12:05:00Z"
+    store.append_jsonl("candidates", active)
+    before_candidates = (store.root / "candidates.jsonl").read_bytes()
+    original_read = store.read_jsonl
+
+    def reject_decision_reads(name, limit=None):
+        if name == "decisions":
+            raise AssertionError("missing-state open scanned audit history")
+        return original_read(name, limit=limit)
+
+    monkeypatch.setattr(store, "read_jsonl", reject_decision_reads)
+    result = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:04:59Z",
+    )
+    assert result == {"success": False, "error": "missing_aperture_state"}
+    assert not store.conscious_aperture_state_path.exists()
+    assert (store.root / "candidates.jsonl").read_bytes() == before_candidates
+    assert not (store.root / "decisions.jsonl").exists()
+
+
+def test_missing_state_allows_virgin_initialization_without_current_lease(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("virgin"))
+    assert not store.conscious_aperture_state_path.exists()
+
+    result = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    assert result["action"] == "opened_aperture"
+    assert result["candidate_ids"] == ["virgin"]
+    assert store.conscious_aperture_state_path.exists()
+
+
+def test_missing_state_recovers_lease_at_exact_expiry_without_settlement(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    expired = _expired("expired-boundary")
+    expired["conscious_aperture"]["lease_expires_at"] = "2026-06-07T12:05:00Z"
+    store.append_jsonl("candidates", expired)
+
+    result = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="new-owner",
+        dry_run=False, now="2026-06-07T12:05:00Z",
+    )
+    assert result["action"] == "opened_aperture"
+    assert result["reclaimed_candidate_ids"] == ["expired-boundary"]
+    assert result["candidate_ids"] == ["expired-boundary"]
+    assert store.conscious_aperture_state_path.exists()
+    assert not [
+        row for row in store.read_jsonl("decisions")
+        if row.get("type") == "conscious.aperture.settled"
+    ]
+    assert store.read_jsonl("worker_requests") == store.read_jsonl("outbox") == []
+
+
 def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
     tmp_path, monkeypatch
 ):
@@ -412,7 +522,8 @@ def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
     store.append_jsonl("candidates", _candidate("corrupt-open"))
     state_path = store.root / "inner_life" / "conscious_aperture_state.json"
     state_path.write_text("{broken", encoding="utf-8")
-    before_candidates = store.read_jsonl("candidates")
+    before_candidates = (store.root / "candidates.jsonl").read_bytes()
+    before_state = state_path.read_bytes()
     original_read = store.read_jsonl
 
     def reject_decision_reads(name, limit=None):
@@ -426,7 +537,9 @@ def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
         dry_run=False, now="2026-06-07T12:00:00Z",
     )
     assert result == {"success": False, "error": "corrupt_aperture_state"}
-    assert original_read("candidates") == before_candidates
+    assert (store.root / "candidates.jsonl").read_bytes() == before_candidates
+    assert state_path.read_bytes() == before_state
+    assert not (store.root / "decisions.jsonl").exists()
 
     presentation_store = SensoriumStore(
         instance="presentation", state_dir=str(tmp_path / "presentation")
@@ -437,7 +550,9 @@ def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
         dry_run=False, now="2026-06-07T12:00:00Z",
     )
     presentation_store.conscious_aperture_state_path.write_text("[]", encoding="utf-8")
-    before_decisions = presentation_store.read_jsonl("decisions")
+    presentation_state_before = presentation_store.conscious_aperture_state_path.read_bytes()
+    before_candidates = (presentation_store.root / "candidates.jsonl").read_bytes()
+    before_decisions = (presentation_store.root / "decisions.jsonl").read_bytes()
     presentation_read = presentation_store.read_jsonl
 
     def reject_presentation_decision_reads(name, limit=None):
@@ -451,7 +566,9 @@ def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
         turn_id="turn-corrupt", surface="local", now="2026-06-07T12:01:00Z",
     )
     assert attempted == {"success": False, "error": "corrupt_aperture_state"}
-    assert presentation_read("decisions") == before_decisions
+    assert presentation_store.conscious_aperture_state_path.read_bytes() == presentation_state_before
+    assert (presentation_store.root / "candidates.jsonl").read_bytes() == before_candidates
+    assert (presentation_store.root / "decisions.jsonl").read_bytes() == before_decisions
 
 
 def test_resumed_lease_renews_atomically_and_settles_after_old_expiry(tmp_path):

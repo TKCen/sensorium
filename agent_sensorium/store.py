@@ -39,6 +39,10 @@ class CorruptApertureStateError(ValueError):
     """The bounded aperture metadata index cannot be trusted."""
 
 
+class MissingApertureStateError(FileNotFoundError):
+    """The bounded aperture metadata index has not been initialized."""
+
+
 def _candidate_process_lock(key: str) -> threading.RLock:
     with _CANDIDATE_LOCKS_GUARD:
         return _CANDIDATE_LOCKS.setdefault(key, threading.RLock())
@@ -252,7 +256,8 @@ class SensoriumStore:
         return self._root / "inner_life" / "conscious_aperture_state.json"
 
     @staticmethod
-    def _default_conscious_aperture_state() -> dict:
+    def new_conscious_aperture_state() -> dict:
+        """Return a valid empty bounded index for an explicitly safe initialization."""
         return {
             "version": _CONSCIOUS_APERTURE_STATE_VERSION,
             "fairness_last_served_lane": None,
@@ -295,10 +300,10 @@ class SensoriumStore:
         }
 
     def read_conscious_aperture_state(self) -> dict:
-        """Read the fixed-bound foreground index, failing closed on corruption."""
+        """Read the fixed-bound index, distinguishing absence from valid empty state."""
         path = self.conscious_aperture_state_path
         if not path.exists():
-            return self._default_conscious_aperture_state()
+            raise MissingApertureStateError("aperture state missing")
         try:
             with open(path, encoding="utf-8") as f:
                 state = json.load(f)

@@ -18,6 +18,7 @@ from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import (
     APERTURE_PRESENTATION_INDEX_LIMIT,
     CorruptApertureStateError,
+    MissingApertureStateError,
     SensoriumStore,
 )
 
@@ -399,6 +400,12 @@ def open_conscious_aperture(
         candidates = store.read_jsonl("candidates")
         try:
             aperture_state = store.read_conscious_aperture_state()
+        except MissingApertureStateError:
+            if _active_aperture_ids(
+                candidates, now=now_dt, stale_after_minutes=stale_after_minutes
+            ):
+                return {"success": False, "error": "missing_aperture_state"}
+            aperture_state = store.new_conscious_aperture_state()
         except CorruptApertureStateError:
             return {"success": False, "error": "corrupt_aperture_state"}
         aperture_state = _prune_presentation_attempts(
@@ -846,6 +853,8 @@ def record_conscious_aperture_presentation_attempt(
         candidates = store.read_jsonl("candidates")
         try:
             aperture_state = store.read_conscious_aperture_state()
+        except MissingApertureStateError:
+            return {"success": False, "error": "missing_aperture_state"}
         except CorruptApertureStateError:
             return {"success": False, "error": "corrupt_aperture_state"}
         validated_items: list[dict] = []
