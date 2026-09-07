@@ -96,6 +96,7 @@ def register(ctx) -> None:
         surface = str(args.get("surface") or kw.get("platform") or "local").strip() or "local"
         text = str(args.get("text") or "").strip()
         target_id = str(args.get("id") or "latest").strip() or "latest"
+        state_dir = kw.get("state_dir")
 
         if action == "status":
             # Forward reference_id + surface so the conscious layer can pin
@@ -241,7 +242,7 @@ def register(ctx) -> None:
                     "settle": "SETTLED",
                     "hold": "HELD",
                 }
-                store = SensoriumStore(instance=instance)
+                store = SensoriumStore(instance=instance, state_dir=state_dir)
                 current_lease = any(
                     row.get("id") == target_id
                     and row.get("status") == "in_conscious_aperture"
@@ -272,6 +273,7 @@ def register(ctx) -> None:
                     action=keyword,
                     reason=text,
                     instance=instance,
+                    state_dir=state_dir,
                 )
             return handle_sensorium_thread_update(
                 thread_id=target_id,

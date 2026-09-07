@@ -552,32 +552,33 @@ def run_subconscious_advisory(
         _write_advisory_receipt(store, result=result, output=output, dry_run=True, context=context, record_receipt=record_receipt)
         return result
 
-    candidates = store.read_jsonl("candidates")
-    existing = _find_existing_candidate(candidates, candidate)
-    if existing:
+    with store.candidate_transaction():
+        candidates = store.read_jsonl("candidates")
+        existing = _find_existing_candidate(candidates, candidate)
+        if existing:
+            result = {
+                "action": "already_exists",
+                "dry_run": False,
+                "model_used": model_used,
+                "model_provider": cfg.get("model_provider") if model_used else None,
+                "model": cfg.get("model") if model_used else None,
+                "candidate_id": existing.get("id"),
+                "reason": "duplicate subconscious advisory candidate",
+                "context": context,
+            }
+            _write_advisory_receipt(store, result=result, output=output, dry_run=False, context=context, record_receipt=record_receipt)
+            return result
+
+        store.append_jsonl("candidates", candidate)
         result = {
-            "action": "already_exists",
+            "action": "created_conscious_task_candidate",
             "dry_run": False,
             "model_used": model_used,
             "model_provider": cfg.get("model_provider") if model_used else None,
             "model": cfg.get("model") if model_used else None,
-            "candidate_id": existing.get("id"),
-            "reason": "duplicate subconscious advisory candidate",
+            "candidate_id": candidate["id"],
+            "reason": output["rationale"],
             "context": context,
         }
         _write_advisory_receipt(store, result=result, output=output, dry_run=False, context=context, record_receipt=record_receipt)
         return result
-
-    store.append_jsonl("candidates", candidate)
-    result = {
-        "action": "created_conscious_task_candidate",
-        "dry_run": False,
-        "model_used": model_used,
-        "model_provider": cfg.get("model_provider") if model_used else None,
-        "model": cfg.get("model") if model_used else None,
-        "candidate_id": candidate["id"],
-        "reason": output["rationale"],
-        "context": context,
-    }
-    _write_advisory_receipt(store, result=result, output=output, dry_run=False, context=context, record_receipt=record_receipt)
-    return result

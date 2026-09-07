@@ -1,11 +1,19 @@
 """JSONL-backed local state store for Agent Sensorium."""
 
+import contextlib
 import json
 import os
 import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from .schemas import sanitize_profile_name
+
+try:  # pragma: no cover - native Linux is the supported runtime.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 _STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
@@ -20,6 +28,14 @@ _STATE_NAMES = {
 }
 
 _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
+_CANDIDATE_LOCKS_GUARD = threading.Lock()
+_CANDIDATE_LOCKS: dict[str, threading.RLock] = {}
+_HELD_CANDIDATE_LOCKS = threading.local()
+
+
+def _candidate_process_lock(key: str) -> threading.RLock:
+    with _CANDIDATE_LOCKS_GUARD:
+        return _CANDIDATE_LOCKS.setdefault(key, threading.RLock())
 
 
 def _fsync_parent(path: Path) -> None:
@@ -231,7 +247,56 @@ class SensoriumStore:
             raise ValueError(f"Unknown state name: {name}")
         return self._root / rel
 
+    @contextlib.contextmanager
+    def candidate_transaction(self) -> Iterator[None]:
+        """Serialize one profile's complete candidate read/mutate/write cycle.
+
+        The per-root in-process lock and filesystem ``flock`` are shared by all
+        candidate writers. Nested use for the same root is intentionally
+        reentrant; nesting different profile roots is rejected so callers cannot
+        create cross-profile lock-order cycles.
+        """
+        self.ensure_dirs()
+        path = self._root / "locks" / "candidates.lock"
+        key = str(path.resolve(strict=False))
+        process_lock = _candidate_process_lock(key)
+        with process_lock:
+            held = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
+            if held is None:
+                held = {}
+                _HELD_CANDIDATE_LOCKS.locks = held
+            if key in held:
+                held[key]["depth"] += 1
+                try:
+                    yield
+                finally:
+                    held[key]["depth"] -= 1
+                return
+            if held:
+                raise RuntimeError("candidate transactions cannot nest across profile roots")
+
+            lock_file = open(path, "a+", encoding="utf-8")
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                held[key] = {"depth": 1, "file": lock_file}
+                try:
+                    yield
+                finally:
+                    held.pop(key, None)
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+
     def append_jsonl(self, name: str, obj: dict) -> None:
+        if name == "candidates":
+            with self.candidate_transaction():
+                self._append_jsonl_unlocked(name, obj)
+            return
+        self._append_jsonl_unlocked(name, obj)
+
+    def _append_jsonl_unlocked(self, name: str, obj: dict) -> None:
         path = self._resolve(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
@@ -241,6 +306,10 @@ class SensoriumStore:
         _fsync_parent(path)
 
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
+        if name == "candidates":
+            with self.candidate_transaction():
+                atomic_rewrite_jsonl(self._resolve(name), rows)
+            return
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:

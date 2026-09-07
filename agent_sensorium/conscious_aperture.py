@@ -8,17 +8,10 @@ remain re-presentable with exact source binding.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import threading
-from collections.abc import Iterator
+import re
 from datetime import UTC, datetime, timedelta
-
-try:  # pragma: no cover - native Linux is the supported runtime.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
 
 from .config import visible_on_surface
 from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
@@ -31,6 +24,7 @@ DEFAULT_APERTURE_SIZE = 3
 DEFAULT_STALE_AFTER_MINUTES = 180
 DEFAULT_LEASE_MINUTES = 15
 DEFAULT_MAX_ACTIVE_ITEMS = 3
+MAX_AUTHORITY_TOKEN_BYTES = 160
 VALID_SETTLEMENT_DECISIONS = {"REVIEWED", "HELD", "SETTLED", "PREPARED_EXTERNAL_WORK"}
 SETTLEMENT_STATUS = {
     "REVIEWED": "reviewed",
@@ -39,9 +33,9 @@ SETTLEMENT_STATUS = {
     "PREPARED_EXTERNAL_WORK": "prepared_external_work",
 }
 
-_FALLBACK_LOCK = threading.RLock()
 RECOVERY_LANE = "recovery"
 FRESH_LANE = "fresh"
+_AUTHORITY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -63,25 +57,30 @@ def _format_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-@contextlib.contextmanager
-def _aperture_lock(store: SensoriumStore) -> Iterator[None]:
-    """Serialize candidate claim/settlement across native Linux consumers."""
-    store.ensure_dirs()
-    path = store.root / "locks" / "conscious-aperture.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _FALLBACK_LOCK, open(path, "a+", encoding="utf-8") as lock_file:
-        if fcntl is not None:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+def valid_authority_token(value: object) -> bool:
+    """Return whether an exact ownership token is safe to expose unchanged."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= MAX_AUTHORITY_TOKEN_BYTES
+        and _AUTHORITY_TOKEN_RE.fullmatch(value) is not None
+    )
+
+
+def requires_exact_settlement(candidate: object) -> bool:
+    """Return whether only the current exact aperture owner may mutate a row."""
+    return isinstance(candidate, dict) and candidate.get("status") == OPEN_STATUS
+
+
+def _candidate_has_valid_authority(candidate: dict) -> bool:
+    return valid_authority_token(candidate.get("id"))
 
 
 def _source_binding(candidate: dict) -> dict:
-    task = candidate.get("conscious_task") or {}
-    advisory = candidate.get("advisory_meta") or {}
+    raw_task = candidate.get("conscious_task")
+    task = raw_task if isinstance(raw_task, dict) else {}
+    raw_advisory = candidate.get("advisory_meta")
+    advisory = raw_advisory if isinstance(raw_advisory, dict) else {}
     source = {
         "candidate_id": str(candidate.get("id") or ""),
         "conscious_task_id": str(task.get("id") or ""),
@@ -126,8 +125,11 @@ def _logical_source_key(candidate: dict) -> str:
 def _canonical_source_ids(candidates: list[dict]) -> dict[str, str]:
     canonical: dict[str, tuple[tuple[str, str], str]] = {}
     for candidate in candidates:
-        if candidate.get("kind") != CONSCIOUS_KIND or not isinstance(
-            candidate.get("conscious_task"), dict
+        if (
+            candidate.get("kind") != CONSCIOUS_KIND
+            or not isinstance(candidate.get("conscious_task"), dict)
+            or candidate.get("advisory_meta") is not None
+            and not isinstance(candidate.get("advisory_meta"), dict)
         ):
             continue
         key = _logical_source_key(candidate)
@@ -156,18 +158,28 @@ def _is_stale_active(candidate: dict, *, now: datetime, stale_after_minutes: int
 
 def _is_pending_conscious_task(candidate: dict) -> bool:
     return (
-        candidate.get("status") == PENDING_STATUS
+        _candidate_has_valid_authority(candidate)
+        and candidate.get("status") == PENDING_STATUS
         and candidate.get("kind") == CONSCIOUS_KIND
         and isinstance(candidate.get("conscious_task"), dict)
+        and (
+            candidate.get("advisory_meta") is None
+            or isinstance(candidate.get("advisory_meta"), dict)
+        )
     )
 
 
 def _is_due_held_checkpoint(candidate: dict, *, now: datetime) -> bool:
     checkpoint = candidate.get("held_return")
     if not (
-        candidate.get("status") == "held"
+        _candidate_has_valid_authority(candidate)
+        and candidate.get("status") == "held"
         and candidate.get("kind") == CONSCIOUS_KIND
         and isinstance(candidate.get("conscious_task"), dict)
+        and (
+            candidate.get("advisory_meta") is None
+            or isinstance(candidate.get("advisory_meta"), dict)
+        )
         and isinstance(checkpoint, dict)
         and checkpoint.get("reason_code") == "time_checkpoint"
     ):
@@ -340,16 +352,23 @@ def open_conscious_aperture(
     )
     lease_duration = max(1, min(1440, int(lease_minutes or DEFAULT_LEASE_MINUTES)))
     explicit_consumer = bool(str(consumer_id or "").strip())
-    owner = truncate_text(str(consumer_id or "conscious-session").strip(), 160)
+    owner = str(consumer_id or "conscious-session").strip()
+    if not valid_authority_token(owner):
+        return {"success": False, "error": "invalid_consumer_id"}
 
-    with _aperture_lock(store):
+    with store.candidate_transaction():
         candidates = store.read_jsonl("candidates")
         canonical_ids = _canonical_source_ids(candidates)
         active = [
             candidate
             for candidate in candidates
-            if candidate.get("status") == OPEN_STATUS
+            if _candidate_has_valid_authority(candidate)
+            and candidate.get("status") == OPEN_STATUS
             and isinstance(candidate.get("conscious_task"), dict)
+            and (
+                candidate.get("advisory_meta") is None
+                or isinstance(candidate.get("advisory_meta"), dict)
+            )
             and not _is_stale_active(
                 candidate, now=now_dt, stale_after_minutes=stale_after_minutes
             )
@@ -357,8 +376,13 @@ def open_conscious_aperture(
         stale_active = [
             candidate
             for candidate in candidates
-            if candidate.get("status") == OPEN_STATUS
+            if _candidate_has_valid_authority(candidate)
+            and candidate.get("status") == OPEN_STATUS
             and isinstance(candidate.get("conscious_task"), dict)
+            and (
+                candidate.get("advisory_meta") is None
+                or isinstance(candidate.get("advisory_meta"), dict)
+            )
             and _is_stale_active(
                 candidate, now=now_dt, stale_after_minutes=stale_after_minutes
             )
@@ -396,14 +420,20 @@ def open_conscious_aperture(
         recovery_eligible = []
         fresh_eligible = []
         for candidate in candidates:
+            recovery_candidate = (
+                _is_due_held_checkpoint(candidate, now=now_dt) or candidate in stale_active
+            )
+            fresh_candidate = _is_pending_conscious_task(candidate)
+            if not recovery_candidate and not fresh_candidate:
+                continue
             candidate_id = str(candidate.get("id") or "")
             if canonical_ids.get(_logical_source_key(candidate)) != candidate_id:
                 continue
             if not _visible(candidate, surface=surface, instance_config=instance_config):
                 continue
-            if _is_due_held_checkpoint(candidate, now=now_dt) or candidate in stale_active:
+            if recovery_candidate:
                 recovery_eligible.append(candidate)
-            elif _is_pending_conscious_task(candidate):
+            elif fresh_candidate:
                 fresh_eligible.append(candidate)
         eligible = recovery_eligible + fresh_eligible
         selected, service_lanes = _select_fair_claims(
@@ -689,7 +719,7 @@ def record_conscious_aperture_presentation_attempt(
         return {"success": False, "error": "consumer_id_required"}
     if not isinstance(aperture, list) or not aperture:
         return {"success": False, "error": "aperture_packet_required"}
-    with _aperture_lock(store):
+    with store.candidate_transaction():
         candidates = store.read_jsonl("candidates")
         validated_items: list[dict] = []
         seen_ids: set[str] = set()
@@ -826,7 +856,7 @@ def settle_conscious_aperture_item(
             "target": dict(target),
         }
 
-    with _aperture_lock(store):
+    with store.candidate_transaction():
         candidates = store.read_jsonl("candidates")
         idx = _find_candidate_index(candidates, candidate_id)
         if idx is None:

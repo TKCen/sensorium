@@ -69,6 +69,7 @@ from .conscious import (
     claim_dormant_thread,
     complete_claim,
 )
+from .conscious_aperture import requires_exact_settlement
 from .workers import (
     dispatch_worker_request,
     list_worker_requests,
@@ -95,6 +96,16 @@ _ALLOWED_THREAD_TRANSITIONS: dict[str, set[str]] = {
     "dormant": {"close", "hold", "archive", "mark_reviewed", "pin", "unpin"},
     "held": {"close", "resume", "archive", "mark_reviewed", "pin", "unpin"},
 }
+
+
+def _candidate_transactional(handler):
+    """Run a store-first helper inside the shared candidate transaction."""
+    @wraps(handler)
+    def wrapped(store: SensoriumStore, *args, **kwargs):
+        with store.candidate_transaction():
+            return handler(store, *args, **kwargs)
+
+    return wrapped
 
 
 def _ok(instance: str, data) -> str:
@@ -397,6 +408,7 @@ def _read_pruned_sensor_policy(
     return pruned
 
 
+@_candidate_transactional
 def _apply_candidate_decay(
     store: SensoriumStore,
     candidates: list[dict],
@@ -505,6 +517,7 @@ def _coalesce_candidate_with_event(
     return receipt
 
 
+@_candidate_transactional
 def _append_event_and_create_or_update_candidate(
     store: SensoriumStore,
     *,
@@ -962,7 +975,7 @@ def handle_sensorium_improvement_status(
     return _ok(instance, summarize_improvement_state(store))
 
 
-def handle_sensorium_candidate_update(
+def _handle_sensorium_candidate_update_locked(
     *,
     candidate_id: str,
     action: str,
@@ -987,6 +1000,8 @@ def handle_sensorium_candidate_update(
         return _err(instance, f"Candidate '{candidate_id}' not found.")
 
     old_status = target.get("status", "candidate")
+    if requires_exact_settlement(target):
+        return _err(instance, "candidate_leased_requires_exact_settlement")
     if action == "resume" and old_status != "held":
         return _err(instance, f"Candidate '{candidate_id}' is {old_status} and cannot be resumed.")
     if action == "suppress":
@@ -1055,6 +1070,26 @@ def handle_sensorium_candidate_update(
         "new_status": new_status,
         "receipt": receipt,
     })
+
+
+def handle_sensorium_candidate_update(
+    *,
+    candidate_id: str,
+    action: str,
+    reason: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Apply a generic update only while no exact aperture lease owns the row."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    with store.candidate_transaction():
+        return _handle_sensorium_candidate_update_locked(
+            candidate_id=candidate_id,
+            action=action,
+            reason=reason,
+            instance=instance,
+            state_dir=state_dir,
+        )
 
 
 def _resolve_exact_subject(
@@ -1498,6 +1533,7 @@ def handle_sensorium_thread_update(
     return _ok(instance, receipt)
 
 
+@_candidate_transactional
 def _mark_origin_candidate_reviewed(
     store: SensoriumStore,
     *,
@@ -1582,7 +1618,7 @@ def handle_sensorium_attention_pointer(
     ))
 
 
-def handle_sensorium_compact(
+def _handle_sensorium_compact_locked(
     *, instance: str = "default", state_dir: str | None = None
 ) -> str:
     store = SensoriumStore(instance=instance, state_dir=state_dir)
@@ -1599,6 +1635,8 @@ def handle_sensorium_compact(
     for c in candidates:
         status = c.get("status", "candidate")
         if status in ARCHIVED_STATUSES:
+            continue
+        if requires_exact_settlement(c):
             continue
         expires = c.get("expires_at", "")
         is_expired = bool(expires) and expires <= now
@@ -1650,6 +1688,15 @@ def handle_sensorium_compact(
     })
 
 
+def handle_sensorium_compact(
+    *, instance: str = "default", state_dir: str | None = None
+) -> str:
+    """Compact state while serializing the candidate archive transition."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    with store.candidate_transaction():
+        return _handle_sensorium_compact_locked(instance=instance, state_dir=state_dir)
+
+
 def handle_sensorium_service_threads(
     *,
     instance: str = "default",
@@ -1663,8 +1710,11 @@ def handle_sensorium_service_threads(
 
     now_ts = now or utc_now_iso()
     threads = store.read_jsonl("threads")
-    candidates = store.read_jsonl("candidates")
-    decayed_candidates = _apply_candidate_decay(store, candidates, config=config, now=now_ts)
+    with store.candidate_transaction():
+        candidates = store.read_jsonl("candidates")
+        decayed_candidates = _apply_candidate_decay(
+            store, candidates, config=config, now=now_ts
+        )
 
     cfg = config or {}
     raw_thresholds = cfg.get("thresholds")

@@ -574,7 +574,7 @@ def attention_policy_review_candidate(evidence: dict, *, config: dict | None = N
     return candidate
 
 
-def run_improvement_collector(
+def _run_improvement_collector_locked(
     store: SensoriumStore,
     *,
     bridge_state: dict | None = None,
@@ -644,7 +644,26 @@ def run_improvement_collector(
     return result
 
 
-def record_attention_policy_decision(
+def run_improvement_collector(
+    store: SensoriumStore,
+    *,
+    bridge_state: dict | None = None,
+    kanban_tasks: list[dict] | None = None,
+    dry_run: bool = False,
+    config: dict | None = None,
+) -> dict:
+    """Collect and deduplicate one candidate under the shared transaction."""
+    with store.candidate_transaction():
+        return _run_improvement_collector_locked(
+            store,
+            bridge_state=bridge_state,
+            kanban_tasks=kanban_tasks,
+            dry_run=dry_run,
+            config=config,
+        )
+
+
+def _record_attention_policy_decision_locked(
     store: SensoriumStore,
     *,
     candidate_id: str,
@@ -754,6 +773,41 @@ def record_attention_policy_decision(
         "new_status": new_status,
         "receipt": receipt,
     }
+
+
+def record_attention_policy_decision(
+    store: SensoriumStore,
+    *,
+    candidate_id: str,
+    decision: str,
+    reason: str,
+    future_tendency_delta: str,
+    verification_condition: str,
+    rollback_condition: str,
+    decided_by: str = "conscious",
+    decision_ref: str = "",
+    implementation_ref: str = "",
+    memory_context: list[dict[str, Any]] | None = None,
+    retrieval_skipped_reason: str = "",
+    cited_memory_fact_refs: list[str] | None = None,
+) -> dict:
+    """Record one candidate decision under the shared transaction."""
+    with store.candidate_transaction():
+        return _record_attention_policy_decision_locked(
+            store,
+            candidate_id=candidate_id,
+            decision=decision,
+            reason=reason,
+            future_tendency_delta=future_tendency_delta,
+            verification_condition=verification_condition,
+            rollback_condition=rollback_condition,
+            decided_by=decided_by,
+            decision_ref=decision_ref,
+            implementation_ref=implementation_ref,
+            memory_context=memory_context,
+            retrieval_skipped_reason=retrieval_skipped_reason,
+            cited_memory_fact_refs=cited_memory_fact_refs,
+        )
 
 
 def summarize_improvement_state(store: SensoriumStore) -> dict:

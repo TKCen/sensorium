@@ -515,8 +515,14 @@ def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
     observed_at = candidate.get("updated_at") or candidate.get("created_at")
     if status == "in_conscious_aperture":
         aperture = (candidate.get("conscious_aperture") if isinstance(candidate.get("conscious_aperture"), dict) else {}) or {}
-        opened = _parse_dt(aperture.get("opened_at") or candidate.get("updated_at"))
-        stale = aperture.get("state") == "stale" or opened is None or (datetime.now(timezone.utc) - opened).total_seconds() >= 180 * 60
+        explicit_expiry = aperture.get("lease_expires_at")
+        if explicit_expiry not in (None, ""):
+            expiry = _parse_dt(explicit_expiry)
+            stale = expiry is None or datetime.now(timezone.utc) >= expiry
+        else:
+            opened = _parse_dt(aperture.get("opened_at") or candidate.get("updated_at"))
+            stale = opened is None or (datetime.now(timezone.utc) - opened).total_seconds() >= 180 * 60
+        stale = aperture.get("state") == "stale" or stale
         state = "stale" if stale else "reviewing"
         return _liveness_item(state=state, reason_code="stale_aperture" if stale else "reviewing_open_aperture", observed_at=observed_at, source="candidate_status", actionable=stale, terminal=False)
     if status == "candidate":

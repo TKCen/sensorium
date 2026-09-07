@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import multiprocessing
+from pathlib import Path
+
+import pytest
 
 from agent_sensorium.conscious_aperture import (
     open_conscious_aperture,
     record_conscious_aperture_presentation_attempt,
     settle_conscious_aperture_item,
 )
-from agent_sensorium.conscious_doorway import handle_conscious_doorway_pre_llm
+from agent_sensorium.conscious_doorway import (
+    conscious_doorway_context,
+    handle_conscious_doorway_pre_llm,
+)
+from agent_sensorium.plugin import register
+from agent_sensorium.settlement import _derived_stale_aperture_ids, apply_kanban_settlement
 from agent_sensorium.store import SensoriumStore
+from agent_sensorium.tools import (
+    handle_sensorium_candidate_update,
+    handle_sensorium_compact,
+    handle_sensorium_ingest_event,
+)
 
 
 def _candidate(candidate_id, *, pressure=0.7, created_at="2026-06-07T10:00:00Z"):
@@ -34,6 +49,91 @@ def _expired(candidate_id):
         "state": "open",
     }
     return row
+
+
+def _paused_aperture_process(state_dir, read_ready, release_read, result_queue):
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    original_read = store.read_jsonl
+    paused = False
+
+    def read_jsonl(name, limit=None):
+        nonlocal paused
+        rows = original_read(name, limit=limit)
+        if name == "candidates" and not paused:
+            paused = True
+            read_ready.set()
+            if not release_read.wait(10):
+                raise TimeoutError("test did not release paused aperture read")
+        return rows
+
+    store.read_jsonl = read_jsonl
+    result_queue.put(open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="aperture-process",
+        dry_run=False,
+        now="2026-06-07T12:00:00Z",
+    ))
+
+
+def _concurrent_candidate_writer_process(state_dir, mode, started, done, result_queue):
+    started.set()
+    try:
+        if mode == "settlement":
+            result = apply_kanban_settlement(
+                SensoriumStore(instance="test", state_dir=state_dir),
+                decision="DROP",
+                candidate_id="settlement-target",
+                reason="Concurrent Kanban settlement.",
+            )
+        else:
+            event = {
+                "id": f"evt-{mode}",
+                "ts": "2026-06-07T12:00:00Z",
+                "type": "sensor.event.promoted",
+                "kind": "task_result" if mode == "coalesce" else "new_event_kind",
+                "summary": f"Concurrent {mode} event",
+                "strength": 0.9,
+                "correlation_keys": ["coalesce-target"] if mode == "coalesce" else ["new"],
+                "sensitivity": "private",
+                "allowed_surfaces": ["local"],
+            }
+            result = json.loads(handle_sensorium_ingest_event(
+                event=event,
+                instance="test",
+                state_dir=state_dir,
+                config={"silence_ttl_hours": 1_000_000},
+            ))
+        result_queue.put(result)
+    finally:
+        done.set()
+
+
+class _LivePluginContext:
+    def __init__(self):
+        self.tools = {}
+
+    def register_tool(self, *, name, handler, **kwargs):
+        self.tools[name] = handler
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_command(self, *args, **kwargs):
+        pass
+
+    def register_skill(self, *args, **kwargs):
+        pass
+
+
+def _load_dashboard_plugin():
+    path = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location("attention_lifecycle_dashboard", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_current_lease_requires_exact_tokens_and_rejects_stale_generation(tmp_path):
@@ -207,3 +307,404 @@ def test_mixed_lane_order_is_stable_by_time_then_id_under_reordering(tmp_path):
         assert store.read_jsonl("worker_requests") == store.read_jsonl("outbox") == []
     expected = (["expired", "fresh", "held"], ["recovery", "fresh", "recovery"])
     assert outputs == [expected, expected]
+
+
+@pytest.mark.parametrize("writer_mode", ["append", "coalesce", "settlement"])
+def test_candidate_mutations_serialize_across_processes(writer_mode, tmp_path):
+    """A paused aperture rewrite cannot erase any other candidate writer."""
+    state_dir = str(tmp_path / writer_mode)
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    rows = [_candidate("aperture-target")]
+    if writer_mode == "settlement":
+        rows.append({
+            "id": "settlement-target",
+            "status": "candidate",
+            "kind": "task_result",
+            "pressure": 0.6,
+            "summary": "Settle me",
+            "fingerprint": "settlement-target",
+            "event_ids": ["evt-settlement-target"],
+            "correlation_keys": ["settlement-target"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "created_at": "2026-06-07T10:00:00Z",
+            "updated_at": "2026-06-07T10:00:00Z",
+        })
+    elif writer_mode == "coalesce":
+        rows.append({
+            "id": "coalesce-target",
+            "status": "candidate",
+            "kind": "task_result",
+            "pressure": 0.6,
+            "summary": "Coalesce me",
+            "fingerprint": "coalesce-target",
+            "event_ids": ["evt-original"],
+            "correlation_keys": ["coalesce-target"],
+            "sensitivity": "private",
+            "allowed_surfaces": ["local"],
+            "created_at": "2026-06-07T10:00:00Z",
+            "updated_at": "2026-06-07T10:00:00Z",
+        })
+    store.rewrite_jsonl("candidates", rows)
+
+    ctx = multiprocessing.get_context("spawn")
+    read_ready = ctx.Event()
+    release_read = ctx.Event()
+    writer_started = ctx.Event()
+    writer_done = ctx.Event()
+    result_queue = ctx.Queue()
+    aperture = ctx.Process(
+        target=_paused_aperture_process,
+        args=(state_dir, read_ready, release_read, result_queue),
+    )
+    writer = ctx.Process(
+        target=_concurrent_candidate_writer_process,
+        args=(state_dir, writer_mode, writer_started, writer_done, result_queue),
+    )
+    aperture.start()
+    assert read_ready.wait(5)
+    writer.start()
+    assert writer_started.wait(5)
+    writer_completed_while_aperture_held = writer_done.wait(0.5)
+    release_read.set()
+    aperture.join(10)
+    writer.join(10)
+    assert aperture.exitcode == writer.exitcode == 0
+    assert writer_completed_while_aperture_held is False
+    assert result_queue.get(timeout=2)
+    assert result_queue.get(timeout=2)
+
+    final = {row["id"]: row for row in store.read_jsonl("candidates")}
+    assert final["aperture-target"]["status"] == "in_conscious_aperture"
+    if writer_mode == "append":
+        assert any(row.get("event_ids") == ["evt-append"] for row in final.values())
+    elif writer_mode == "coalesce":
+        assert final["coalesce-target"]["event_ids"] == ["evt-original", "evt-coalesce"]
+    else:
+        assert final["settlement-target"]["status"] == "suppressed"
+
+
+def test_candidate_transaction_is_same_root_reentrant_and_rejects_cross_root_nesting(tmp_path):
+    first = SensoriumStore(instance="first", state_dir=str(tmp_path / "first"))
+    same_root = SensoriumStore(instance="first", state_dir=str(tmp_path / "first"))
+    other = SensoriumStore(instance="other", state_dir=str(tmp_path / "other"))
+    with first.candidate_transaction():
+        with same_root.candidate_transaction():
+            same_root.append_jsonl("candidates", {"id": "nested"})
+        with pytest.raises(RuntimeError, match="cannot nest across profile roots"):
+            with other.candidate_transaction():
+                pass
+    assert first.read_jsonl("candidates") == [{"id": "nested"}]
+
+
+@pytest.mark.parametrize("action", ["suppress", "hold", "resume", "cancel", "mark_reviewed"])
+def test_every_generic_candidate_action_rejects_a_leased_row(action, tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / action))
+    store.append_jsonl("candidates", _candidate("leased"))
+    packet = open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="owner",
+        dry_run=False,
+        now="2026-06-07T12:00:00Z",
+    )
+    before = store.read_jsonl("candidates")
+    result = json.loads(handle_sensorium_candidate_update(
+        candidate_id="leased",
+        action=action,
+        reason="Generic mutation must not bypass ownership.",
+        instance="test",
+        state_dir=str(store.root),
+    ))
+    assert result["success"] is False
+    assert result["error"] == "candidate_leased_requires_exact_settlement"
+    assert store.read_jsonl("candidates") == before
+    assert packet["aperture"][0]["candidate_id"] == "leased"
+
+
+@pytest.mark.parametrize("decision", ["DROP", "SAVE", "PROMOTE_CONSCIOUS"])
+def test_every_kanban_settlement_rejects_a_leased_row(decision, tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / decision))
+    store.append_jsonl("candidates", _candidate("leased-kanban"))
+    open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="owner",
+        dry_run=False,
+        now="2026-06-07T12:00:00Z",
+    )
+    before = store.read_jsonl("candidates")
+    result = apply_kanban_settlement(
+        store,
+        decision=decision,
+        candidate_id="leased-kanban",
+        reason="Kanban must not bypass the active owner.",
+    )
+    assert result["action"] == "leased_candidate_requires_exact_settlement"
+    assert result["updated_candidate_ids"] == []
+    assert result["receipts"] == []
+    assert store.read_jsonl("candidates") == before
+
+
+def test_compaction_cannot_archive_a_leased_row(tmp_path):
+    state_dir = tmp_path / "compact"
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    candidate = _candidate("leased-compact")
+    candidate["expires_at"] = "2000-01-01T00:00:00Z"
+    store.append_jsonl("candidates", candidate)
+    packet = open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="owner",
+        dry_run=False,
+        now="2099-06-07T12:00:00Z",
+    )
+    before = store.read_jsonl("candidates")
+    result = json.loads(handle_sensorium_compact(instance="test", state_dir=str(state_dir)))
+    assert result["success"] is True
+    assert result["data"]["archived_candidates"] == []
+    assert store.read_jsonl("candidates") == before
+    assert packet["aperture"][0]["candidate_id"] == "leased-compact"
+
+
+@pytest.mark.parametrize("keyword", ["suppress", "cancel", "resume"])
+def test_live_generic_update_keywords_cannot_bypass_exact_lease(keyword, tmp_path):
+    state_dir = tmp_path / keyword
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    store.append_jsonl("candidates", _candidate("cand_live_leased"))
+    packet = open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="foreground:owner",
+        dry_run=False,
+        now="2026-06-07T12:00:00Z",
+    )
+    item = packet["aperture"][0]
+    ctx = _LivePluginContext()
+    register(ctx)
+    result = json.loads(ctx.tools["sensorium"]({
+        "action": "update",
+        "instance": "test",
+        "id": "cand_live_leased",
+        "keyword": keyword,
+        "text": "No generic ownership bypass.",
+        "aperture_id": item["aperture_id"],
+        "consumer_id": item["consumer_id"],
+    }, state_dir=str(state_dir)))
+    assert result["success"] is False
+    assert result["error"] == "candidate_leased_requires_exact_settlement"
+    assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
+
+
+def test_doorway_context_caps_display_lists_and_total_bytes():
+    huge = "display-" + ("x" * 20_000)
+    packet = {
+        "aperture": [{
+            "candidate_id": "cand_exact",
+            "aperture_id": "cap_exact",
+            "consumer_id": "foreground:exact",
+            "lease_expires_at": "2026-06-07T12:15:00Z",
+            "summary": huge,
+            "conscious_task": {
+                "id": huge,
+                "request_type": huge,
+                "title": huge,
+                "why": huge,
+                "expected_decision": huge,
+            },
+            "source_binding": {
+                "candidate_id": "cand_exact",
+                "conscious_task_id": huge,
+                "candidate_fingerprint": huge,
+                "source_fingerprint": huge,
+                "source_revision": huge,
+                "event_ids": [f"event-{index}-{huge}" for index in range(500)],
+                "source_candidate_ids": [f"source-{index}-{huge}" for index in range(500)],
+                "source_digest": "a" * 64,
+            },
+        }],
+    }
+    context = conscious_doorway_context(packet, agent_label=huge)
+    assert len(context.encode("utf-8")) <= 8192
+    assert huge not in context
+    assert '"candidate_id":"cand_exact"' in context
+    assert '"aperture_id":"cap_exact"' in context
+    assert '"consumer_id":"foreground:exact"' in context
+
+
+def test_oversized_authority_id_is_not_truncated_or_leased(tmp_path):
+    state_dir = tmp_path / "oversized-authority"
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    store.ensure_dirs()
+    (state_dir / "instance.config.json").write_text(json.dumps({
+        "instance_name": "test",
+        "allowed_surfaces": ["local"],
+        "conscious_doorway": {"enabled": True, "surfaces": ["local"]},
+    }))
+    oversized_id = "cand_" + ("x" * 1000)
+    store.append_jsonl("candidates", _candidate(oversized_id))
+    assert handle_conscious_doorway_pre_llm(
+        instance="test",
+        platform="local",
+        session_id="session",
+        state_dir=str(state_dir),
+    ) is None
+    row = store.read_jsonl("candidates")[0]
+    assert row["id"] == oversized_id
+    assert row["status"] == "candidate"
+
+
+def test_live_settlement_uses_the_hook_state_dir_override(tmp_path, monkeypatch):
+    import agent_sensorium.store as store_module
+
+    implicit_root = tmp_path / "implicit"
+    override = tmp_path / "override"
+    monkeypatch.setattr(store_module, "_DEFAULT_BASE", str(implicit_root))
+    store = SensoriumStore(instance="test", state_dir=str(override))
+    store.append_jsonl("candidates", _candidate("override-owned"))
+    packet = open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="foreground:override",
+        dry_run=False,
+        now="2099-06-07T12:00:00Z",
+    )
+    item = packet["aperture"][0]
+    ctx = _LivePluginContext()
+    register(ctx)
+    result = json.loads(ctx.tools["sensorium"]({
+        "action": "update",
+        "instance": "test",
+        "id": "override-owned",
+        "keyword": "settle",
+        "text": "Settle in exact overridden root.",
+        "aperture_id": item["aperture_id"],
+        "consumer_id": item["consumer_id"],
+    }, state_dir=str(override)))
+    assert result["success"] is True
+    assert store.read_jsonl("candidates")[0]["status"] == "reviewed"
+    assert SensoriumStore(instance="test").read_jsonl("candidates") == []
+
+
+def test_conscious_doorway_is_local_only_and_local_desktop_surface_still_works(tmp_path):
+    state_dir = tmp_path / "local-only-doorway"
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    store.ensure_dirs()
+    (state_dir / "instance.config.json").write_text(json.dumps({
+        "instance_name": "test",
+        "allowed_surfaces": ["local", "discord"],
+        "conscious_doorway": {
+            "enabled": True,
+            "aperture_size": 1,
+            "max_active_items": 1,
+            "surfaces": ["local", "discord"],
+        },
+    }))
+    candidate = _candidate("local-only")
+    candidate["allowed_surfaces"] = ["local", "discord"]
+    store.append_jsonl("candidates", candidate)
+
+    remote = handle_conscious_doorway_pre_llm(
+        instance="test",
+        platform="discord",
+        session_id="remote-session",
+        state_dir=str(state_dir),
+    )
+    assert remote is None
+    assert store.read_jsonl("candidates")[0]["status"] == "candidate"
+
+    local = handle_conscious_doorway_pre_llm(
+        instance="test",
+        platform="local",
+        session_id="desktop-session",
+        state_dir=str(state_dir),
+    )
+    assert local is not None
+    assert "[Sensorium Conscious Aperture]" in local["context"]
+    assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
+
+
+def test_liveness_prefers_explicit_lease_expiry_with_legacy_fallback():
+    def leased(candidate_id, *, opened_at, lease_expires_at=None):
+        row = _candidate(candidate_id)
+        row["status"] = "in_conscious_aperture"
+        row["conscious_aperture"] = {
+            "id": f"cap-{candidate_id}",
+            "consumer_id": "owner",
+            "generation": 1,
+            "opened_at": opened_at,
+            "state": "open",
+        }
+        if lease_expires_at is not None:
+            row["conscious_aperture"]["lease_expires_at"] = lease_expires_at
+        return row
+
+    expired = leased(
+        "expired-explicit",
+        opened_at="2026-06-07T11:59:00Z",
+        lease_expires_at="2026-06-07T11:59:30Z",
+    )
+    future = leased(
+        "future-explicit",
+        opened_at="2026-06-07T08:00:00Z",
+        lease_expires_at="2026-06-07T13:00:00Z",
+    )
+    legacy = leased("legacy-timeout", opened_at="2026-06-07T08:00:00Z")
+    stale_ids = _derived_stale_aperture_ids(
+        [expired, future, legacy],
+        now="2026-06-07T12:00:00Z",
+    )
+    assert stale_ids == {"expired-explicit", "legacy-timeout"}
+
+    dashboard = _load_dashboard_plugin()
+    dashboard_expired = leased(
+        "dashboard-expired",
+        opened_at="2999-01-01T00:00:00Z",
+        lease_expires_at="2000-01-01T00:00:00Z",
+    )
+    dashboard_future = leased(
+        "dashboard-future",
+        opened_at="2000-01-01T00:00:00Z",
+        lease_expires_at="2999-01-01T00:00:00Z",
+    )
+    dashboard_legacy = leased("dashboard-legacy", opened_at="2000-01-01T00:00:00Z")
+    assert dashboard._candidate_liveness(dashboard_expired)["reason_code"] == "stale_aperture"
+    assert (
+        dashboard._candidate_liveness(dashboard_future)["reason_code"]
+        == "reviewing_open_aperture"
+    )
+    assert dashboard._candidate_liveness(dashboard_legacy)["reason_code"] == "stale_aperture"
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [("conscious_task", "not-a-task-object"), ("advisory_meta", ["not", "an", "object"])],
+)
+def test_malformed_advisory_shapes_do_not_block_unrelated_valid_candidate(
+    field, malformed_value, tmp_path
+):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / field))
+    malformed = _candidate(f"malformed-{field}", pressure=0.99)
+    malformed[field] = malformed_value
+    valid = _candidate("valid-neighbor", pressure=0.5)
+    store.rewrite_jsonl("candidates", [malformed, valid])
+
+    packet = open_conscious_aperture(
+        store,
+        aperture_size=1,
+        max_active_items=1,
+        consumer_id="owner",
+        dry_run=False,
+        now="2026-06-07T12:00:00Z",
+    )
+
+    assert packet["success"] is True
+    assert packet["candidate_ids"] == ["valid-neighbor"]
+    rows = {row["id"]: row for row in store.read_jsonl("candidates")}
+    assert rows[f"malformed-{field}"]["status"] == "candidate"
+    assert rows["valid-neighbor"]["status"] == "in_conscious_aperture"
