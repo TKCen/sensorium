@@ -99,6 +99,117 @@ def _bridge_intake_script_paths() -> list[tuple[str, Path]]:
     return paths
 
 
+class TestKanbanBridgeReviewerProfileResolution:
+    def _write_config(self, bridge, home, instance, value):
+        state_dir = home / ".hermes" / "agent-sensorium" / instance
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "instance.config.json").write_text(
+            json.dumps({"instance_name": instance, "subconscious_profile": value}),
+            encoding="utf-8",
+        )
+
+    def test_config_only_and_environment_override_precedence(self, tmp_path, monkeypatch):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "ordinary", "configured-reviewer")
+        assert bridge._resolve_reviewer_profile("ordinary") == "configured-reviewer"
+
+        monkeypatch.setenv("SENSORIUM_SUBCONSCIOUS_PROFILE", "   ")
+        assert bridge._resolve_reviewer_profile("ordinary") == "configured-reviewer"
+
+        monkeypatch.setenv("SENSORIUM_SUBCONSCIOUS_PROFILE", " override-reviewer ")
+        assert bridge._resolve_reviewer_profile("ordinary") == "override-reviewer"
+
+    def test_explicit_instance_selects_that_instances_validated_config(
+        self, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "instance-a", "reviewer-a")
+        self._write_config(bridge, tmp_path, "instance-b", "reviewer-b")
+        bridge.INSTANCE = "instance-a"
+
+        observed = {}
+
+        def stop_after_resolution():
+            observed.update(instance=bridge.INSTANCE, profile=bridge.PROFILE)
+            raise RuntimeError("stop-after-profile-resolution")
+
+        monkeypatch.setattr(bridge, "_ensure_board", stop_after_resolution)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["sensorium_kanban_sensor_tick.py", "--instance", "instance-b"],
+        )
+        assert bridge.main() == 1
+        assert observed == {"instance": "instance-b", "profile": "reviewer-b"}
+
+    @pytest.mark.parametrize("payload", [None, "{not-json", {"subconscious_profile": ""}])
+    def test_missing_corrupt_or_invalid_config_uses_generic_fallback(
+        self, payload, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        state_dir = tmp_path / ".hermes" / "agent-sensorium" / "ordinary"
+        state_dir.mkdir(parents=True)
+        if payload is not None:
+            text = payload if isinstance(payload, str) else json.dumps(payload)
+            (state_dir / "instance.config.json").write_text(text, encoding="utf-8")
+        assert bridge._resolve_reviewer_profile("ordinary") == "subconscious-reviewer"
+
+    def test_all_intake_and_review_creators_share_one_resolved_profile(
+        self, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "ordinary", "configured-reviewer")
+        bridge.PROFILE = bridge._resolve_reviewer_profile("ordinary")
+        commands = []
+
+        def fake_run_checked(cmd, *, timeout=90):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": "task-1"}), "")
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        event = {
+            "id": "evt-profile",
+            "kind": "design_decision",
+            "summary": "Profile resolution",
+            "strength": 0.9,
+            "correlation_keys": ["profile"],
+            "allowed_surfaces": ["local"],
+            "sensitivity": "private",
+        }
+        candidate = {
+            "id": "cand-profile",
+            "kind": "design_decision",
+            "summary": "Candidate profile resolution",
+            "pressure": 0.9,
+            "event_ids": ["evt-profile"],
+            "correlation_keys": ["profile"],
+        }
+        intake = {"id": "intake-1", "title": "sensor:intake:design_decision"}
+        bridge._create_intake(event)
+        bridge._create_candidate_intake(candidate)
+        bridge._create_review([intake])
+
+        create_commands = [command for command in commands if "create" in command]
+        assign_commands = [command for command in commands if "assign" in command]
+        assert len(create_commands) == 3
+        assert len(assign_commands) == 2
+        review_create = next(command for command in create_commands if "--assignee" in command)
+        assert review_create[review_create.index("--assignee") + 1] == "configured-reviewer"
+        assert all(command[-1] == "configured-reviewer" for command in assign_commands)
+        assert all(
+            "configured-reviewer" in command[command.index("--body") + 1]
+            for command in create_commands
+        )
+
+
 
 class TestDispatchActivationGate:
     """Sensorium dispatch must not become a second activation substrate."""

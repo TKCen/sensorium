@@ -9,9 +9,9 @@ Dumb fixture layer:
   subconscious-reviewer profile when unresolved intake exists and no review is
   already active.
 
-Profile/instance and the reviewer profile name are resolved from the
-environment with generic defaults, so this bridge ships free of any
-deployment-specific instance/profile values.
+Profile/instance and the reviewer profile name are resolved from the selected
+instance configuration with an optional environment override and a generic
+fallback, so this bridge ships free of deployment-specific values.
 
 Healthy/idle path prints nothing. Use --json for inspection or --force-canary
 for an end-to-end canary intake.
@@ -37,9 +37,11 @@ INSTANCE = (
     or "default"
 )
 BOARD = os.environ.get("SENSORIUM_KANBAN_BOARD", "sensorium")
-# Deployments inject the Hermes reviewer profile through configuration or the
-# environment; the reusable fallback contains no installation-specific identity.
-PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "subconscious-reviewer")
+# ``main`` assigns this once after final ``--instance`` selection. Keeping the
+# import-time value generic prevents callers from observing configuration for a
+# different/default instance before CLI parsing has completed.
+GENERIC_REVIEWER_PROFILE = "subconscious-reviewer"
+PROFILE = GENERIC_REVIEWER_PROFILE
 
 # Resolve the package root without hardcoding a private checkout path. Prefer the
 # repository copy that ships alongside this script (``<repo>/agent_sensorium``);
@@ -52,6 +54,7 @@ for _candidate in (_SCRIPT_DIR.parent, PLUGIN):
         break
 if str(PLUGIN) not in sys.path:
     sys.path.insert(0, str(PLUGIN))
+from agent_sensorium.config import load_instance_config  # noqa: E402
 from agent_sensorium.settlement import (  # noqa: E402
     DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
     CLOSED_INTAKE_STATUSES,
@@ -97,6 +100,19 @@ def _load_json(path: Path, default: Any) -> Any:
 def _write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _resolve_reviewer_profile(instance: str) -> str:
+    """Resolve the one bridge reviewer identity for the selected instance."""
+    override = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "").strip()
+    if override:
+        return override
+    state_dir = HOME / ".hermes" / "agent-sensorium" / instance
+    config, _ = load_instance_config(state_dir=str(state_dir))
+    configured = config.get("subconscious_profile")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return GENERIC_REVIEWER_PROFILE
 
 
 def _run(cmd: list[str], *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
@@ -988,7 +1004,7 @@ def _force_canary_event(label: str | None = None, *, conscious: bool = False) ->
 
 
 def main() -> int:
-    global INSTANCE, EVENTS_PATH
+    global INSTANCE, EVENTS_PATH, PROFILE
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", default=INSTANCE)
     ap.add_argument("--json", action="store_true")
@@ -1001,6 +1017,7 @@ def main() -> int:
     # requested profile so all per-instance reads/writes below stay consistent.
     INSTANCE = args.instance
     EVENTS_PATH = HOME / ".hermes" / "agent-sensorium" / INSTANCE / "events.jsonl"
+    PROFILE = _resolve_reviewer_profile(INSTANCE)
 
     state = _load_json(STATE_PATH, {})
     seen = set(state.get("seen_event_ids") or [])
