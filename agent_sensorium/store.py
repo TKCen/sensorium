@@ -31,6 +31,12 @@ _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
 _CANDIDATE_LOCKS_GUARD = threading.Lock()
 _CANDIDATE_LOCKS: dict[str, threading.RLock] = {}
 _HELD_CANDIDATE_LOCKS = threading.local()
+_CONSCIOUS_APERTURE_STATE_VERSION = 1
+APERTURE_PRESENTATION_INDEX_LIMIT = 128
+
+
+class CorruptApertureStateError(ValueError):
+    """The bounded aperture metadata index cannot be trusted."""
 
 
 def _candidate_process_lock(key: str) -> threading.RLock:
@@ -240,6 +246,73 @@ class SensoriumStore:
     def write_sensor_policy(self, policy: dict) -> None:
         self.ensure_dirs()
         atomic_write_json(self._root / "sensors" / "policy.json", policy)
+
+    @property
+    def conscious_aperture_state_path(self) -> Path:
+        return self._root / "inner_life" / "conscious_aperture_state.json"
+
+    @staticmethod
+    def _default_conscious_aperture_state() -> dict:
+        return {
+            "version": _CONSCIOUS_APERTURE_STATE_VERSION,
+            "fairness_last_served_lane": None,
+            "presentation_attempts": [],
+        }
+
+    @staticmethod
+    def _validate_conscious_aperture_state(state: object) -> dict:
+        if not isinstance(state, dict) or state.get("version") != _CONSCIOUS_APERTURE_STATE_VERSION:
+            raise CorruptApertureStateError("invalid aperture state version")
+        lane = state.get("fairness_last_served_lane")
+        if lane not in {None, "recovery", "fresh"}:
+            raise CorruptApertureStateError("invalid fairness lane")
+        attempts = state.get("presentation_attempts")
+        if not isinstance(attempts, list) or len(attempts) > APERTURE_PRESENTATION_INDEX_LIMIT:
+            raise CorruptApertureStateError("invalid presentation index")
+        validated_attempts = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise CorruptApertureStateError("invalid presentation record")
+            aperture_ids = attempt.get("aperture_ids")
+            if (
+                not isinstance(attempt.get("consumer_id"), str)
+                or not isinstance(attempt.get("turn_id"), str)
+                or not isinstance(attempt.get("surface"), str)
+                or not isinstance(attempt.get("ts"), str)
+                or not isinstance(attempt.get("items_digest"), str)
+                or len(attempt["items_digest"]) != 64
+                or not isinstance(aperture_ids, list)
+                or not aperture_ids
+                or len(aperture_ids) > 20
+                or not all(isinstance(value, str) and value for value in aperture_ids)
+            ):
+                raise CorruptApertureStateError("invalid presentation record fields")
+            validated_attempts.append(dict(attempt, aperture_ids=list(aperture_ids)))
+        return {
+            "version": _CONSCIOUS_APERTURE_STATE_VERSION,
+            "fairness_last_served_lane": lane,
+            "presentation_attempts": validated_attempts,
+        }
+
+    def read_conscious_aperture_state(self) -> dict:
+        """Read the fixed-bound foreground index, failing closed on corruption."""
+        path = self.conscious_aperture_state_path
+        if not path.exists():
+            return self._default_conscious_aperture_state()
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CorruptApertureStateError("aperture state unreadable") from exc
+        return self._validate_conscious_aperture_state(state)
+
+    def write_conscious_aperture_state(self, state: dict) -> None:
+        """Atomically replace validated bounded aperture metadata."""
+        self.ensure_dirs()
+        atomic_write_json(
+            self.conscious_aperture_state_path,
+            self._validate_conscious_aperture_state(state),
+        )
 
     def _resolve(self, name: str) -> Path:
         rel = _STATE_NAMES.get(name)

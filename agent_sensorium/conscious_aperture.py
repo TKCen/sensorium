@@ -15,7 +15,11 @@ from datetime import UTC, datetime, timedelta
 
 from .config import visible_on_surface
 from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
-from .store import SensoriumStore
+from .store import (
+    APERTURE_PRESENTATION_INDEX_LIMIT,
+    CorruptApertureStateError,
+    SensoriumStore,
+)
 
 OPEN_STATUS = "in_conscious_aperture"
 PENDING_STATUS = "candidate"
@@ -35,6 +39,7 @@ SETTLEMENT_STATUS = {
 
 RECOVERY_LANE = "recovery"
 FRESH_LANE = "fresh"
+MAX_PRESENTATION_INDEX_RECORDS = APERTURE_PRESENTATION_INDEX_LIMIT
 _AUTHORITY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
 
 
@@ -238,14 +243,48 @@ def _fresh_sort_key(candidate: dict) -> tuple[datetime, str]:
     return created_at, str(candidate.get("id") or "")
 
 
-def _last_fairness_lane(decisions: list[dict]) -> str | None:
-    for receipt in reversed(decisions):
-        if receipt.get("type") != "conscious.aperture.opened":
+def _active_aperture_ids(
+    candidates: list[dict], *, now: datetime, stale_after_minutes: int
+) -> set[str]:
+    active_ids = set()
+    for candidate in candidates:
+        if candidate.get("status") != OPEN_STATUS:
             continue
-        lane = receipt.get("fairness_last_served_lane")
-        if lane in {RECOVERY_LANE, FRESH_LANE}:
-            return str(lane)
-    return None
+        expiry = _lease_expiry(candidate, stale_after_minutes=stale_after_minutes)
+        aperture_id = str((candidate.get("conscious_aperture") or {}).get("id") or "")
+        if aperture_id and (expiry is None or now < expiry):
+            active_ids.add(aperture_id)
+    return active_ids
+
+
+def _prune_presentation_attempts(state: dict, *, active_aperture_ids: set[str]) -> dict:
+    """Retain accepted turn keys only while all of their leases are current."""
+    retained = [
+        attempt
+        for attempt in state["presentation_attempts"]
+        if set(attempt["aperture_ids"]).issubset(active_aperture_ids)
+    ]
+    return {**state, "presentation_attempts": retained}
+
+
+def _presentation_items_digest(items: list[dict]) -> str:
+    return hashlib.sha256(
+        json.dumps(items, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _presentation_receipt(attempt: dict, items: list[dict]) -> dict:
+    return {
+        "ts": attempt["ts"],
+        "type": "conscious.aperture.presentation_attempted",
+        "candidate_ids": [item["candidate_id"] for item in items],
+        "aperture_ids": list(attempt["aperture_ids"]),
+        "consumer_id": attempt["consumer_id"],
+        "turn_id": attempt["turn_id"],
+        "surface": attempt["surface"],
+        "items": items,
+        "host_consumption_confirmed": False,
+    }
 
 
 def _select_fair_claims(
@@ -358,6 +397,16 @@ def open_conscious_aperture(
 
     with store.candidate_transaction():
         candidates = store.read_jsonl("candidates")
+        try:
+            aperture_state = store.read_conscious_aperture_state()
+        except CorruptApertureStateError:
+            return {"success": False, "error": "corrupt_aperture_state"}
+        aperture_state = _prune_presentation_attempts(
+            aperture_state,
+            active_aperture_ids=_active_aperture_ids(
+                candidates, now=now_dt, stale_after_minutes=stale_after_minutes
+            ),
+        )
         canonical_ids = _canonical_source_ids(candidates)
         active = [
             candidate
@@ -401,6 +450,30 @@ def open_conscious_aperture(
             else []
         )
         resumable = sorted(resumable, key=_candidate_sort_key)[:size]
+        renewal_floor = now_dt + timedelta(minutes=lease_duration)
+        resumed_preview_rows: dict[str, dict] = {}
+        renewed_ids: list[str] = []
+        for candidate in resumable:
+            candidate_id = str(candidate.get("id") or "")
+            updated = dict(candidate)
+            ownership = dict(candidate.get("conscious_aperture") or {})
+            existing_expiry = _lease_expiry(
+                candidate, stale_after_minutes=stale_after_minutes
+            )
+            renewed_expiry = max(
+                expiry for expiry in (existing_expiry, renewal_floor) if expiry is not None
+            )
+            renewed_expiry_iso = _format_iso(renewed_expiry)
+            if ownership.get("lease_expires_at") != renewed_expiry_iso:
+                ownership["lease_expires_at"] = renewed_expiry_iso
+                ownership["renewed_at"] = now_iso
+                updated["updated_at"] = now_iso
+                updated["conscious_aperture"] = ownership
+                renewed_ids.append(candidate_id)
+            resumed_preview_rows[candidate_id] = updated
+        resumable = [
+            resumed_preview_rows[str(candidate.get("id") or "")] for candidate in resumable
+        ]
         if legacy_limit_mode and active and not resumable:
             return {
                 "success": True,
@@ -440,12 +513,38 @@ def open_conscious_aperture(
             recovery_eligible,
             fresh_eligible,
             limit=min(remaining_size, available_capacity),
-            last_lane=_last_fairness_lane(store.read_jsonl("decisions")),
+            last_lane=aperture_state["fairness_last_served_lane"],
             stale_after_minutes=stale_after_minutes,
         )
 
         if not selected:
             if resumable:
+                if not dry_run and renewed_ids:
+                    rewritten = [
+                        resumed_preview_rows.get(str(candidate.get("id") or ""), candidate)
+                        for candidate in candidates
+                    ]
+                    store.rewrite_jsonl("candidates", rewritten)
+                    for candidate_id in renewed_ids:
+                        renewed = resumed_preview_rows[candidate_id]["conscious_aperture"]
+                        store.append_jsonl(
+                            "decisions",
+                            {
+                                "ts": now_iso,
+                                "type": "conscious.aperture.renewed",
+                                "candidate_id": candidate_id,
+                                "aperture_id": renewed.get("id", ""),
+                                "consumer_id": owner,
+                                "lease_expires_at": renewed.get("lease_expires_at", ""),
+                            },
+                        )
+                    store.write_conscious_aperture_state(aperture_state)
+                aperture_ids = sorted(
+                    {
+                        str((candidate.get("conscious_aperture") or {}).get("id") or "")
+                        for candidate in resumable
+                    }
+                )
                 return {
                     "success": True,
                     "action": "resumed_aperture",
@@ -454,6 +553,7 @@ def open_conscious_aperture(
                     "selected_count": len(resumable),
                     "pending_count": len(eligible),
                     "candidate_ids": [candidate.get("id") for candidate in resumable],
+                    "aperture_id": aperture_ids[0] if len(aperture_ids) == 1 else "",
                     "reclaimed_candidate_ids": [],
                     "returned_candidate_ids": [],
                     "aperture": [_aperture_item(candidate) for candidate in resumable],
@@ -544,10 +644,26 @@ def open_conscious_aperture(
             return packet
 
         rewritten = [
-            preview_rows.get(str(candidate.get("id") or ""), candidate)
+            preview_rows.get(
+                str(candidate.get("id") or ""),
+                resumed_preview_rows.get(str(candidate.get("id") or ""), candidate),
+            )
             for candidate in candidates
         ]
         store.rewrite_jsonl("candidates", rewritten)
+        for candidate_id in renewed_ids:
+            renewed = resumed_preview_rows[candidate_id]["conscious_aperture"]
+            store.append_jsonl(
+                "decisions",
+                {
+                    "ts": now_iso,
+                    "type": "conscious.aperture.renewed",
+                    "candidate_id": candidate_id,
+                    "aperture_id": renewed.get("id", ""),
+                    "consumer_id": owner,
+                    "lease_expires_at": renewed.get("lease_expires_at", ""),
+                },
+            )
         for candidate in selected:
             candidate_id = str(candidate.get("id") or "")
             if candidate_id in reclaimed_ids:
@@ -584,6 +700,9 @@ def open_conscious_aperture(
                 "fairness_last_served_lane": service_lanes[-1] if service_lanes else None,
             },
         )
+        if service_lanes:
+            aperture_state["fairness_last_served_lane"] = service_lanes[-1]
+        store.write_conscious_aperture_state(aperture_state)
         for candidate_id in returned_ids:
             store.append_jsonl(
                 "decisions",
@@ -606,17 +725,21 @@ def _find_candidate_index(candidates: list[dict], candidate_id: str) -> int | No
 
 
 def _existing_settlement(
-    decisions: list[dict], *, candidate_id: str, aperture_id: str, decision: str
+    candidate: dict, *, candidate_id: str, aperture_id: str, decision: str
 ) -> dict | None:
-    for receipt in reversed(decisions):
-        if receipt.get("type") != "conscious.aperture.settled":
-            continue
-        if receipt.get("candidate_id") != candidate_id:
-            continue
-        if aperture_id and receipt.get("aperture_id") != aperture_id:
-            continue
-        if receipt.get("decision") == decision:
-            return receipt
+    current = candidate.get("conscious_aperture") or {}
+    receipt = current.get("settlement_receipt")
+    if not isinstance(receipt, dict):
+        settlements = candidate.get("conscious_settlements")
+        receipt = settlements[-1] if isinstance(settlements, list) and settlements else None
+    if (
+        isinstance(receipt, dict)
+        and receipt.get("type") == "conscious.aperture.settled"
+        and receipt.get("candidate_id") == candidate_id
+        and (not aperture_id or receipt.get("aperture_id") == aperture_id)
+        and receipt.get("decision") == decision
+    ):
+        return receipt
     return None
 
 
@@ -721,6 +844,10 @@ def record_conscious_aperture_presentation_attempt(
         return {"success": False, "error": "aperture_packet_required"}
     with store.candidate_transaction():
         candidates = store.read_jsonl("candidates")
+        try:
+            aperture_state = store.read_conscious_aperture_state()
+        except CorruptApertureStateError:
+            return {"success": False, "error": "corrupt_aperture_state"}
         validated_items: list[dict] = []
         seen_ids: set[str] = set()
         for item_index, item in enumerate(aperture):
@@ -757,15 +884,25 @@ def record_conscious_aperture_presentation_attempt(
                     "source_binding": _source_binding(candidate),
                 }
             )
-        decisions = store.read_jsonl("decisions")
+        active_ids = _active_aperture_ids(
+            candidates,
+            now=now_dt,
+            stale_after_minutes=DEFAULT_STALE_AFTER_MINUTES,
+        )
+        aperture_state = _prune_presentation_attempts(
+            aperture_state, active_aperture_ids=active_ids
+        )
+        normalized_turn_id = str(turn_id or "")
+        aperture_ids = sorted({item["aperture_id"] for item in validated_items})
+        items_digest = _presentation_items_digest(validated_items)
         existing = next(
             (
-                receipt
-                for receipt in reversed(decisions)
-                if receipt.get("type") == "conscious.aperture.presentation_attempted"
-                and receipt.get("turn_id") == turn_id
-                and receipt.get("consumer_id") == owner
-                and receipt.get("items") == validated_items
+                attempt
+                for attempt in aperture_state["presentation_attempts"]
+                if attempt["turn_id"] == normalized_turn_id
+                and attempt["consumer_id"] == owner
+                and attempt["items_digest"] == items_digest
+                and attempt["aperture_ids"] == aperture_ids
             ),
             None,
         )
@@ -773,19 +910,27 @@ def record_conscious_aperture_presentation_attempt(
             return {
                 "success": True,
                 "action": "presentation_already_attempted",
-                "receipt": existing,
+                "receipt": _presentation_receipt(existing, validated_items),
             }
-        receipt = {
+        turn_conflict = any(
+            attempt["turn_id"] == normalized_turn_id and attempt["consumer_id"] == owner
+            for attempt in aperture_state["presentation_attempts"]
+        )
+        if turn_conflict:
+            return {"success": False, "error": "presentation_turn_conflict"}
+        if len(aperture_state["presentation_attempts"]) >= MAX_PRESENTATION_INDEX_RECORDS:
+            return {"success": False, "error": "presentation_retention_window_exhausted"}
+        attempt = {
             "ts": now_iso,
-            "type": "conscious.aperture.presentation_attempted",
-            "candidate_ids": [item["candidate_id"] for item in validated_items],
-            "aperture_ids": sorted({item["aperture_id"] for item in validated_items}),
             "consumer_id": owner,
-            "turn_id": str(turn_id or ""),
+            "turn_id": normalized_turn_id,
             "surface": str(surface or "local"),
-            "items": validated_items,
-            "host_consumption_confirmed": False,
+            "aperture_ids": aperture_ids,
+            "items_digest": items_digest,
         }
+        receipt = _presentation_receipt(attempt, validated_items)
+        aperture_state["presentation_attempts"].append(attempt)
+        store.write_conscious_aperture_state(aperture_state)
         store.append_jsonl("decisions", receipt)
         return {
             "success": True,
@@ -905,7 +1050,7 @@ def settle_conscious_aperture_item(
                     "expected_consumer_id": expected_consumer_id,
                 }
         existing = _existing_settlement(
-            store.read_jsonl("decisions"),
+            candidate,
             candidate_id=candidate_id,
             aperture_id=actual_aperture_id,
             decision=normalized_decision,
@@ -979,6 +1124,7 @@ def settle_conscious_aperture_item(
                 "settled_at": now_iso,
                 "decision": normalized_decision,
                 "reason": truncate_text(reason, 240),
+                "settlement_receipt": receipt,
             }
         )
         updated["conscious_aperture"] = updated_aperture

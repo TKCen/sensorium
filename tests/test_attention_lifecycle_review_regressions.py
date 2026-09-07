@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_sensorium.conscious_aperture import (
+    MAX_PRESENTATION_INDEX_RECORDS,
     open_conscious_aperture,
     record_conscious_aperture_presentation_attempt,
     settle_conscious_aperture_item,
@@ -285,6 +286,253 @@ def test_capacity_one_persists_alternation_so_neither_lane_starves(tmp_path):
         )
     assert picks[:2] == ["stale", "fresh-0"]
     assert lanes == ["recovery", "fresh", "recovery", "fresh"]
+
+
+def test_foreground_open_and_presentation_decode_zero_decision_rows(tmp_path, monkeypatch):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    for index in range(600):
+        store.append_jsonl("decisions", {"type": "unrelated.audit", "index": index})
+    store.append_jsonl("candidates", _candidate("bounded"))
+    original_read = store.read_jsonl
+    decision_reads = 0
+
+    def reject_decision_reads(name, limit=None):
+        nonlocal decision_reads
+        if name == "decisions":
+            decision_reads += 1
+            raise AssertionError("foreground decoded the lifetime decision log")
+        return original_read(name, limit=limit)
+
+    monkeypatch.setattr(store, "read_jsonl", reject_decision_reads)
+    packet = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    attempted = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-1",
+        surface="local", now="2026-06-07T12:01:00Z",
+    )
+    settled = settle_conscious_aperture_item(
+        store, candidate_id="bounded", aperture_id=packet["aperture_id"],
+        consumer_id="owner", decision="SETTLED", reason="No audit lookup.",
+        dry_run=False, now="2026-06-07T12:02:00Z",
+    )
+    assert packet["success"] is attempted["success"] is settled["success"] is True
+    assert attempted["action"] == "presentation_attempt_recorded"
+    assert decision_reads == 0
+
+
+def test_fairness_state_survives_unrelated_audit_volume(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    for index in range(600):
+        store.append_jsonl("decisions", {"type": "unrelated.audit", "index": index})
+    store.rewrite_jsonl("candidates", [_expired("recovery-0"), _candidate("fresh-0")])
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner-0",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    first_item = first["aperture"][0]
+    settle_conscious_aperture_item(
+        store, candidate_id=first_item["candidate_id"], aperture_id=first_item["aperture_id"],
+        consumer_id="owner-0", decision="SETTLED", reason="Advance fairness.",
+        dry_run=False, now="2026-06-07T12:00:30Z",
+    )
+    rows = store.read_jsonl("candidates")
+    rows.append(_expired("recovery-1"))
+    store.rewrite_jsonl("candidates", rows)
+    second = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner-1",
+        dry_run=False, now="2026-06-07T12:01:00Z",
+    )
+    assert first["fairness_service_lanes"] == ["recovery"]
+    assert second["fairness_service_lanes"] == ["fresh"]
+
+
+def test_presentation_duplicate_is_idempotent_and_new_turn_is_recordable(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("presented"))
+    packet = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    first = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-1",
+        surface="local", now="2026-06-07T12:01:00Z",
+    )
+    duplicate = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-1",
+        surface="local", now="2026-06-07T12:02:00Z",
+    )
+    next_turn = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-2",
+        surface="local", now="2026-06-07T12:03:00Z",
+    )
+    attempts = [
+        row for row in store.read_jsonl("decisions")
+        if row.get("type") == "conscious.aperture.presentation_attempted"
+    ]
+    assert first["action"] == "presentation_attempt_recorded"
+    assert duplicate["action"] == "presentation_already_attempted"
+    assert duplicate["receipt"] == first["receipt"]
+    assert next_turn["action"] == "presentation_attempt_recorded"
+    assert [row["turn_id"] for row in attempts] == ["turn-1", "turn-2"]
+
+
+def test_bounded_presentation_index_fails_closed_instead_of_evicting_replay_keys(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("bounded-index"))
+    packet = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    for index in range(MAX_PRESENTATION_INDEX_RECORDS):
+        result = record_conscious_aperture_presentation_attempt(
+            store, aperture=packet["aperture"], consumer_id="owner",
+            turn_id=f"turn-{index}", surface="local", now="2026-06-07T12:01:00Z",
+        )
+        assert result["action"] == "presentation_attempt_recorded"
+    before = store.read_jsonl("decisions")
+    refused = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-overflow",
+        surface="local", now="2026-06-07T12:02:00Z",
+    )
+    replay = record_conscious_aperture_presentation_attempt(
+        store, aperture=packet["aperture"], consumer_id="owner", turn_id="turn-0",
+        surface="local", now="2026-06-07T12:03:00Z",
+    )
+    assert refused["error"] == "presentation_retention_window_exhausted"
+    assert replay["action"] == "presentation_already_attempted"
+    assert store.read_jsonl("decisions") == before
+
+
+def test_corrupt_aperture_state_fails_closed_without_audit_scan_or_mutation(
+    tmp_path, monkeypatch
+):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("corrupt-open"))
+    state_path = store.root / "inner_life" / "conscious_aperture_state.json"
+    state_path.write_text("{broken", encoding="utf-8")
+    before_candidates = store.read_jsonl("candidates")
+    original_read = store.read_jsonl
+
+    def reject_decision_reads(name, limit=None):
+        if name == "decisions":
+            raise AssertionError("corrupt-state fallback scanned audit history")
+        return original_read(name, limit=limit)
+
+    monkeypatch.setattr(store, "read_jsonl", reject_decision_reads)
+    result = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    assert result == {"success": False, "error": "corrupt_aperture_state"}
+    assert original_read("candidates") == before_candidates
+
+    presentation_store = SensoriumStore(
+        instance="presentation", state_dir=str(tmp_path / "presentation")
+    )
+    presentation_store.append_jsonl("candidates", _candidate("corrupt-presentation"))
+    packet = open_conscious_aperture(
+        presentation_store, aperture_size=1, max_active_items=1, consumer_id="owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    presentation_store.conscious_aperture_state_path.write_text("[]", encoding="utf-8")
+    before_decisions = presentation_store.read_jsonl("decisions")
+    presentation_read = presentation_store.read_jsonl
+
+    def reject_presentation_decision_reads(name, limit=None):
+        if name == "decisions":
+            raise AssertionError("corrupt presentation state scanned audit history")
+        return presentation_read(name, limit=limit)
+
+    monkeypatch.setattr(presentation_store, "read_jsonl", reject_presentation_decision_reads)
+    attempted = record_conscious_aperture_presentation_attempt(
+        presentation_store, aperture=packet["aperture"], consumer_id="owner",
+        turn_id="turn-corrupt", surface="local", now="2026-06-07T12:01:00Z",
+    )
+    assert attempted == {"success": False, "error": "corrupt_aperture_state"}
+    assert presentation_read("decisions") == before_decisions
+
+
+def test_resumed_lease_renews_atomically_and_settles_after_old_expiry(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("resumed"))
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner", lease_minutes=5,
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    original_item = first["aperture"][0]
+    resumed = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner", lease_minutes=5,
+        dry_run=False, now="2026-06-07T12:04:59Z",
+    )
+    resumed_item = resumed["aperture"][0]
+    persisted = store.read_jsonl("candidates")[0]["conscious_aperture"]
+    assert resumed["action"] == "resumed_aperture"
+    assert resumed_item["aperture_id"] == original_item["aperture_id"]
+    assert resumed_item["lease_expires_at"] == "2026-06-07T12:09:59Z"
+    assert persisted["lease_expires_at"] == resumed_item["lease_expires_at"]
+    attempted = record_conscious_aperture_presentation_attempt(
+        store, aperture=resumed["aperture"], consumer_id="owner", turn_id="turn-after-old",
+        surface="local", now="2026-06-07T12:05:01Z",
+    )
+    settled = settle_conscious_aperture_item(
+        store, candidate_id="resumed", aperture_id=resumed_item["aperture_id"],
+        consumer_id="owner", decision="SETTLED", reason="Renewed lease remains truthful.",
+        dry_run=False, now="2026-06-07T12:05:02Z",
+    )
+    assert attempted["success"] is settled["success"] is True
+
+
+def test_mixed_resumed_and_fresh_packet_has_full_processing_interval(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("resumed"))
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=2, consumer_id="owner", lease_minutes=5,
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    store.append_jsonl("candidates", _candidate("fresh"))
+    mixed = open_conscious_aperture(
+        store, aperture_size=2, max_active_items=2, consumer_id="owner", lease_minutes=10,
+        dry_run=False, now="2026-06-07T12:04:59Z",
+    )
+    expiries = {item["candidate_id"]: item["lease_expires_at"] for item in mixed["aperture"]}
+    assert set(expiries) == {"resumed", "fresh"}
+    assert set(expiries.values()) == {"2026-06-07T12:14:59Z"}
+    assert next(item for item in mixed["aperture"] if item["candidate_id"] == "resumed")[
+        "aperture_id"
+    ] == first["aperture_id"]
+
+
+def test_resume_never_shortens_dry_run_is_immutable_and_wrong_owner_is_fenced(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("long"))
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner", lease_minutes=30,
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    before_candidates = (store.root / "candidates.jsonl").read_bytes()
+    state_path = store.root / "inner_life" / "conscious_aperture_state.json"
+    before_state = state_path.read_bytes()
+    dry = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner", lease_minutes=5,
+        dry_run=True, now="2026-06-07T12:10:00Z",
+    )
+    wrong = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="other", lease_minutes=60,
+        dry_run=False, now="2026-06-07T12:11:00Z",
+    )
+    resumed = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="owner", lease_minutes=5,
+        dry_run=False, now="2026-06-07T12:10:00Z",
+    )
+    assert dry["aperture"][0]["lease_expires_at"] == "2026-06-07T12:30:00Z"
+    assert (store.root / "candidates.jsonl").read_bytes() == before_candidates
+    assert state_path.read_bytes() == before_state
+    assert wrong["action"] == "active_aperture_exists"
+    assert wrong["candidate_ids"] == []
+    assert resumed["aperture"][0]["lease_expires_at"] == "2026-06-07T12:30:00Z"
+    assert resumed["aperture_id"] == first["aperture_id"]
 
 
 def test_mixed_lane_order_is_stable_by_time_then_id_under_reordering(tmp_path):
