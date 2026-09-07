@@ -658,7 +658,7 @@ class TestRuntimeKanbanBridgeIntakeRows:
         """Regression: no `subconscious_worker` ghost assignee in any intake path.
 
         The bridge must default to a profile that the Hermes dispatcher
-        actually knows about (currently ``serasubconscious``) so newly minted
+        can claim so newly minted
         `sensor:intake:*` rows are immediately claimable. Override via
         ``SENSORIUM_SUBCONSCIOUS_PROFILE`` is honored, but the hardcoded
         fallback must never reintroduce the legacy ghost name.
@@ -669,7 +669,7 @@ class TestRuntimeKanbanBridgeIntakeRows:
         # 1. The module's default profile constant must not be the ghost.
         assert bridge.PROFILE != "subconscious_worker", (
             f"{label}: bridge.PROFILE still defaults to the ghost 'subconscious_worker'; "
-            "update the script default to a real Hermes profile (e.g. 'serasubconscious')."
+            "update the script default to a claimable Hermes profile."
         )
 
         # 2. Drive both intake paths and assert no emitted command argument

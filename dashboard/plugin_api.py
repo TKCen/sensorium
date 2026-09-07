@@ -1898,7 +1898,7 @@ _PATH_SHAPED_RE = re.compile(r"[\\/]")
 def _topology_safe_label(value: Any, *, limit: int = 80) -> str:
     """Privacy-safe topology display label, stricter than generic surface text.
 
-    sera-ck9.3.2 label policy: `/topology` labels are the primary flow-DAG UI
+    Flow-DAG label policy: `/topology` labels are the primary UI
     affordance (rendered directly as node text), unlike most compact
     summaries elsewhere in this module which stay free-form. `_safe_surface_text`
     alone only catches secret-shaped strings (api keys, tokens, …), not local
@@ -2038,7 +2038,7 @@ _RUNTIME_STATUSES = {
     "active", "quiet", "degraded", "error", "processing", "waiting",
     "reviewing", "blocked", "held", "settled", "stale",
 }
-# sera-ck9.3 runtime-status vocabulary polish: not every member is emitted by
+# Runtime-status vocabulary note: not every member is emitted by
 # this slice yet. Documenting why, rather than emitting a guessed value:
 #   - "degraded": reserved for a future honest per-node processor/gate
 #     degradation signal; today only the instance-wide `is_stale` freshness
@@ -2049,7 +2049,7 @@ _RUNTIME_STATUSES = {
 #     receipt still lives in `/snapshot` perception traces and `/graph`, but a
 #     reviewed candidate must not look like live review pressure in the Flow DAG.
 # "waiting" for candidates also covers the `candidate -> waiting` semantics
-# noted in sera-ck9.2: an unreviewed `candidate` status row means "awaiting
+# An unreviewed `candidate` status row means "awaiting
 # Subconscious review", not literally idle/quiet, which is why it maps to
 # "waiting" instead of falling through to the "quiet" default.
 _RUNTIME_STALE_SECONDS = 24 * 60 * 60
@@ -2103,7 +2103,7 @@ def _recent_signal_sensors(root: Path, *, limit: int = 200) -> set[str]:
 
     `signals/inbox.jsonl` rows already carry a `sensor` field naming the same
     registry block id /topology projects, so this is the one honest per-node
-    runtime-activity signal available today (see sera-ck9-2 task guidance on
+    runtime-activity signal available today (see runtime-status guidance on
     not fabricating processor/gate runtime state).
     """
     rows, _ = _read_jsonl(root, "signals", limit=limit)
@@ -2451,7 +2451,7 @@ async def topology(instance: str | None = None) -> dict[str, Any]:
     additionally feeds config_version). Nodes/edges reflect configured topology,
     not runtime history, so configured-but-quiet sensors appear even with zero
     JSONL rows. Processor/gate internals have no registry representation yet;
-    this slice covers sensor registry blocks/edges (sera-ck9.1) and leaves
+    this slice covers sensor registry blocks/edges and leaves
     richer processor/gate coverage for a follow-up slice.
     """
     resolved = _resolve_instance(instance)
@@ -2476,7 +2476,7 @@ async def topology(instance: str | None = None) -> dict[str, Any]:
 
 @router.get("/runtime-status")
 async def runtime_status(instance: str | None = None) -> dict[str, Any]:
-    """Read-only compact-only runtime status overlay for the flow DAG (sera-ck9.2).
+    """Read-only compact-only runtime status overlay for the flow DAG.
 
     Overlays a closed-vocabulary runtime status onto every /topology node, plus
     a bounded set of active runtime instance nodes (candidates/threads/actions/
@@ -2674,7 +2674,7 @@ def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 
 def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
     """Trace for a configured `/topology` node: configured neighbors plus its current runtime overlay status.
 
-    Config refs name the sanitized config source/kind/version (sera-ck9.3
+    Config refs name the sanitized config source/kind/version (flow-DAG
     honesty requirement), never a raw file path or config blob. There is no
     honest per-node runtime timestamp source for configured topology nodes
     yet, so `timestamps` stays empty with a `limitations` note instead of
@@ -3130,7 +3130,7 @@ def _trace_outbox(root: Path, outbox_node_id: str) -> dict[str, Any] | None:
 
 @router.get("/trace")
 async def trace(node_id: str | None = None, edge_id: str | None = None, instance: str | None = None) -> dict[str, Any]:
-    """Read-only compact-only trace/provenance projection for one selected node or edge (sera-ck9.3).
+    """Read-only compact-only trace/provenance projection for one selected node or edge.
 
     Answers "where did this come from, what influenced it, what does it lead
     to" for whatever a user selects in the flow-DAG UI:

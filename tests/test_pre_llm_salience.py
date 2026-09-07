@@ -74,13 +74,16 @@ class TestSalienceContextForLl:
         assert "sensorium(action='ingest')" in ctx
         assert "sensorium_ingest_signal" not in ctx
 
-    def test_uses_generic_user_language(self):
-        """The reusable hook should not hard-code Sera/operator wording."""
+    def test_uses_generic_user_language(self, monkeypatch):
+        """The reusable hook stays generic across configured identity/profile values."""
+        private_identity = "PrivateAssistantFixture"
+        monkeypatch.setenv("HERMES_PROFILE", private_identity)
+        monkeypatch.setenv("SENSORIUM_SUBCONSCIOUS_PROFILE", private_identity)
         ctx = salience_context_for_llm()
         assert "your user" in ctx
         assert "you or your user" in ctx
         assert "operator" not in ctx.lower()
-        assert "Sera" not in ctx
+        assert private_identity not in ctx
 
     def test_context_is_small(self):
         ctx = salience_context_for_llm()

@@ -1,4 +1,4 @@
-"""Tests for the GET-only trace/provenance projection (sera-ck9.3)."""
+"""Tests for the GET-only trace/provenance projection."""
 
 import asyncio
 import importlib.util

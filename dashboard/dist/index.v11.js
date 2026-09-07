@@ -425,7 +425,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Flow DAG (sera-ck9.3): primary graph view. Fetches /topology +
+  // Flow DAG: primary graph view. Fetches /topology +
   // /runtime-status and merges them client-side instead of reusing the
   // /snapshot-shaped inner-life projection below. Configured-but-unobserved
   // topology nodes are first-class here (they come straight from /topology,
@@ -507,7 +507,7 @@
     "memory reflection": "Reflects compact memory pressure before it becomes candidate attention.",
     "signal inbox": "Aggregates incoming signals/events before gates or review choose what matters.",
     "promotion gate": "Decides whether pressure stays quiet, becomes a candidate, or opens review.",
-    "conscious aperture": "Foreground/conscious review lane for choices that need Sera-level judgment.",
+    "conscious aperture": "Foreground/conscious review lane for choices that require deliberate judgment.",
     "subconscious review": "Cheap/background triage that classifies candidates before conscious work.",
     "attention inbox": "Visible attention surface: what can be offered or opened now.",
     "kanban bridge": "Converts approved durable work into task-board pressure without owning judgment.",

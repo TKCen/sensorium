@@ -1,4 +1,4 @@
-"""Tests for the GET-only runtime status overlay contract (sera-ck9.2)."""
+"""Tests for the GET-only runtime status overlay contract."""
 
 import asyncio
 import importlib.util
@@ -266,7 +266,7 @@ def test_runtime_status_marks_stale_when_canonical_state_is_old(tmp_path, monkey
 
 
 def test_runtime_status_thread_action_outbox_truncation_flags(tmp_path, monkeypatch):
-    """sera-ck9.3 polish: truncated_threads/actions/outbox flags are cheap to verify, not just candidates."""
+    """Truncated thread/action/outbox flags are cheap to verify, not just candidates."""
     root = tmp_path / "sensorium" / "demo"
     _write_registry(root, blocks={})
     for i in range(25):
