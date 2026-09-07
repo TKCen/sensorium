@@ -50,7 +50,7 @@ def test_dry_run_previews_bounded_candidates_without_mutation(tmp_path):
     result = open_conscious_aperture(store, aperture_size=2, dry_run=True, now="2026-06-07T12:00:00Z")
 
     assert result["action"] == "would_open_aperture"
-    assert result["candidate_ids"] == ["high", "mid"]
+    assert result["candidate_ids"] == ["high", "low"]
     assert result["selected_count"] == 2
     assert [c["status"] for c in store.read_jsonl("candidates")] == ["candidate", "candidate", "candidate"]
     assert store.read_jsonl("decisions") == []
@@ -164,6 +164,7 @@ def test_settle_aperture_item_marks_reviewed_and_records_receipt(tmp_path):
         store,
         candidate_id="one",
         aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session",
         decision="REVIEWED",
         reason="Conscious reviewed the canary and no external work is needed.",
         dry_run=False,
@@ -214,7 +215,8 @@ def test_held_checkpoint_returns_only_when_due_and_retains_context_once(tmp_path
     opened = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z")
 
     held = settle_conscious_aperture_item(
-        store, candidate_id="returning", aperture_id=opened["aperture_id"], decision="HELD",
+        store, candidate_id="returning", aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session", decision="HELD",
         reason="Return this to conscious attention later.", return_at="2026-06-07T13:00:00Z",
         dry_run=False, now="2026-06-07T12:05:00Z",
     )
@@ -254,6 +256,7 @@ def test_fractional_held_checkpoint_preserves_precision_until_due(tmp_path):
         store,
         candidate_id="fractional",
         aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session",
         decision="HELD",
         reason="Preserve the exact checkpoint instant.",
         return_at="2026-06-07T13:00:00.123456Z",
@@ -318,7 +321,8 @@ def test_held_checkpoint_rejects_malformed_or_nonfuture_timestamp(tmp_path):
         "2026-06-07T13:00:00Z ",
     ):
         result = settle_conscious_aperture_item(
-            store, candidate_id="one", aperture_id=opened["aperture_id"], decision="HELD",
+            store, candidate_id="one", aperture_id=opened["aperture_id"],
+            consumer_id="conscious-session", decision="HELD",
             reason="Hold only with a valid future UTC checkpoint.", return_at=value,
             dry_run=False, now="2026-06-07T12:00:00Z",
         )
@@ -331,11 +335,13 @@ def test_settle_aperture_item_records_external_work_spec_without_worker_request(
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "sensorium"))
     store.ensure_dirs()
     store.append_jsonl("candidates", _candidate("one", pressure=0.8, request_type="DELEGATE_WORK"))
-    open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z")
+    opened = open_conscious_aperture(store, aperture_size=1, dry_run=False, now="2026-06-07T12:00:00Z")
 
     result = settle_conscious_aperture_item(
         store,
         candidate_id="one",
+        aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session",
         decision="PREPARED_EXTERNAL_WORK",
         reason="A bounded Kanban cleanup request should be prepared later.",
         external_work={
@@ -366,6 +372,7 @@ def test_settle_aperture_item_is_idempotent(tmp_path):
         store,
         candidate_id="one",
         aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session",
         decision="REVIEWED",
         reason="Done.",
         dry_run=False,
@@ -375,6 +382,7 @@ def test_settle_aperture_item_is_idempotent(tmp_path):
         store,
         candidate_id="one",
         aperture_id=opened["aperture_id"],
+        consumer_id="conscious-session",
         decision="REVIEWED",
         reason="Done.",
         dry_run=False,
@@ -396,6 +404,7 @@ def test_settle_cli_applies_record(tmp_path):
     record = {
         "candidate_id": "cli_settle",
         "aperture_id": opened["aperture_id"],
+        "consumer_id": "conscious-session",
         "decision": "SETTLED",
         "reason": "CLI settlement path verified.",
     }
@@ -466,9 +475,15 @@ def test_wake_tick_opens_and_applies_settlement_without_worker_request(tmp_path)
     store = SensoriumStore(instance="test", state_dir=str(state_dir))
     store.ensure_dirs()
     store.append_jsonl("candidates", _candidate("wake_settle", pressure=0.8))
+    opened = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="wake-owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
     settlement_file = tmp_path / "settlement.json"
     settlement_file.write_text(json.dumps({
         "candidate_id": "wake_settle",
+        "aperture_id": opened["aperture_id"],
+        "consumer_id": "wake-owner",
         "decision": "REVIEWED",
         "reason": "Wake runner applied explicit Conscious settlement.",
     }))
@@ -498,7 +513,7 @@ def test_wake_tick_opens_and_applies_settlement_without_worker_request(tmp_path)
 
     payload = json.loads(proc.stdout)
     assert payload["success"] is True
-    assert payload["aperture"]["action"] == "opened_aperture"
+    assert payload["aperture"]["action"] == "active_aperture_exists"
     assert payload["settlements"]["applied"] == 1
     assert payload["worker_requests"]["delta"] == 0
     candidate = store.read_jsonl("candidates")[0]
@@ -512,9 +527,15 @@ def test_wake_tick_applies_held_return_checkpoint(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(state_dir))
     store.ensure_dirs()
     store.append_jsonl("candidates", _candidate("wake_return", pressure=0.8))
+    opened = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="wake-owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
     settlement_file = tmp_path / "settlement.json"
     settlement_file.write_text(json.dumps({
         "candidate_id": "wake_return",
+        "aperture_id": opened["aperture_id"],
+        "consumer_id": "wake-owner",
         "decision": "HELD",
         "reason": "Return this through the aperture later.",
         "return_at": "2026-06-07T13:00:00Z",
@@ -548,6 +569,7 @@ def test_wake_tick_applies_held_return_checkpoint(tmp_path):
     assert payload["success"] is True
     assert payload["settlements"]["applied"] == 1
     assert payload["settlement_record_shape"]["return_at"] == "optional future UTC-Z checkpoint for HELD"
+    assert payload["settlement_record_shape"]["consumer_id"] == "required exact owner token"
     assert candidate["status"] == "held"
     assert candidate["held_return"] == {
         "not_before": "2026-06-07T13:00:00Z",

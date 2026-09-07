@@ -172,9 +172,11 @@ def test_duplicate_and_noise_rows_are_ineligible(tmp_path):
 class _PluginContext:
     def __init__(self):
         self.tools = {}
+        self.schemas = {}
         self.hooks = []
     def register_tool(self, *, name, handler, **kwargs):
         self.tools[name] = handler
+        self.schemas[name] = kwargs.get("schema")
     def register_hook(self, name, handler):
         if name == "pre_llm_call":
             self.hooks.append(handler)
@@ -184,7 +186,7 @@ class _PluginContext:
         pass
 
 
-def test_foreground_doorway_consumes_resumes_and_live_tool_settles(tmp_path, monkeypatch):
+def test_foreground_doorway_attempts_resumes_and_live_tool_settles(tmp_path, monkeypatch):
     import agent_sensorium.store as store_module
     root = tmp_path / "profiles"
     monkeypatch.setenv("AGENT_SENSORIUM_ROOT", str(root))
@@ -205,18 +207,40 @@ def test_foreground_doorway_consumes_resumes_and_live_tool_settles(tmp_path, mon
     assert "Review Agent" in first["context"]
     assert "alpha" in first["context"] and "beta" in first["context"]
     assert "sensorium(action=\"update\"" in first["context"]
-    consumed = [d for d in store.read_jsonl("decisions") if d.get("type") == "conscious.aperture.consumed"]
-    assert len(consumed) == 4
+    attempts = [d for d in store.read_jsonl("decisions") if d.get("type") == "conscious.aperture.presentation_attempted"]
+    assert len(attempts) == 2
+    assert all(row["host_consumption_confirmed"] is False for row in attempts)
+    assert not [d for d in store.read_jsonl("decisions") if d.get("type") == "conscious.aperture.consumed"]
     row = store.read_jsonl("candidates")[0]
     ctx = _PluginContext()
     register(ctx)
     payload = json.loads(ctx.tools["sensorium"]({
         "action": "update", "instance": "generic", "id": "alpha",
-        "aperture_id": row["conscious_aperture"]["id"], "keyword": "settle",
+        "aperture_id": row["conscious_aperture"]["id"],
+        "consumer_id": row["conscious_aperture"]["consumer_id"], "keyword": "settle",
         "text": "Foreground review completed.", "surface": "local",
     }, session_id="session-a"))
     assert payload["success"] is True
     assert payload["data"]["action"] == "settled_aperture_item"
+    assert "consumer_id" in ctx.schemas["sensorium"]["parameters"]["properties"]
+    assert "prepared_external_work" not in ctx.schemas["sensorium"]["parameters"]["properties"]["keyword"]["description"]
+    beta = next(item for item in store.read_jsonl("candidates") if item["id"] == "beta")
+    omitted_owner = json.loads(ctx.tools["sensorium"]({
+        "action": "update", "instance": "generic", "id": "beta",
+        "aperture_id": beta["conscious_aperture"]["id"], "keyword": "settle",
+        "text": "Missing owner token.", "surface": "local",
+    }))
+    assert omitted_owner["success"] is False
+    assert omitted_owner["error"] == "consumer_id_required"
+    unsupported = json.loads(ctx.tools["sensorium"]({
+        "action": "update", "instance": "generic", "id": "beta",
+        "aperture_id": beta["conscious_aperture"]["id"],
+        "consumer_id": beta["conscious_aperture"]["consumer_id"],
+        "keyword": "prepared_external_work", "text": "Unsupported compact decision.",
+        "surface": "local",
+    }))
+    assert unsupported["success"] is False
+    assert next(item for item in store.read_jsonl("candidates") if item["id"] == "beta")["status"] == "in_conscious_aperture"
     assert store.read_jsonl("outbox") == store.read_jsonl("worker_requests") == []
 
 

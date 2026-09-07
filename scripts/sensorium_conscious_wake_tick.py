@@ -11,11 +11,12 @@ sensorium_conscious_aperture_settle.py:
 
     {
       "candidate_id": "cand_...",
-      "aperture_id": "cap_...",  # optional; inferred from candidate when absent
+      "aperture_id": "cap_...",       # required exact lease token
+      "consumer_id": "consumer-...",  # required exact owner token
       "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
       "reason": "short Conscious decision rationale",
       "return_at": "2026-06-07T13:00:00Z",  # optional; HELD-only future UTC checkpoint
-      "external_work": { ... }     # optional recorded spec; no dispatch
+      "external_work": { ... }     # required for PREPARED_EXTERNAL_WORK; no dispatch
     }
 """
 from __future__ import annotations
@@ -94,7 +95,7 @@ def main() -> int:
             store,
             candidate_id=record.get("candidate_id", ""),
             aperture_id=record.get("aperture_id"),
-            consumer_id=record.get("consumer_id") or args.consumer_id,
+            consumer_id=record.get("consumer_id"),
             decision=record.get("decision", ""),
             reason=record.get("reason", ""),
             return_at=record.get("return_at"),
@@ -130,11 +131,12 @@ def main() -> int:
         ),
         "settlement_record_shape": {
             "candidate_id": "cand_...",
-            "aperture_id": "optional cap_...",
+            "aperture_id": "required exact cap_...",
+            "consumer_id": "required exact owner token",
             "decision": "REVIEWED | HELD | SETTLED | PREPARED_EXTERNAL_WORK",
             "reason": "short Conscious decision rationale",
             "return_at": "optional future UTC-Z checkpoint for HELD",
-            "external_work": "optional prepared spec",
+            "external_work": "required validated spec for PREPARED_EXTERNAL_WORK",
         },
     }
     print(json.dumps(output, indent=2, sort_keys=True))

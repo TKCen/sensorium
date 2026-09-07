@@ -44,7 +44,7 @@ Signals  →  Events  →  Candidates  →  Conscious thread capsules
 
 Core pieces:
 
-- **Plugin registration (`agent_sensorium/plugin.py`)** — registers one live tool, the admin toolset, two `pre_llm_call` hooks, and the bundled skill.
+- **Plugin registration (`agent_sensorium/plugin.py`)** — registers one live tool, the admin toolset, three `pre_llm_call` hooks, and the bundled skill.
 - **Profile state (`agent_sensorium/store.py`, `config.py`)** — stores signals, events, candidates, threads, decisions, artifacts, and per-profile config under `~/.hermes/agent-sensorium/<profile>/`.
 - **Gate and promotion pipeline (`gate.py`, `attention.py`, `threads.py`)** — normalizes salience, applies sensitivity/surface policy, and builds candidate/thread state.
 - **Memory Volunteering Protocol (`docs/memory-volunteering-protocol.md`)** — formalizes the evidence-cited capsule → transparent confidence proposal → Conscious authorization sequence for any Subconscious/Sensorium path that wants to volunteer memory, insight, or offer candidates.
@@ -269,13 +269,13 @@ Changing these files does not require a gateway restart. Restart/new-session is 
 
 Three `pre_llm_call` hooks run automatically before each LLM call:
 
-1. **Recoverable Conscious doorway** — When explicitly enabled in profile config, leases a small bounded set of source-bound advisory candidates, records foreground consumption, and injects exact settlement calls. Unresolved items remain semantically open and can be resumed by the same consumer or reclaimed after lease expiry.
+1. **Recoverable Conscious doorway** — When explicitly enabled in profile config, leases a small bounded set of source-bound advisory candidates, records one packet-level `presentation_attempted` receipt, and returns proposed context with exact ownership tokens and settlement calls. The hook return does not prove that Hermes incorporated the context into the model API request. Unresolved items remain semantically open and can be resumed by the same consumer or reclaimed after lease expiry.
 
 2. **Pending-thread pointer injection** — If a conscious thread capsule is pending review, a compact pointer is prepended to the context window. The agent sees that something is waiting; it does not see the full capsule content until it explicitly calls `sensorium(action="open", ...)`.
 
 3. **Live salience-capture reminder** — A lightweight reminder that the sensorium is active and available. This keeps the `sensorium(action="ingest", ...)` pathway salient without consuming significant context.
 
-The pointer and salience hooks are read-only from the pipeline perspective. The optional Conscious doorway writes only local lease/consumption receipts; it never dispatches or grants outbound authority. See `docs/conscious-attention-lifecycle.md`.
+The pointer and salience hooks are read-only from the pipeline perspective. The optional Conscious doorway writes only local lease/presentation-attempt receipts; it never records canonical consumption, dispatches, or grants outbound authority. See `docs/conscious-attention-lifecycle.md`.
 
 ---
 

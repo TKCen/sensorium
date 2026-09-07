@@ -54,7 +54,7 @@ def register(ctx) -> None:
     from .commands import handle_sensorium_command
     from .config import load_instance_config
     from .conscious_aperture import settle_conscious_aperture_item
-    from .conscious_doorway import foreground_consumer_id, handle_conscious_doorway_pre_llm
+    from .conscious_doorway import handle_conscious_doorway_pre_llm
     from .conscious_reachout import apply_conscious_reachout_decision
     from .live_turn import (
         build_live_ingest_receipt,
@@ -233,26 +233,28 @@ def register(ctx) -> None:
         if action == "update":
             keyword = str(args.get("keyword") or "mark_reviewed").strip().lower()
             aperture_id = str(args.get("aperture_id") or "").strip()
-            if target_id.startswith("cand_") or aperture_id:
+            consumer_id = str(args.get("consumer_id") or "").strip()
+            if target_id.startswith("cand_") or aperture_id or consumer_id:
                 settlement_decisions = {
                     "mark_reviewed": "REVIEWED",
                     "reviewed": "REVIEWED",
                     "settle": "SETTLED",
                     "hold": "HELD",
-                    "prepared_external_work": "PREPARED_EXTERNAL_WORK",
                 }
-                if aperture_id and keyword in settlement_decisions:
-                    store = SensoriumStore(instance=instance)
-                    session_id = str(kw.get("session_id") or "").strip()
+                store = SensoriumStore(instance=instance)
+                current_lease = any(
+                    row.get("id") == target_id
+                    and row.get("status") == "in_conscious_aperture"
+                    for row in store.read_jsonl("candidates")
+                )
+                if keyword in settlement_decisions and (
+                    aperture_id or consumer_id or current_lease
+                ):
                     result = settle_conscious_aperture_item(
                         store,
                         candidate_id=target_id,
                         aperture_id=aperture_id,
-                        consumer_id=(
-                            foreground_consumer_id(session_id=session_id)
-                            if session_id
-                            else None
-                        ),
+                        consumer_id=consumer_id,
                         decision=settlement_decisions[keyword],
                         reason=text,
                         return_at=args.get("return_at"),
@@ -366,7 +368,11 @@ def register(ctx) -> None:
                 "id": {"type": "string", "description": "Thread id, or latest."},
                 "aperture_id": {
                     "type": "string",
-                    "description": "Exact Conscious aperture ownership id for foreground settlement.",
+                    "description": "Required exact Conscious aperture ownership id for foreground settlement.",
+                },
+                "consumer_id": {
+                    "type": "string",
+                    "description": "Required exact Conscious consumer ownership id for foreground settlement; never inferred.",
                 },
                 "return_at": {
                     "type": "string",

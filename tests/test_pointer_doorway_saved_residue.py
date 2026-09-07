@@ -88,7 +88,7 @@ def _correction_candidate(**overrides):
         "kind": "explicit_correction",
         "pressure": 0.716,
         "summary": (
-            "Sebastian corrected Sensorium behavior: do not offer/open a thread "
+            "The user corrected Sensorium behavior: do not offer/open a thread "
             "when no openable thread exists; highly relevant arXiv agent "
             "collaboration/governance salience should remain consciously accessible."
         ),

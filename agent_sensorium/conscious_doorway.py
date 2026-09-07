@@ -11,8 +11,8 @@ from .conscious_aperture import (
     DEFAULT_LEASE_MINUTES,
     DEFAULT_MAX_ACTIVE_ITEMS,
     DEFAULT_STALE_AFTER_MINUTES,
-    mark_conscious_aperture_consumed,
     open_conscious_aperture,
+    record_conscious_aperture_presentation_attempt,
 )
 from .schemas import new_id, truncate_text
 from .store import SensoriumStore
@@ -84,6 +84,7 @@ def conscious_doorway_context(packet: dict, *, agent_label: str) -> str:
             {
                 "candidate_id": item.get("candidate_id"),
                 "aperture_id": item.get("aperture_id"),
+                "consumer_id": item.get("consumer_id"),
                 "lease_expires_at": item.get("lease_expires_at"),
                 "summary": item.get("summary"),
                 "task": {
@@ -105,6 +106,7 @@ def conscious_doorway_context(packet: dict, *, agent_label: str) -> str:
         "candidate one conscious decision. To settle an item, call "
         "sensorium(action=\"update\", id=\"<candidate_id>\", "
         "aperture_id=\"<aperture_id>\", keyword=\"settle\", "
+        "consumer_id=\"<consumer_id>\", "
         "text=\"<short reason>\"). To hold it, use keyword=\"hold\" and include a "
         "future UTC-Z return_at checkpoint. If this turn cannot decide, leave the item "
         "unsettled; lease expiry releases execution ownership and the same source-bound "
@@ -121,7 +123,7 @@ def handle_conscious_doorway_pre_llm(
     state_dir: str | None = None,
     config: dict | None = None,
 ) -> dict | None:
-    """Claim, receipt, and inject recoverable attention for one foreground turn."""
+    """Claim and attempt to present recoverable attention for one foreground turn."""
     try:
         store = SensoriumStore(instance=instance, state_dir=state_dir)
         store.ensure_dirs()
@@ -147,22 +149,19 @@ def handle_conscious_doorway_pre_llm(
         if not packet.get("aperture"):
             return None
         receipt_turn_id = str(turn_id or new_id("turn"))
-        for item in packet["aperture"]:
-            consumed = mark_conscious_aperture_consumed(
-                store,
-                candidate_id=str(item.get("candidate_id") or ""),
-                aperture_id=str(item.get("aperture_id") or ""),
-                consumer_id=owner,
-                turn_id=receipt_turn_id,
-                surface=surface,
-            )
-            if not consumed.get("success"):
-                return None
-        return {
-            "context": conscious_doorway_context(
-                packet, agent_label=doorway_config["agent_label"]
-            )
-        }
+        context = conscious_doorway_context(
+            packet, agent_label=doorway_config["agent_label"]
+        )
+        attempted = record_conscious_aperture_presentation_attempt(
+            store,
+            aperture=packet["aperture"],
+            consumer_id=owner,
+            turn_id=receipt_turn_id,
+            surface=surface,
+        )
+        if not attempted.get("success"):
+            return None
+        return {"context": context}
     except Exception:  # noqa: BLE001 - pre-LLM hooks must be failure-isolated.
         # Hook failure must not break the foreground user turn. Any acquired item
         # remains unresolved and becomes claimable again after its bounded lease.

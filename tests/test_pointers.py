@@ -46,7 +46,7 @@ def _candidate(**overrides):
         "id": "cand_livepointer",
         "status": "candidate",
         "kind": "relational_salience",
-        "summary": "Sebastian misses small private presents and wants salience left open for later",
+        "summary": "A user misses small private presents and wants salience left open for later",
         "pressure": 0.82,
         "sensitivity": "private",
         "allowed_surfaces": ["local", "discord"],
@@ -314,7 +314,7 @@ def test_pointer_presented_guard_blocks_title_mismatch(tmp_path):
     assert receipt["outcome"] == "blocked"
     assert receipt["reason"] == "candidate_title_mismatch"
     assert receipt["subject_id"] == "cand_livepointer"
-    assert "Sebastian misses small private presents" in receipt["expected_title"]
+    assert "A user misses small private presents" in receipt["expected_title"]
 
 
 def test_pointer_presented_guard_blocks_saved_residue_without_settlement(tmp_path):
@@ -332,7 +332,7 @@ def test_pointer_presented_guard_blocks_saved_residue_without_settlement(tmp_pat
         "action": "pointer_available",
         "pointer_type": "saved_residue",
         "candidate_id": "cand_livepointer",
-        "title": "Sebastian misses small private presents and wants salience left open for later",
+        "title": "A user misses small private presents and wants salience left open for later",
         "surface": "discord",
     }
     receipt = record_pointer_presented(store, pointer, session_id="s1", surface="discord")
@@ -452,7 +452,7 @@ def test_candidate_pointer_min_turn_gap_uses_user_turn_index_not_pointer_count(t
         session_id="session-a",
         state_dir=str(tmp_path),
         config={"cooldown_minutes": 0},
-        messages=_messages_for_user_turn(4, "Sebastian private presents still matter"),
+        messages=_messages_for_user_turn(4, "private presents still matter"),
     )
     assert turn_4 is not None
     assert "Pointer type: candidate" in turn_4["context"]

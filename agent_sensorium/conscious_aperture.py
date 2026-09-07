@@ -40,6 +40,8 @@ SETTLEMENT_STATUS = {
 }
 
 _FALLBACK_LOCK = threading.RLock()
+RECOVERY_LANE = "recovery"
+FRESH_LANE = "fresh"
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -200,12 +202,80 @@ def _candidate_sort_key(candidate: dict) -> tuple:
     )
 
 
+def _recovery_sort_key(
+    candidate: dict, *, stale_after_minutes: int
+) -> tuple[datetime, str]:
+    """Order recovery work by oldest executable checkpoint, then id."""
+    if candidate.get("status") == "held":
+        checkpoint = parse_utc_z_checkpoint(
+            (candidate.get("held_return") or {}).get("not_before")
+        )
+        due_at = checkpoint[1] if checkpoint is not None else datetime.max.replace(tzinfo=UTC)
+    else:
+        due_at = _lease_expiry(candidate, stale_after_minutes=stale_after_minutes)
+        if due_at is None:
+            due_at = datetime.max.replace(tzinfo=UTC)
+    return due_at, str(candidate.get("id") or "")
+
+
+def _fresh_sort_key(candidate: dict) -> tuple[datetime, str]:
+    """Order fresh work by creation time, then id, independent of input order."""
+    created_at = _parse_iso(candidate.get("created_at"))
+    if created_at is None:
+        created_at = datetime.max.replace(tzinfo=UTC)
+    return created_at, str(candidate.get("id") or "")
+
+
+def _last_fairness_lane(decisions: list[dict]) -> str | None:
+    for receipt in reversed(decisions):
+        if receipt.get("type") != "conscious.aperture.opened":
+            continue
+        lane = receipt.get("fairness_last_served_lane")
+        if lane in {RECOVERY_LANE, FRESH_LANE}:
+            return str(lane)
+    return None
+
+
+def _select_fair_claims(
+    recovery: list[dict],
+    fresh: list[dict],
+    *,
+    limit: int,
+    last_lane: str | None,
+    stale_after_minutes: int,
+) -> tuple[list[dict], list[str]]:
+    """Alternate persisted service between recovery and fresh claim lanes."""
+    recovery = sorted(
+        recovery,
+        key=lambda candidate: _recovery_sort_key(
+            candidate, stale_after_minutes=stale_after_minutes
+        ),
+    )
+    fresh = sorted(fresh, key=_fresh_sort_key)
+    selected: list[dict] = []
+    lanes: list[str] = []
+    next_lane = FRESH_LANE if last_lane == RECOVERY_LANE else RECOVERY_LANE
+    while len(selected) < limit and (recovery or fresh):
+        if recovery and fresh:
+            lane = next_lane
+        elif recovery:
+            lane = RECOVERY_LANE
+        else:
+            lane = FRESH_LANE
+        queue = recovery if lane == RECOVERY_LANE else fresh
+        selected.append(queue.pop(0))
+        lanes.append(lane)
+        next_lane = FRESH_LANE if lane == RECOVERY_LANE else RECOVERY_LANE
+    return selected, lanes
+
+
 def _aperture_item(candidate: dict) -> dict:
     task = candidate.get("conscious_task") or {}
     ownership = candidate.get("conscious_aperture") or {}
     return {
         "candidate_id": candidate.get("id"),
         "aperture_id": ownership.get("id", ""),
+        "consumer_id": ownership.get("consumer_id", ""),
         "lease_expires_at": ownership.get("lease_expires_at", ""),
         "summary": truncate_text(candidate.get("summary", ""), 220),
         "pressure": candidate.get("pressure"),
@@ -323,21 +393,26 @@ def open_conscious_aperture(
         remaining_size = max(0, size - len(resumable))
         available_capacity = max(0, active_limit - len(active))
 
-        eligible = []
+        recovery_eligible = []
+        fresh_eligible = []
         for candidate in candidates:
             candidate_id = str(candidate.get("id") or "")
             if canonical_ids.get(_logical_source_key(candidate)) != candidate_id:
                 continue
             if not _visible(candidate, surface=surface, instance_config=instance_config):
                 continue
-            if (
-                _is_pending_conscious_task(candidate)
-                or _is_due_held_checkpoint(candidate, now=now_dt)
-                or candidate in stale_active
-            ):
-                eligible.append(candidate)
-        eligible.sort(key=_candidate_sort_key)
-        selected = eligible[: min(remaining_size, available_capacity)]
+            if _is_due_held_checkpoint(candidate, now=now_dt) or candidate in stale_active:
+                recovery_eligible.append(candidate)
+            elif _is_pending_conscious_task(candidate):
+                fresh_eligible.append(candidate)
+        eligible = recovery_eligible + fresh_eligible
+        selected, service_lanes = _select_fair_claims(
+            recovery_eligible,
+            fresh_eligible,
+            limit=min(remaining_size, available_capacity),
+            last_lane=_last_fairness_lane(store.read_jsonl("decisions")),
+            stale_after_minutes=stale_after_minutes,
+        )
 
         if not selected:
             if resumable:
@@ -422,6 +497,7 @@ def open_conscious_aperture(
             ),
             "reclaimed_candidate_ids": reclaimed_ids,
             "returned_candidate_ids": returned_ids,
+            "fairness_service_lanes": service_lanes,
             "candidate_ids": [item["candidate_id"] for item in packet_items],
             "aperture": packet_items,
             "instructions": {
@@ -474,6 +550,8 @@ def open_conscious_aperture(
                 "aperture_size": size,
                 "consumer_id": owner,
                 "lease_expires_at": lease_expires_at,
+                "fairness_service_lanes": service_lanes,
+                "fairness_last_served_lane": service_lanes[-1] if service_lanes else None,
             },
         )
         for candidate_id in returned_ids:
@@ -518,6 +596,7 @@ def _validate_current_ownership(
     aperture_id: str,
     consumer_id: str | None,
     now_dt: datetime,
+    allow_legacy_ownerless: bool = False,
 ) -> dict | None:
     current = candidate.get("conscious_aperture") or {}
     if candidate.get("status") != OPEN_STATUS:
@@ -527,16 +606,46 @@ def _validate_current_ownership(
             "candidate_id": candidate.get("id"),
             "status": candidate.get("status"),
         }
-    if aperture_id and current.get("id") != aperture_id:
+    expected_aperture = str(current.get("id") or "").strip()
+    expected_consumer = str(current.get("consumer_id") or "").strip()
+    legacy_ownerless = (
+        not expected_aperture
+        and not expected_consumer
+        and current.get("generation") in (None, "", 0)
+    )
+    if legacy_ownerless and not allow_legacy_ownerless:
+        return {
+            "success": False,
+            "error": "legacy_ownerless_lease_requires_explicit_admin_path",
+            "candidate_id": candidate.get("id"),
+        }
+    if not legacy_ownerless and not str(aperture_id or "").strip():
+        return {
+            "success": False,
+            "error": "aperture_id_required",
+            "candidate_id": candidate.get("id"),
+        }
+    if not legacy_ownerless and not str(consumer_id or "").strip():
+        return {
+            "success": False,
+            "error": "consumer_id_required",
+            "candidate_id": candidate.get("id"),
+        }
+    if not legacy_ownerless and (not expected_aperture or not expected_consumer):
+        return {
+            "success": False,
+            "error": "current_lease_ownership_incomplete",
+            "candidate_id": candidate.get("id"),
+        }
+    if not legacy_ownerless and expected_aperture != str(aperture_id):
         return {
             "success": False,
             "error": "aperture_id_mismatch",
             "candidate_id": candidate.get("id"),
-            "expected_aperture_id": current.get("id"),
+            "expected_aperture_id": expected_aperture,
             "aperture_id": aperture_id,
         }
-    expected_consumer = str(current.get("consumer_id") or "")
-    if consumer_id and expected_consumer and str(consumer_id) != expected_consumer:
+    if not legacy_ownerless and str(consumer_id) != expected_consumer:
         return {
             "success": False,
             "error": "consumer_id_mismatch",
@@ -563,59 +672,96 @@ def _validate_current_ownership(
     return None
 
 
-def mark_conscious_aperture_consumed(
+def record_conscious_aperture_presentation_attempt(
     store: SensoriumStore,
     *,
-    candidate_id: str,
-    aperture_id: str,
+    aperture: list[dict],
     consumer_id: str,
     turn_id: str,
     surface: str,
     now: str | None = None,
 ) -> dict:
-    """Record exact foreground presentation without settling the item."""
+    """Atomically validate a whole packet and record only a presentation attempt."""
     now_iso = now or utc_now_iso()
     now_dt = _parse_iso(now_iso) or datetime.now(UTC)
+    owner = str(consumer_id or "").strip()
+    if not owner:
+        return {"success": False, "error": "consumer_id_required"}
+    if not isinstance(aperture, list) or not aperture:
+        return {"success": False, "error": "aperture_packet_required"}
     with _aperture_lock(store):
         candidates = store.read_jsonl("candidates")
-        idx = _find_candidate_index(candidates, candidate_id)
-        if idx is None:
-            return {"success": False, "error": "candidate_not_found"}
-        candidate = candidates[idx]
-        error = _validate_current_ownership(
-            candidate,
-            aperture_id=aperture_id,
-            consumer_id=consumer_id,
-            now_dt=now_dt,
-        )
-        if error:
-            return error
+        validated_items: list[dict] = []
+        seen_ids: set[str] = set()
+        for item_index, item in enumerate(aperture):
+            candidate_id = str((item or {}).get("candidate_id") or "").strip()
+            aperture_id = str((item or {}).get("aperture_id") or "").strip()
+            if not candidate_id or candidate_id in seen_ids:
+                return {
+                    "success": False,
+                    "error": "invalid_aperture_packet_item",
+                    "item_index": item_index,
+                }
+            seen_ids.add(candidate_id)
+            idx = _find_candidate_index(candidates, candidate_id)
+            if idx is None:
+                return {
+                    "success": False,
+                    "error": "candidate_not_found",
+                    "candidate_id": candidate_id,
+                    "item_index": item_index,
+                }
+            candidate = candidates[idx]
+            error = _validate_current_ownership(
+                candidate,
+                aperture_id=aperture_id,
+                consumer_id=owner,
+                now_dt=now_dt,
+            )
+            if error:
+                return {**error, "item_index": item_index}
+            validated_items.append(
+                {
+                    "candidate_id": candidate_id,
+                    "aperture_id": aperture_id,
+                    "source_binding": _source_binding(candidate),
+                }
+            )
         decisions = store.read_jsonl("decisions")
         existing = next(
             (
                 receipt
                 for receipt in reversed(decisions)
-                if receipt.get("type") == "conscious.aperture.consumed"
-                and receipt.get("candidate_id") == candidate_id
-                and receipt.get("aperture_id") == aperture_id
+                if receipt.get("type") == "conscious.aperture.presentation_attempted"
                 and receipt.get("turn_id") == turn_id
+                and receipt.get("consumer_id") == owner
+                and receipt.get("items") == validated_items
             ),
             None,
         )
         if existing is not None:
-            return {"success": True, "action": "already_consumed", "receipt": existing}
+            return {
+                "success": True,
+                "action": "presentation_already_attempted",
+                "receipt": existing,
+            }
         receipt = {
             "ts": now_iso,
-            "type": "conscious.aperture.consumed",
-            "candidate_id": candidate_id,
-            "aperture_id": aperture_id,
-            "consumer_id": consumer_id,
+            "type": "conscious.aperture.presentation_attempted",
+            "candidate_ids": [item["candidate_id"] for item in validated_items],
+            "aperture_ids": sorted({item["aperture_id"] for item in validated_items}),
+            "consumer_id": owner,
             "turn_id": str(turn_id or ""),
             "surface": str(surface or "local"),
-            "source_binding": _source_binding(candidate),
+            "items": validated_items,
+            "host_consumption_confirmed": False,
         }
         store.append_jsonl("decisions", receipt)
-        return {"success": True, "action": "consumed_aperture_item", "receipt": receipt}
+        return {
+            "success": True,
+            "action": "presentation_attempt_recorded",
+            "receipt": receipt,
+        }
 
 
 def settle_conscious_aperture_item(
@@ -628,6 +774,7 @@ def settle_conscious_aperture_item(
     consumer_id: str | None = None,
     return_at: str | None = None,
     external_work: dict | None = None,
+    allow_legacy_ownerless: bool = False,
     dry_run: bool = True,
     now: str | None = None,
 ) -> dict:
@@ -654,6 +801,30 @@ def settle_conscious_aperture_item(
         normalized_decision != "HELD" or checkpoint is None or checkpoint[1] <= now_dt
     ):
         return {"success": False, "error": "invalid_return_at"}
+    normalized_external_work: dict | None = None
+    if normalized_decision == "PREPARED_EXTERNAL_WORK":
+        if not isinstance(external_work, dict):
+            return {"success": False, "error": "external_work_spec_required"}
+        title = str(external_work.get("title") or "").strip()
+        summary = str(external_work.get("summary") or "").strip()
+        worker_type = str(external_work.get("worker_type") or "").strip()
+        profile = external_work.get("profile")
+        target = external_work.get("target")
+        if (
+            not title
+            or not summary
+            or not worker_type
+            or not isinstance(profile, dict)
+            or not isinstance(target, dict)
+        ):
+            return {"success": False, "error": "invalid_external_work_spec"}
+        normalized_external_work = {
+            "title": truncate_text(title, 200),
+            "summary": truncate_text(summary, 1200),
+            "worker_type": truncate_text(worker_type, 80),
+            "profile": dict(profile),
+            "target": dict(target),
+        }
 
     with _aperture_lock(store):
         candidates = store.read_jsonl("candidates")
@@ -666,9 +837,43 @@ def settle_conscious_aperture_item(
             }
         candidate = candidates[idx]
         current_aperture = candidate.get("conscious_aperture") or {}
-        actual_aperture_id = str(
-            aperture_id or current_aperture.get("id") or ""
-        ).strip()
+        actual_aperture_id = str(aperture_id or "").strip()
+        supplied_consumer_id = str(consumer_id or "").strip()
+        legacy_ownerless = (
+            not str(current_aperture.get("id") or "").strip()
+            and not str(current_aperture.get("consumer_id") or "").strip()
+            and current_aperture.get("generation") in (None, "", 0)
+        )
+        if not (allow_legacy_ownerless and legacy_ownerless):
+            if not actual_aperture_id:
+                return {
+                    "success": False,
+                    "error": "aperture_id_required",
+                    "candidate_id": candidate_id,
+                }
+            if not supplied_consumer_id:
+                return {
+                    "success": False,
+                    "error": "consumer_id_required",
+                    "candidate_id": candidate_id,
+                }
+            expected_aperture_id = str(current_aperture.get("id") or "").strip()
+            expected_consumer_id = str(current_aperture.get("consumer_id") or "").strip()
+            if actual_aperture_id != expected_aperture_id:
+                return {
+                    "success": False,
+                    "error": "aperture_id_mismatch",
+                    "candidate_id": candidate_id,
+                    "expected_aperture_id": expected_aperture_id,
+                    "aperture_id": actual_aperture_id,
+                }
+            if supplied_consumer_id != expected_consumer_id:
+                return {
+                    "success": False,
+                    "error": "consumer_id_mismatch",
+                    "candidate_id": candidate_id,
+                    "expected_consumer_id": expected_consumer_id,
+                }
         existing = _existing_settlement(
             store.read_jsonl("decisions"),
             candidate_id=candidate_id,
@@ -677,7 +882,7 @@ def settle_conscious_aperture_item(
         )
         if existing is not None:
             settled_consumer = str(existing.get("consumer_id") or "")
-            if consumer_id and settled_consumer and str(consumer_id) != settled_consumer:
+            if supplied_consumer_id != settled_consumer:
                 return {
                     "success": False,
                     "error": "consumer_id_mismatch",
@@ -695,8 +900,9 @@ def settle_conscious_aperture_item(
         ownership_error = _validate_current_ownership(
             candidate,
             aperture_id=actual_aperture_id,
-            consumer_id=consumer_id,
+            consumer_id=supplied_consumer_id,
             now_dt=now_dt,
+            allow_legacy_ownerless=allow_legacy_ownerless,
         )
         if ownership_error:
             return ownership_error
@@ -706,7 +912,7 @@ def settle_conscious_aperture_item(
             "type": "conscious.aperture.settled",
             "candidate_id": candidate_id,
             "aperture_id": actual_aperture_id,
-            "consumer_id": str(current_aperture.get("consumer_id") or consumer_id or ""),
+            "consumer_id": supplied_consumer_id,
             "decision": normalized_decision,
             "new_status": SETTLEMENT_STATUS[normalized_decision],
             "reason": truncate_text(reason, 500),
@@ -721,16 +927,8 @@ def settle_conscious_aperture_item(
                     "return_reason_code": "time_checkpoint",
                 }
             )
-        if external_work:
-            receipt["external_work"] = {
-                "title": truncate_text(external_work.get("title", ""), 200),
-                "summary": truncate_text(external_work.get("summary", ""), 1200),
-                "worker_type": truncate_text(
-                    external_work.get("worker_type", "kanban_task"), 80
-                ),
-                "profile": dict(external_work.get("profile") or {}),
-                "target": dict(external_work.get("target") or {}),
-            }
+        if normalized_external_work is not None:
+            receipt["external_work"] = normalized_external_work
         if dry_run:
             return {
                 "success": True,
