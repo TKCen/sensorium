@@ -304,7 +304,10 @@ class TestSensoriumIngestEvent:
             "kind": "explicit_correction",
             "summary": "Codex weekly budget near reset should not be treated as yellow",
             "strength": 0.82,
-            "correlation_keys": ["active-session", "surface:discord", "explicit_correction"],
+            "correlation_keys": [
+                "active-session", "surface:discord", "explicit_correction",
+                "foreground:partial", "live-residue:pattern_pressure",
+            ],
             "sensitivity": "private",
             "allowed_surfaces": ["local", "discord"],
         }
@@ -315,7 +318,10 @@ class TestSensoriumIngestEvent:
             "kind": "explicit_correction",
             "summary": "Sensorium should leave meaningful salience open for later",
             "strength": 0.86,
-            "correlation_keys": ["active-session", "surface:discord", "explicit_correction"],
+            "correlation_keys": [
+                "active-session", "surface:discord", "explicit_correction",
+                "foreground:partial", "live-residue:pattern_pressure",
+            ],
             "sensitivity": "private",
             "allowed_surfaces": ["local", "discord"],
         }

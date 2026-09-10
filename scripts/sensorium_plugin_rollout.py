@@ -9,6 +9,7 @@ Managed paths (relative to repo root → plugin install root):
   agent_sensorium/   dashboard/   scripts/   skills/   live-scripts/
   plugin.yaml   __init__.py   README.md   pyproject.toml
   live-scripts/*.py → {scripts_target}/*.py
+  scripts/sensorium_native_{clock,conscious}.py → {scripts_target}/*.py
 """
 
 import argparse
@@ -97,6 +98,15 @@ _MANAGED_FILES = [
 # and also copied into ~/.hermes/scripts for cron/runtime use.
 _LIVE_SCRIPT_GLOB = "*.py"
 
+# These cron entrypoints live with the reusable script implementation rather
+# than under live-scripts/, but the scheduler resolves them from
+# ~/.hermes/scripts.  Manage the second copy explicitly so a source repair
+# cannot pass tests while the recurring runtime keeps executing stale bytes.
+_RUNTIME_SCRIPT_NAMES = (
+    "sensorium_native_clock.py",
+    "sensorium_native_conscious.py",
+)
+
 _IGNORED_NAMES = {
     "__pycache__",
     ".pytest_cache",
@@ -143,6 +153,10 @@ def get_managed_targets(target_root: Path, scripts_target: Path) -> list[Path]:
             live_dst = scripts_target / live_src.name
             if live_dst.exists() and live_dst.is_file():
                 targets.append(live_dst)
+    for name in _RUNTIME_SCRIPT_NAMES:
+        runtime_dst = scripts_target / name
+        if runtime_dst.exists() and runtime_dst.is_file():
+            targets.append(runtime_dst)
     return targets
 
 
@@ -175,6 +189,13 @@ def get_managed_items(
             if live_src.is_file() and not _is_ignored(live_src.relative_to(live_scripts_dir)):
                 live_dst = scripts_target / live_src.name
                 items.append((live_src, live_dst))
+
+    # Selected reusable script entrypoints also execute directly from the
+    # Hermes runtime scripts directory.
+    for name in _RUNTIME_SCRIPT_NAMES:
+        runtime_src = source_root / "scripts" / name
+        if runtime_src.exists() and runtime_src.is_file():
+            items.append((runtime_src, scripts_target / name))
 
     return items
 

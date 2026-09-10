@@ -15,12 +15,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .gate import is_feedback_self_loop
+from .conscious_aperture import requires_exact_settlement
 from .schemas import parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
+from .prospective_evidence import observe_after_success
 
 VALID_SETTLEMENT_DECISIONS = {"DROP", "SAVE", "PROMOTE_CONSCIOUS"}
 RECEIPT_SCHEMA = "sensorium.decision_receipt.v1"
@@ -501,7 +503,7 @@ def _normalize_conscious_task_ref(ref: Any) -> dict:
     return out
 
 
-def apply_kanban_settlement(
+def _apply_kanban_settlement_locked(
     store: SensoriumStore,
     *,
     decision: str,
@@ -562,6 +564,21 @@ def apply_kanban_settlement(
             "decision": decision_upper,
             "matched_candidate_ids": [],
             "receipts": [written] if written is not None else [],
+        }
+
+    leased_ids = [
+        str(candidate.get("id") or "")
+        for candidate in matched
+        if requires_exact_settlement(candidate)
+    ]
+    if leased_ids:
+        return {
+            "action": "leased_candidate_requires_exact_settlement",
+            "decision": decision_upper,
+            "matched_candidate_ids": [candidate.get("id", "") for candidate in matched],
+            "blocked_candidate_ids": leased_ids,
+            "updated_candidate_ids": [],
+            "receipts": [],
         }
 
     target_status = DECISION_TO_CANDIDATE_STATUS[decision_upper]
@@ -642,6 +659,56 @@ def apply_kanban_settlement(
         "already_settled_candidate_ids": already_settled_ids,
         "receipts": receipts,
     }
+
+
+def apply_kanban_settlement(
+    store: SensoriumStore,
+    *,
+    decision: str,
+    candidate_id: str = "",
+    event_id: str = "",
+    fingerprint: str = "",
+    correlation_keys: list[str] | None = None,
+    intake_task_id: str = "",
+    review_task_id: str = "",
+    conscious_task_ref: dict | None = None,
+    reason: str = "",
+    record_receipt: bool = True,
+) -> dict:
+    """Apply a Kanban settlement under the profile-wide candidate transaction."""
+    with store.candidate_transaction():
+        result = _apply_kanban_settlement_locked(
+            store,
+            decision=decision,
+            candidate_id=candidate_id,
+            event_id=event_id,
+            fingerprint=fingerprint,
+            correlation_keys=correlation_keys,
+            intake_task_id=intake_task_id,
+            review_task_id=review_task_id,
+            conscious_task_ref=conscious_task_ref,
+            reason=reason,
+            record_receipt=record_receipt,
+        )
+    # The detached observer never runs while the canonical candidate lock is held.
+    if result.get("updated_candidate_ids"):
+        try:
+            from .config import load_instance_config
+            capture_config, _ = load_instance_config(state_dir=str(store.root))
+            for settled_id in result["updated_candidate_ids"]:
+                observe_after_success(
+                    store.root,
+                    capture_config.get("prospective_evidence_capture", {}),
+                    "settled",
+                    {
+                        "candidate_id": settled_id,
+                        "source_class": "kanban",
+                        "settlement": "settled",
+                    },
+                )
+        except Exception:
+            pass
+    return result
 
 
 def apply_settlement_record(store: SensoriumStore, record: dict) -> dict:
@@ -1056,16 +1123,23 @@ def _derived_stale_aperture_ids(candidates: list[dict], now: str, stale_after_mi
         if candidate.get("status") != "in_conscious_aperture":
             continue
         aperture = (candidate.get("conscious_aperture") if isinstance(candidate.get("conscious_aperture"), dict) else {}) or {}
-        opened = aperture.get("opened_at") or candidate.get("updated_at")
+        explicit_expiry = aperture.get("lease_expires_at")
+        expiry_source = (
+            explicit_expiry
+            if explicit_expiry not in (None, "")
+            else aperture.get("opened_at") or candidate.get("updated_at")
+        )
         try:
-            opened_dt = datetime.fromisoformat(str(opened).replace("Z", "+00:00"))
-            if opened_dt.tzinfo is None:
-                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+            expiry_dt = datetime.fromisoformat(str(expiry_source).replace("Z", "+00:00"))
+            if expiry_dt.tzinfo is None:
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             # An unparseable open aperture is unsafe to replace, so it is stale.
             stale.add(str(candidate.get("id") or ""))
             continue
-        if (now_dt - opened_dt.astimezone(timezone.utc)).total_seconds() >= stale_after_minutes * 60:
+        if explicit_expiry in (None, ""):
+            expiry_dt += timedelta(minutes=stale_after_minutes)
+        if now_dt >= expiry_dt.astimezone(timezone.utc):
             stale.add(str(candidate.get("id") or ""))
     return stale
 

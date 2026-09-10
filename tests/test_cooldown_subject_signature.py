@@ -132,8 +132,8 @@ def _arxiv_candidate(**overrides):
         "updated_at": "2026-07-02T04:39:17Z",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "t_a0098881",
-            "review_task_id": "t_39275e24",
+            "intake_task_id": "task_intake_saved",
+            "review_task_id": "task_review_saved",
             "settled_at": "2026-07-02T04:29:29Z",
             "reason_label": "reason#bdf731842efcbb5b",
         },

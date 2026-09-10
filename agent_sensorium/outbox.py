@@ -1,9 +1,9 @@
 """Deprecated Sensorium-local outbox compatibility layer.
 
-Kanban is now the live activation/ticketing substrate. Outbox records remain as
-compact compatibility receipts for existing thread capsules; new expression or
-delivery work should be a Kanban-reviewed action/artifact/outbox decision with
-Sensorium refs, not a hidden Sensorium-local queue.
+Kanban remains the live activation/ticketing substrate. Outbox records remain
+compact compatibility receipts for existing thread capsules, with one bounded
+local Conscious-consumer exception: authored local reach-outs may be prepared
+here without creating a thread or dispatching work.
 
 Safety defaults:
 - All direct/replyable Discord modes disabled by default
@@ -71,6 +71,23 @@ def _compute_idempotency_key(
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
 
 
+def source_revision_key(
+    *,
+    candidate_id: str,
+    source_candidate_ids: list[str] | None = None,
+    source_candidate_fingerprint: str = "",
+) -> str:
+    """Return an idempotency identity for one candidate source revision."""
+    source_ids = [str(value) for value in (source_candidate_ids or []) if str(value)]
+    fingerprint = str(source_candidate_fingerprint or "")
+    if source_ids and fingerprint:
+        material = {"source_candidate_ids": source_ids, "source_candidate_fingerprint": fingerprint}
+    else:
+        material = {"candidate_id": str(candidate_id or "")}
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(("source-revision|" + encoded).encode()).hexdigest()[:24]
+
+
 def _find_thread_by_id(threads: list[dict], thread_id: str) -> dict | None:
     for t in threads:
         if t.get("id") == thread_id:
@@ -98,6 +115,133 @@ def _denied(reason: str, detail: str, *, thread_id: str = "") -> dict:
         "detail": detail,
         "thread_id": thread_id,
     }
+
+
+def prepare_local_outbox_request(
+    store: SensoriumStore,
+    *,
+    origin_candidate_id: str,
+    request_type: str,
+    surface: str,
+    delivery_mode: str,
+    target: dict,
+    title: str = "",
+    message_preview: str = "",
+    content_hash: str = "",
+    sensitivity: str = "private",
+    allowed_surfaces: list[str] | None = None,
+    source_candidate_ids: list[str] | None = None,
+    source_candidate_fingerprint: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """Prepare a local outbox record without creating a thread.
+
+    This is the narrow outbox path for the bounded Conscious consumer. It keeps
+    authored content in the existing outbox content owner while using the
+    originating candidate as provenance. It never creates threads, workers, or
+    delivery requests.
+    """
+    candidate_id = str(origin_candidate_id or "").strip()
+    if not candidate_id:
+        return _denied("origin_candidate_required", "A source candidate is required.")
+    if request_type not in VALID_REQUEST_TYPES:
+        return _denied("invalid_request_type", f"Invalid request_type: {request_type}")
+    if surface not in VALID_SURFACES:
+        return _denied("invalid_surface", f"Invalid surface: {surface}")
+    if surface != "local":
+        return _denied("invalid_surface", "Local preparation requires surface='local'.")
+    if delivery_mode not in VALID_DELIVERY_MODES:
+        return _denied("invalid_delivery_mode", f"Invalid delivery_mode: {delivery_mode}")
+    if delivery_mode != "context_pointer":
+        return _denied("invalid_delivery_mode", "Local preparation requires delivery_mode='context_pointer'.")
+    if delivery_mode in DIRECT_DELIVERY_MODES:
+        return _denied("direct_modes_disabled", "The local consumer cannot prepare direct delivery modes.")
+
+    stored_title = truncate_text(title, 200) if title else ""
+    stored_message = truncate_text(message_preview, 500) if message_preview else ""
+    authored_content = stored_message or stored_title
+    effective_content_hash = hashlib.sha256(authored_content.encode()).hexdigest()[:16]
+    if content_hash and str(content_hash).lower() != effective_content_hash:
+        return _denied(
+            "content_hash_mismatch",
+            "The supplied content hash does not match the exact authored content.",
+        )
+    content_length = len(authored_content)
+    revision_key = source_revision_key(
+        candidate_id=candidate_id,
+        source_candidate_ids=source_candidate_ids,
+        source_candidate_fingerprint=source_candidate_fingerprint,
+    )
+    idempotency_key = _compute_idempotency_key(
+        origin_thread_id=candidate_id,
+        delivery_mode=delivery_mode,
+        target={},
+        content_hash=f"{revision_key}:{request_type}:{effective_content_hash}",
+    )
+    existing_requests = store.read_jsonl("outbox")
+    existing = _find_existing_outbox_request(existing_requests, idempotency_key)
+    if existing is not None:
+        if (
+            existing.get("origin_candidate_id") != candidate_id
+            or existing.get("source_revision_key") != revision_key
+            or existing.get("source_candidate_ids") != list(source_candidate_ids or [])
+            or existing.get("source_candidate_fingerprint")
+            != str(source_candidate_fingerprint or "")
+            or existing.get("request_type") != request_type
+            or existing.get("message_preview") != stored_message
+            or str(existing.get("content_hash") or "").lower() != effective_content_hash
+            or existing.get("content_length") != content_length
+        ):
+            return _denied(
+                "idempotency_content_mismatch",
+                "The existing local request does not match the exact source and authored content.",
+            )
+        return {"success": True, "data": existing, "idempotent_hit": True}
+
+    now = utc_now_iso()
+    request = {
+        "id": new_id("obx"),
+        "created_at": now,
+        "updated_at": now,
+        "status": "prepared",
+        "origin_thread_id": "",
+        "origin_candidate_id": candidate_id,
+        "request_type": request_type,
+        "surface": surface,
+        "delivery_mode": delivery_mode,
+        "target": {},
+        "title": stored_title,
+        "message_preview": stored_message,
+        "media_refs": [],
+        "content_hash": effective_content_hash,
+        "content_length": content_length,
+        "source_candidate_ids": list(source_candidate_ids or []),
+        "source_candidate_fingerprint": str(source_candidate_fingerprint or ""),
+        "source_revision_key": revision_key,
+        "idempotency_key": idempotency_key,
+        "sensitivity": sensitivity,
+        "allowed_surfaces": ["local"],
+        "platform_refs": {},
+    }
+    if dry_run:
+        return {"success": True, "data": request, "dry_run": True}
+
+    store.ensure_dirs()
+    store.append_jsonl("outbox", request)
+    receipt = {
+        "ts": now,
+        "type": "outbox.prepared",
+        "outbox_id": request["id"],
+        "origin_candidate_id": candidate_id,
+        "delivery_mode": delivery_mode,
+        "surface": surface,
+        "request_type": request_type,
+        "content_hash": effective_content_hash,
+        "content_length": content_length,
+        "idempotency_key": idempotency_key,
+    }
+    store.append_jsonl("decisions", receipt)
+    return {"success": True, "data": request, "receipt": receipt}
 
 
 def prepare_outbox_request(

@@ -19,6 +19,7 @@ from .gate import (
     prune_sensor_policy,
     promote_signal_to_event,
     should_promote_signal,
+    should_promote_supported_signal,
     signal_fingerprint,
 )
 from .pointers import select_attention_pointer
@@ -27,6 +28,7 @@ from .schemas import (
     intersect_allowed_surfaces,
     merge_sensitivity,
     normalize_signal,
+    parse_utc_z_checkpoint,
     sanitize_profile_name,
     truncate_text,
     utc_now_iso,
@@ -34,6 +36,7 @@ from .schemas import (
     validate_signal,
 )
 from .store import SensoriumStore
+from .prospective_evidence import correction_stage_for_signal_kind, observe_after_success, source_ingest_evidence
 from .sensors import (
     is_candidate_extinct,
     load_sensor_registry,
@@ -69,6 +72,7 @@ from .conscious import (
     claim_dormant_thread,
     complete_claim,
 )
+from .conscious_aperture import requires_exact_settlement
 from .workers import (
     dispatch_worker_request,
     list_worker_requests,
@@ -95,6 +99,16 @@ _ALLOWED_THREAD_TRANSITIONS: dict[str, set[str]] = {
     "dormant": {"close", "hold", "archive", "mark_reviewed", "pin", "unpin"},
     "held": {"close", "resume", "archive", "mark_reviewed", "pin", "unpin"},
 }
+
+
+def _candidate_transactional(handler):
+    """Run a store-first helper inside the shared candidate transaction."""
+    @wraps(handler)
+    def wrapped(store: SensoriumStore, *args, **kwargs):
+        with store.candidate_transaction():
+            return handler(store, *args, **kwargs)
+
+    return wrapped
 
 
 def _ok(instance: str, data) -> str:
@@ -351,6 +365,7 @@ def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
 
 
 GENERIC_CORRELATION_KEYS = {"active-session"}
+GENERIC_CORRELATION_PREFIXES = ("surface:", "foreground:", "live-residue:")
 
 
 def _specific_correlation_keys(keys: list[str] | set[str] | tuple[str, ...]) -> set[str]:
@@ -358,13 +373,26 @@ def _specific_correlation_keys(keys: list[str] | set[str] | tuple[str, ...]) -> 
     specific: set[str] = set()
     for key in keys or []:
         value = str(key or "").strip()
-        if not value or value in GENERIC_CORRELATION_KEYS or value.startswith("surface:"):
+        if (
+            not value
+            or value in GENERIC_CORRELATION_KEYS
+            or value.startswith(GENERIC_CORRELATION_PREFIXES)
+        ):
             continue
         specific.add(value)
     return specific
 
 
-def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
+def _find_related_candidate(
+    store: SensoriumStore,
+    candidates: list[dict],
+    event: dict,
+    *,
+    events: list[dict],
+    signals: list[dict],
+) -> dict | None:
+    from .admission import event_source_item_key
+
     incoming_keys = _specific_correlation_keys(event.get("correlation_keys") or [])
     # Generic live-session keys such as `active-session`, `surface:discord`, or
     # the event kind itself are not enough to merge separate corrections. False
@@ -372,6 +400,18 @@ def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
     incoming_keys.discard(str(event.get("kind") or ""))
     if not incoming_keys:
         return None
+    incoming_item = event_source_item_key(store, event, signals=signals)
+    incoming_signal_rows = [
+        row for row in signals
+        if row.get("id") in set(event.get("source_signal_ids") or [])
+    ]
+    uncertain_candidate_scoped = any(
+        row.get("source") in {"memory", "hermes_session"}
+        or "reflection" in str(row.get("sensor") or "")
+        or "live_turn" in str(row.get("sensor") or "")
+        for row in incoming_signal_rows
+    )
+    event_index = {row.get("id"): row for row in events}
     for candidate in candidates:
         if candidate.get("status", "candidate") != "candidate":
             continue
@@ -379,6 +419,21 @@ def _find_related_candidate(candidates: list[dict], event: dict) -> dict | None:
             continue
         candidate_keys = _specific_correlation_keys(candidate.get("correlation_keys") or [])
         candidate_keys.discard(str(candidate.get("kind") or ""))
+        candidate_items = {
+            item_key
+            for event_id in candidate.get("event_ids") or []
+            if isinstance((prior_event := event_index.get(event_id)), dict)
+            if (item_key := event_source_item_key(store, prior_event, signals=signals))
+        }
+        # Shared topic/channel keys can correlate salience, but cannot merge
+        # distinct source items or mix source-owned and uncertain identities.
+        if incoming_item is not None:
+            if candidate_items != {incoming_item}:
+                continue
+        elif candidate_items or uncertain_candidate_scoped:
+            # Candidate-scoped reflection/foreground interpretation gets first
+            # consideration, never generic-topic coalescing or corroboration.
+            continue
         if incoming_keys & candidate_keys:
             return candidate
     return None
@@ -397,6 +452,7 @@ def _read_pruned_sensor_policy(
     return pruned
 
 
+@_candidate_transactional
 def _apply_candidate_decay(
     store: SensoriumStore,
     candidates: list[dict],
@@ -505,6 +561,7 @@ def _coalesce_candidate_with_event(
     return receipt
 
 
+@_candidate_transactional
 def _append_event_and_create_or_update_candidate(
     store: SensoriumStore,
     *,
@@ -512,6 +569,7 @@ def _append_event_and_create_or_update_candidate(
     config: dict | None = None,
 ) -> dict:
     events = store.read_jsonl("events")
+    signals = store.read_jsonl("signals")
     candidates = store.read_jsonl("candidates")
     _apply_candidate_decay(store, candidates, config=config)
 
@@ -521,7 +579,9 @@ def _append_event_and_create_or_update_candidate(
 
     store.append_jsonl("events", event)
     candidate = event_to_candidate(event, config)
-    related = _find_related_candidate(candidates, event)
+    related = _find_related_candidate(
+        store, candidates, event, events=events, signals=signals,
+    )
     if related:
         receipt = _coalesce_candidate_with_event(
             store,
@@ -720,6 +780,20 @@ def handle_sensorium_ingest_signal(
         return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
 
     store.append_jsonl("signals", normalized)
+    # Closed structured projection only; raw feedback joins never reach the study.
+    observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "source_observed", source_ingest_evidence(normalized, store.read_jsonl("candidates"), inhibited=inhibited))
+    # A correction/retraction is evidence only when the accepted structured
+    # signal owner declares its exact kind.  No summary or promotion outcome is
+    # consulted, and unsupported kinds intentionally produce no extra receipt.
+    correction_stage = correction_stage_for_signal_kind(normalized.get("kind"))
+    if correction_stage:
+        observe_after_success(store.root, config.get("prospective_evidence_capture", {}), correction_stage, {
+            "source_receipt": normalized.get("id", ""),
+            "source_class": normalized.get("source", "unknown"),
+            "change_state": "retraction" if correction_stage == "retraction" else "correction",
+            "contradiction_evidence": correction_stage == "correction",
+            "retraction_evidence": correction_stage == "retraction",
+        })
 
     if inhibited:
         return _ok(instance, {
@@ -730,6 +804,10 @@ def handle_sensorium_ingest_signal(
         })
 
     promoted, reason = should_promote_signal(normalized, config)
+    if not promoted:
+        promoted, supported_reason = should_promote_supported_signal(normalized, signals, config)
+        if promoted:
+            reason = supported_reason
     result: dict = {
         "signal_id": normalized["id"],
         "promoted": promoted,
@@ -740,6 +818,14 @@ def handle_sensorium_ingest_signal(
     if promoted:
         event = promote_signal_to_event(normalized, config)
         event_result = _append_event_and_create_or_update_candidate(store, event=event, config=config)
+        # Detached best-effort observer runs only after the canonical owner commits.
+        observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
+            "candidate_id": event_result.get("candidate_id", ""),
+            "event_id": event_result.get("event_id", ""),
+            "source_receipt": normalized.get("id", ""),
+            "source_class": normalized.get("source", "unknown"),
+            "change_state": "update" if event_result.get("coalesced") else "new",
+        })
         result["event_id"] = event_result["event_id"]
         if "candidate_id" in event_result:
             result["candidate_id"] = event_result["candidate_id"]
@@ -793,6 +879,10 @@ def handle_sensorium_ingest_event(
         return _err(instance, str(e))
 
     result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
+    observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
+        "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),
+        "source_class": "unknown", "change_state": "update" if result.get("coalesced") else "new",
+    })
     return _ok(instance, result)
 
 
@@ -826,6 +916,7 @@ def handle_sensorium_subconscious_advisory(
     advisory_output: dict | None = None,
     config: dict | None = None,
     record_receipt: bool = True,
+    admission_binding: dict | None = None,
 ) -> str:
     """Run one bounded Subconscious advisory pass.
 
@@ -842,6 +933,7 @@ def handle_sensorium_subconscious_advisory(
             dry_run=dry_run,
             config=config,
             record_receipt=record_receipt,
+            admission_binding=admission_binding,
         )
     except ValueError as e:
         return _err(instance, str(e))
@@ -962,7 +1054,7 @@ def handle_sensorium_improvement_status(
     return _ok(instance, summarize_improvement_state(store))
 
 
-def handle_sensorium_candidate_update(
+def _handle_sensorium_candidate_update_locked(
     *,
     candidate_id: str,
     action: str,
@@ -987,8 +1079,19 @@ def handle_sensorium_candidate_update(
         return _err(instance, f"Candidate '{candidate_id}' not found.")
 
     old_status = target.get("status", "candidate")
+    if requires_exact_settlement(target):
+        return _err(instance, "candidate_leased_requires_exact_settlement")
     if action == "resume" and old_status != "held":
         return _err(instance, f"Candidate '{candidate_id}' is {old_status} and cannot be resumed.")
+    if action == "resume" and target.get("held_return") is not None:
+        held_return = target.get("held_return")
+        if not isinstance(held_return, dict) or held_return.get("reason_code") != "time_checkpoint":
+            return _err(instance, "candidate_checkpoint_malformed")
+        checkpoint = parse_utc_z_checkpoint(held_return.get("not_before"))
+        if checkpoint is None:
+            return _err(instance, "candidate_checkpoint_malformed")
+        if datetime.now(timezone.utc) < checkpoint[1]:
+            return _err(instance, "candidate_checkpoint_not_due")
     if action == "suppress":
         new_status = "suppressed"
     elif action == "hold":
@@ -1008,6 +1111,7 @@ def handle_sensorium_candidate_update(
         target["hold_reason"] = reason
     elif action == "resume":
         target["hold_reason"] = ""
+        target.pop("held_return", None)
     if action in {"suppress", "cancel", "mark_reviewed"}:
         reason_lower = reason.lower()
         if action == "suppress" or "reject" in reason_lower or "silence" in reason_lower:
@@ -1055,6 +1159,73 @@ def handle_sensorium_candidate_update(
         "new_status": new_status,
         "receipt": receipt,
     })
+
+
+def handle_sensorium_candidate_update(
+    *,
+    candidate_id: str,
+    action: str,
+    reason: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str:
+    """Apply a generic update while preserving exact leases and observer isolation."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    config, _ = load_instance_config(state_dir=str(store.root))
+    with store.candidate_transaction():
+        result = _handle_sensorium_candidate_update_locked(
+            candidate_id=candidate_id,
+            action=action,
+            reason=reason,
+            instance=instance,
+            state_dir=state_dir,
+        )
+    parsed = json.loads(result)
+    if parsed.get("success"):
+        observe_after_success(
+            store.root,
+            config.get("prospective_evidence_capture", {}),
+            "candidate_updated",
+            {"candidate_id": candidate_id, "change_state": "update"},
+        )
+    return result
+
+
+def handle_sensorium_conscious_aperture_update(
+    *,
+    candidate_id: str,
+    action: str,
+    reason: str = "",
+    aperture_id: str = "",
+    consumer_id: str = "",
+    instance: str = "default",
+    state_dir: str | None = None,
+) -> str | None:
+    """Settle an active aperture item through its sole canonical owner.
+
+    ``None`` means the id is not currently in the aperture and allows the
+    ordinary compact candidate-update route to preserve its existing contract.
+    """
+    from .conscious_aperture import OPEN_STATUS, settle_conscious_aperture_item
+
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    store.ensure_dirs()
+    candidate = next((row for row in store.read_jsonl("candidates") if row.get("id") == candidate_id), None)
+    if not candidate or candidate.get("status") != OPEN_STATUS:
+        return None
+    decisions = {"no_action": "REVIEWED", "settle": "SETTLED", "hold": "HELD"}
+    if action not in decisions:
+        return _err(instance, "active_aperture_requires_no_action_settle_or_hold")
+    result = settle_conscious_aperture_item(
+        store,
+        candidate_id=candidate_id,
+        aperture_id=aperture_id,
+        consumer_id=consumer_id,
+        decision=decisions[action],
+        reason=reason,
+        dry_run=False,
+    )
+    return _ok(instance, result) if result.get("success") else _err(instance, str(result.get("error") or "aperture_settlement_failed"))
 
 
 def _resolve_exact_subject(
@@ -1498,6 +1669,7 @@ def handle_sensorium_thread_update(
     return _ok(instance, receipt)
 
 
+@_candidate_transactional
 def _mark_origin_candidate_reviewed(
     store: SensoriumStore,
     *,
@@ -1582,7 +1754,7 @@ def handle_sensorium_attention_pointer(
     ))
 
 
-def handle_sensorium_compact(
+def _handle_sensorium_compact_locked(
     *, instance: str = "default", state_dir: str | None = None
 ) -> str:
     store = SensoriumStore(instance=instance, state_dir=state_dir)
@@ -1599,6 +1771,8 @@ def handle_sensorium_compact(
     for c in candidates:
         status = c.get("status", "candidate")
         if status in ARCHIVED_STATUSES:
+            continue
+        if requires_exact_settlement(c):
             continue
         expires = c.get("expires_at", "")
         is_expired = bool(expires) and expires <= now
@@ -1650,6 +1824,15 @@ def handle_sensorium_compact(
     })
 
 
+def handle_sensorium_compact(
+    *, instance: str = "default", state_dir: str | None = None
+) -> str:
+    """Compact state while serializing the candidate archive transition."""
+    store = SensoriumStore(instance=instance, state_dir=state_dir)
+    with store.candidate_transaction():
+        return _handle_sensorium_compact_locked(instance=instance, state_dir=state_dir)
+
+
 def handle_sensorium_service_threads(
     *,
     instance: str = "default",
@@ -1663,8 +1846,11 @@ def handle_sensorium_service_threads(
 
     now_ts = now or utc_now_iso()
     threads = store.read_jsonl("threads")
-    candidates = store.read_jsonl("candidates")
-    decayed_candidates = _apply_candidate_decay(store, candidates, config=config, now=now_ts)
+    with store.candidate_transaction():
+        candidates = store.read_jsonl("candidates")
+        decayed_candidates = _apply_candidate_decay(
+            store, candidates, config=config, now=now_ts
+        )
 
     cfg = config or {}
     raw_thresholds = cfg.get("thresholds")

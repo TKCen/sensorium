@@ -76,6 +76,29 @@ DEFAULT_MEDIA_GIFT_POLICY: dict = {
     },
 }
 
+# Hermes uses distinct platform labels for its local interactive frontends.
+# Sensorium policy intentionally treats only this closed set as the existing
+# ``local`` domain. Remote and unknown labels retain their own value so they
+# cannot inherit local visibility by fallback.
+LOCAL_HERMES_INTERACTIVE_PLATFORMS = frozenset({"desktop", "tui", "cli", "local"})
+
+
+def resolve_hermes_surface(platform: object) -> tuple[str, str]:
+    """Return ``(platform_label, Sensorium policy surface)``.
+
+    Empty legacy hook metadata keeps the existing ``local`` default. Known
+    Hermes local frontends map to the local policy domain; every other label is
+    preserved as its own fail-closed policy surface.
+    """
+    label = str(platform or "").strip() or "local"
+    policy_surface = (
+        "local"
+        if label.lower() in LOCAL_HERMES_INTERACTIVE_PLATFORMS
+        else label
+    )
+    return label, policy_surface
+
+
 _KNOWN_ATTENTION_RULES = set(DEFAULT_ATTENTION_POLICY["evidence_rules"])
 _ALLOWED_RULE_FIELDS = {
     "min_count",
@@ -99,6 +122,17 @@ DEFAULT_TTS_CONFIG: dict = {
     "pid_file": None,
 }
 
+# Detached study control only; malformed activation metadata fails closed.
+DEFAULT_PROSPECTIVE_EVIDENCE_CAPTURE: dict = {
+    "enabled": False,
+    "start_at": "",
+    "expires_at": "",
+}
+
+# Separate, disabled-by-default functional canary. It has no scheduling,
+# delivery, or study-control authority; it only enables the foreground doorway.
+DEFAULT_CONSCIOUS_DOORWAY: dict = {"enabled": False}
+
 SAFE_DEFAULTS: dict = {
     "instance_name": "default",
     "policy_card_ref": None,
@@ -116,11 +150,9 @@ SAFE_DEFAULTS: dict = {
     "thread_ttl_hours": 168,
     # Generic default actor for the deprecated background-conscious lease lane.
     "default_actor": "background_conscious",
-    # Generic reviewer profile the Kanban bridge assigns intake to. Defaults to
-    # the real Hermes `serasubconscious` profile so newly minted intake rows are
-    # claimable by the dispatcher. Override per-instance via instance.config.json
-    # `subconscious_profile` when running against a different reviewer lane.
-    "subconscious_profile": "serasubconscious",
+    # Generic reviewer profile the Kanban bridge assigns intake to. Deployments
+    # inject their own profile identity through instance.config.json.
+    "subconscious_profile": "subconscious-reviewer",
     # Dashboard quiet-tick freshness filename (configurable, generic default).
     "tick_quiet_filename": "sensorium_tick_quiet.latest.json",
     "tts": DEFAULT_TTS_CONFIG,
@@ -137,11 +169,35 @@ SAFE_DEFAULTS: dict = {
     # Disabled generic seam only. A private installation may configure its own
     # local bundle/provider; the plugin stores no world-model corpus.
     "world_model_provider": DEFAULT_WORLD_MODEL_PROVIDER_CONFIG,
+    "prospective_evidence_capture": DEFAULT_PROSPECTIVE_EVIDENCE_CAPTURE,
+    "conscious_doorway": DEFAULT_CONSCIOUS_DOORWAY,
 }
 
 
 def _deepcopy_jsonable(value):
     return json.loads(json.dumps(value))
+
+
+def sanitize_prospective_evidence_capture(raw: dict | None = None) -> dict:
+    """Accept one exact 14-day non-renewable study window or return OFF."""
+    raw = raw if isinstance(raw, dict) else {}
+    safe = _deepcopy_jsonable(DEFAULT_PROSPECTIVE_EVIDENCE_CAPTURE)
+    if raw.get("enabled") is not True:
+        return safe
+    start, expiry = raw.get("start_at"), raw.get("expires_at")
+    if not isinstance(start, str) or not isinstance(expiry, str):
+        return safe
+    try:
+        from datetime import datetime, timedelta, timezone
+        parsed_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        parsed_expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        if parsed_start.tzinfo is None or parsed_expiry.tzinfo is None:
+            return safe
+        if parsed_expiry.astimezone(timezone.utc) != parsed_start.astimezone(timezone.utc) + timedelta(days=14):
+            return safe
+    except ValueError:
+        return safe
+    return {"enabled": True, "start_at": start, "expires_at": expiry}
 
 
 def _sanitize_string_list(value) -> list[str] | None:
@@ -440,11 +496,15 @@ def _validate_config(raw: dict) -> dict:
         "tts": dict(SAFE_DEFAULTS["tts"]),
         "operational_pointer": dict(SAFE_DEFAULTS["operational_pointer"]),
         "pointer": dict(SAFE_DEFAULTS["pointer"]),
+        "conscious_doorway": dict(SAFE_DEFAULTS["conscious_doorway"]),
         "outbox": dict(SAFE_DEFAULTS["outbox"]),
         "attention_policy": sanitize_attention_policy(SAFE_DEFAULTS["attention_policy"]),
         "media_gift_policy": sanitize_media_gift_policy(SAFE_DEFAULTS["media_gift_policy"]),
         "world_model_provider": sanitized_world_model_provider_config(
             SAFE_DEFAULTS["world_model_provider"]
+        ),
+        "prospective_evidence_capture": sanitize_prospective_evidence_capture(
+            SAFE_DEFAULTS["prospective_evidence_capture"]
         ),
     }
     if isinstance(raw.get("conscious_reachout"), dict):
@@ -529,7 +589,7 @@ def _validate_config(raw: dict) -> dict:
         if val.get("sensitivity") in VALID_SENSITIVITIES:
             op["sensitivity"] = val["sensitivity"]
         config["operational_pointer"] = op
-    for key in ("pointer", "outbox"):
+    for key in ("pointer", "conscious_doorway", "outbox"):
         if key in raw and isinstance(raw[key], dict):
             config[key] = raw[key]
     if "attention_policy" in raw:
@@ -545,6 +605,10 @@ def _validate_config(raw: dict) -> dict:
             # Invalid provider configuration remains unavailable rather than
             # accepting an unknown protocol field or broadening access.
             config["world_model_provider"] = sanitized_world_model_provider_config({})
+    if "prospective_evidence_capture" in raw:
+        config["prospective_evidence_capture"] = sanitize_prospective_evidence_capture(
+            raw.get("prospective_evidence_capture")
+        )
     return config
 
 

@@ -369,6 +369,8 @@ class HindsightMemoryClient(Protocol):
 
     def recall(self, *, query: str, limit: int, timeout_s: float) -> dict: ...
 
+    def source_scope(self) -> dict: ...
+
 
 class HttpHindsightMemoryClient:
     """Dependency-free HTTP client for a local Hindsight instance.
@@ -379,7 +381,11 @@ class HttpHindsightMemoryClient:
 
     def __init__(self, *, base_url: str = "http://localhost:8888", bank_id: str = "hermes"):
         self.base = base_url.rstrip("/")
-        self.bank_id = bank_id
+        self.bank_id = bank_id.strip()
+
+    def source_scope(self) -> dict:
+        """Trusted adapter-owned scope; response bodies cannot override it."""
+        return {"provider": "hindsight", "bank_id": self.bank_id}
 
     def _post_json(self, path: str, payload: dict, *, timeout_s: float) -> dict:
         data = json.dumps(payload).encode("utf-8")
@@ -396,7 +402,9 @@ class HttpHindsightMemoryClient:
     def reflect(self, *, query: str, timeout_s: float) -> dict:
         bank = urllib.parse.quote(self.bank_id)
         return self._post_json(
-            f"/v1/default/banks/{bank}/reflect", {"query": query}, timeout_s=timeout_s
+            f"/v1/default/banks/{bank}/reflect",
+            {"query": query, "include": {"facts": {}}},
+            timeout_s=timeout_s,
         )
 
     def recall(self, *, query: str, limit: int, timeout_s: float) -> dict:
@@ -410,11 +418,15 @@ class FakeHindsightMemoryClient:
     """Deterministic in-memory client for tests/dry-run smoke."""
 
     def __init__(self, *, reflect_result: dict | None = None, recall_result: dict | None = None,
-                 error: Exception | None = None):
+                 error: Exception | None = None, bank_id: str = "synthetic-hindsight"):
         self.reflect_result = reflect_result or {}
         self.recall_result = recall_result or {}
         self.error = error
+        self.bank_id = bank_id.strip()
         self.calls: list[dict] = []
+
+    def source_scope(self) -> dict:
+        return {"provider": "hindsight", "bank_id": self.bank_id}
 
     def reflect(self, *, query: str, timeout_s: float) -> dict:
         self.calls.append({"op": "reflect", "query": query, "timeout_s": timeout_s})
@@ -488,6 +500,67 @@ def _extract_points(raw_output: dict) -> list[str]:
     return points
 
 
+def _identity_component(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value and len(value) <= 512 else None
+
+
+def _validated_source_scope(value: object) -> dict | None:
+    if not isinstance(value, dict) or set(value) != {"provider", "bank_id"}:
+        return None
+    provider = _identity_component(value.get("provider"))
+    bank_id = _identity_component(value.get("bank_id"))
+    if provider is None or bank_id is None:
+        return None
+    return {"provider": provider, "bank_id": bank_id}
+
+
+def _native_records(raw_output: dict) -> list[tuple[str, list[str] | None]]:
+    """Extract text plus only exact provider-issued Hindsight item IDs."""
+    results = raw_output.get("results")
+    if isinstance(results, list) and results:
+        records: list[tuple[str, list[str] | None]] = []
+        ids: list[str] = []
+        valid = True
+        for item in results:
+            if not isinstance(item, dict):
+                valid = False
+                continue
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                valid = False
+                continue
+            item_id = _identity_component(item.get("id"))
+            if item_id is None:
+                valid = False
+            else:
+                ids.append(item_id)
+            records.append((text.strip(), [item_id] if item_id is not None else None))
+        if len(ids) != len(set(ids)):
+            valid = False
+        return records if valid else [(text, None) for text, _ in records]
+
+    summary = _extract_summary(raw_output)
+    based_on = raw_output.get("based_on")
+    if summary and isinstance(based_on, dict) and "memories" in based_on:
+        memories = based_on.get("memories")
+        if isinstance(memories, list) and memories:
+            ids = [
+                _identity_component(item.get("id")) if isinstance(item, dict) else None
+                for item in memories
+            ]
+            valid_ids = [item_id for item_id in ids if item_id is not None]
+            if len(valid_ids) == len(ids) and len(valid_ids) == len(set(valid_ids)):
+                return [(summary, sorted(valid_ids))]
+        return [(summary, None)]
+    points = _extract_points(raw_output)
+    if points:
+        return [(point, None) for point in points]
+    return [(summary, None)] if summary else []
+
+
 def _extract_summary(raw_output: dict) -> str:
     for key in _SUMMARY_KEYS:
         value = raw_output.get(key)
@@ -496,8 +569,18 @@ def _extract_summary(raw_output: dict) -> str:
     return ""
 
 
-def reflection_fingerprint(probe_id: str, summaries: list[str]) -> str:
-    material = json.dumps({"probe": probe_id, "summaries": summaries}, sort_keys=True, separators=(",", ":"))
+def reflection_fingerprint(
+    probe_id: str,
+    summaries: list[str],
+    provenance_units: list[tuple[str, str, tuple[str, ...]]] | None = None,
+) -> str:
+    material = json.dumps(
+        {"probe": probe_id, **(
+            {"native_items": sorted(provenance_units)} if provenance_units is not None
+            else {"summaries": summaries}
+        )},
+        sort_keys=True, separators=(",", ":"),
+    )
     return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
@@ -512,6 +595,7 @@ def reduce_reflection(
     probe: ProbeConfig,
     raw_ref: dict,
     now: str,
+    source_scope: dict | None = None,
 ) -> tuple[list[dict], str]:
     """Reduce raw reflect/recall output into <= max_signals compact signals.
 
@@ -519,19 +603,30 @@ def reduce_reflection(
     correlation keys, sensitivity/surfaces, the raw ref, and an unverified flag.
     No raw transcript/memory text is ever included.
     """
-    summary = _extract_summary(raw_output)
-    points = _extract_points(raw_output)
-
-    chosen: list[str] = []
-    if points:
-        chosen = points[: probe.max_signals]
-    elif summary:
-        chosen = [summary]
-
-    fingerprint = reflection_fingerprint(probe.id, chosen)
+    del now
+    # Validate identity over the complete relevant provider response before the
+    # output bound is applied.  Otherwise an unidentified tail could be hidden
+    # behind an apparently complete prefix.
+    all_records = _native_records(raw_output)
+    records = all_records[: probe.max_signals]
+    chosen = [text for text, _ in records]
+    scope = _validated_source_scope(source_scope)
+    provenance_units = None
+    identity_complete = bool(
+        scope is not None
+        and all_records
+        and all(item_ids is not None for _, item_ids in all_records)
+    )
+    if identity_complete:
+        assert scope is not None
+        provenance_units = [
+            (scope["provider"], scope["bank_id"], tuple(sorted(item_ids or [])))
+            for _, item_ids in records
+        ]
+    fingerprint = reflection_fingerprint(probe.id, chosen, provenance_units)
 
     signals: list[dict] = []
-    for text in chosen:
+    for text, item_ids in records:
         signal = {
             "sensor": MEMORY_REFLECTION_SENSOR,
             "source": MEMORY_REFLECTION_SOURCE,
@@ -548,8 +643,24 @@ def reduce_reflection(
             "raw_ref": raw_ref.get("raw_ref", ""),
             "raw_sha256": raw_ref.get("raw_sha256", ""),
             "reflection_fingerprint": fingerprint,
+            "source_identity_status": "complete" if identity_complete else "unsupported",
             "unverified": True,
         }
+        if identity_complete and scope is not None and item_ids is not None:
+            canonical_ids = sorted(item_ids)
+            signal["memory_provenance"] = {
+                "provider": scope["provider"],
+                "bank_id": scope["bank_id"],
+                "item_ids": canonical_ids,
+            }
+            equality_material = json.dumps(
+                [scope["provider"], scope["bank_id"], *canonical_ids],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            equality_key = hashlib.sha256(equality_material.encode("utf-8")).hexdigest()[:32]
+            signal["correlation_keys"] = [
+                *signal["correlation_keys"], f"memory-source-item:{equality_key}",
+            ]
         signals.append(_strip_forbidden(signal))
     return signals, fingerprint
 
@@ -695,17 +806,35 @@ def run_probe(
                 max_raw_chars=probe.max_raw_chars,
             )
 
+        scope_fn = getattr(client, "source_scope", None)
+        maybe_scope = scope_fn() if callable(scope_fn) else None
+        source_scope: dict | None = maybe_scope if isinstance(maybe_scope, dict) else None
         signals, fingerprint = reduce_reflection(
-            raw_output=raw_output, probe=probe, raw_ref=raw_ref, now=now
+            raw_output=raw_output, probe=probe, raw_ref=raw_ref, now=now,
+            source_scope=source_scope,
         )
 
+        source_identity_status = (
+            "empty" if not signals
+            else "complete" if all(
+                signal.get("source_identity_status") == "complete" for signal in signals
+            )
+            else "unsupported"
+        )
         last = last_run_for(history, probe.id)
         prior_fp = (last or {}).get("fingerprint")
         delta = fingerprint != prior_fp
 
         emitted = signals
         emit_reason = "delta" if delta else "no_delta"
-        if signals and probe.require_delta and not delta:
+        # Unsupported native output is visible but creates no Signal/Event/
+        # candidate pressure.  This precedes delta and liveness handling so
+        # force, rewording, require_delta=False, and liveness cannot bypass it.
+        if source_identity_status == "unsupported":
+            delta = False
+            emitted = []
+            emit_reason = "unsupported_source_identity"
+        elif signals and probe.require_delta and not delta:
             if probe.low_significance_liveness:
                 emitted = [liveness_signal(probe=probe, fingerprint=fingerprint, raw_ref=raw_ref)]
                 emit_reason = "liveness_no_delta"
@@ -726,7 +855,8 @@ def run_probe(
                 ingest_results.append(ingest_fn(signal))
 
         record.update({
-            "status": "ok",
+            "status": "unsupported" if source_identity_status == "unsupported" else "ok",
+            "source_identity_status": source_identity_status,
             "completed_at": utc_now_iso(),
             "fingerprint": fingerprint,
             "delta": delta,

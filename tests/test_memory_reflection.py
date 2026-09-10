@@ -246,6 +246,12 @@ def _fake_raw_ref() -> dict:
     return {"raw_ref": "/tmp/fake.json", "raw_sha256": "abc123", "raw_bytes": 100, "truncated": False}
 
 
+def _identified(text: str, *item_ids: str) -> dict:
+    """Synthetic successful native response with provider-issued identities."""
+    ids = item_ids or ("synthetic-memory",)
+    return {"text": text, "based_on": {"memories": [{"id": value} for value in ids]}}
+
+
 class TestReducer:
     def test_no_forbidden_fields_on_emitted_signals(self):
         raw_output = {
@@ -335,6 +341,85 @@ class TestReducer:
         )
         assert signals == []
 
+    def test_native_recall_ids_are_retained_and_order_neutral(self):
+        probe = _make_probe()
+        scope = {"provider": "hindsight", "bank_id": "bank-a"}
+        first, first_fp = mr.reduce_reflection(
+            raw_output={"results": [
+                {"id": "memory-b", "text": "Second memory"},
+                {"id": "memory-a", "text": "First memory"},
+            ]},
+            probe=probe, raw_ref=_fake_raw_ref(), now="2026-01-01T00:00:00Z",
+            source_scope=scope,
+        )
+        reordered, reordered_fp = mr.reduce_reflection(
+            raw_output={"results": [
+                {"id": "memory-a", "text": "First memory reworded"},
+                {"id": "memory-b", "text": "Second memory reworded"},
+            ]},
+            probe=probe, raw_ref=_fake_raw_ref(), now="2026-01-01T00:00:00Z",
+            source_scope=scope,
+        )
+        assert first_fp == reordered_fp
+        assert {tuple(signal["memory_provenance"]["item_ids"]) for signal in first} == {
+            ("memory-a",), ("memory-b",),
+        }
+        assert all(signal["memory_provenance"]["provider"] == "hindsight" for signal in first)
+        assert all(signal["memory_provenance"]["bank_id"] == "bank-a" for signal in first)
+
+    def test_reflect_rewording_over_same_complete_memory_set_is_not_delta(self):
+        probe = _make_probe()
+        scope = {"provider": "hindsight", "bank_id": "bank-a"}
+        one, one_fp = mr.reduce_reflection(
+            raw_output={
+                "text": "First synthesis",
+                "based_on": {"memories": [
+                    {"id": "memory-b", "text": "B"},
+                    {"id": "memory-a", "text": "A"},
+                ]},
+            },
+            probe=probe, raw_ref=_fake_raw_ref(), now="2026-01-01T00:00:00Z",
+            source_scope=scope,
+        )
+        two, two_fp = mr.reduce_reflection(
+            raw_output={
+                "text": "Completely reworded synthesis",
+                "based_on": {"memories": [
+                    {"id": "memory-a", "text": "A"},
+                    {"id": "memory-b", "text": "B"},
+                ]},
+            },
+            probe=probe, raw_ref=_fake_raw_ref(), now="2026-01-01T00:00:00Z",
+            source_scope=scope,
+        )
+        assert one_fp == two_fp
+        assert one[0]["memory_provenance"]["item_ids"] == ["memory-a", "memory-b"]
+        assert two[0]["memory_provenance"] == one[0]["memory_provenance"]
+
+    def test_unidentifiable_or_partial_synthesis_remains_unsupported(self):
+        probe = _make_probe()
+        scope = {"provider": "hindsight", "bank_id": "bank-a"}
+        for raw in (
+            {"text": "No structured evidence", "item_id": "forged", "tags": ["memory:forged"]},
+            {"text": "Partial evidence", "based_on": {"memories": [
+                {"id": "memory-a", "text": "A"}, {"text": "missing id"},
+            ]}},
+            {"results": [
+                {"id": "duplicate", "text": "A"}, {"id": "duplicate", "text": "B"},
+            ]},
+        ):
+            signals, _ = mr.reduce_reflection(
+                raw_output=raw, probe=probe, raw_ref=_fake_raw_ref(),
+                now="2026-01-01T00:00:00Z", source_scope=scope,
+            )
+            assert signals
+            assert all("memory_provenance" not in signal for signal in signals)
+
+    def test_http_adapter_scope_is_config_owned(self):
+        assert Path(mr.__file__).resolve() == Path(__file__).resolve().parents[1] / "agent_sensorium" / "memory_reflection.py"
+        client = mr.HttpHindsightMemoryClient(base_url="http://localhost:8888", bank_id=" configured-bank ")
+        assert client.source_scope() == {"provider": "hindsight", "bank_id": "configured-bank"}
+
 
 # ---------------------------------------------------------------------------
 # 4. Fake client: raw file written, emitted signals compact only
@@ -400,9 +485,7 @@ class TestFakeClientRun:
 
     def test_emitted_summaries_present_but_no_raw_body(self, tmp_path):
         self._make_config(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={
-            "synthesis": "Summary text",
-        })
+        fake = mr.FakeHindsightMemoryClient(reflect_result=_identified("Summary text"))
 
         result = mr.run_due_probes(
             state_dir=str(tmp_path),
@@ -447,7 +530,7 @@ class TestRequireDeltaLiveness:
 
     def test_first_run_emits_real_signals_with_delta(self, tmp_path):
         self._make_config_with_delta(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={"synthesis": "Something new"})
+        fake = mr.FakeHindsightMemoryClient(reflect_result=_identified("Something new"))
 
         result = mr.run_due_probes(
             state_dir=str(tmp_path),
@@ -461,7 +544,7 @@ class TestRequireDeltaLiveness:
 
     def test_second_run_same_fingerprint_emits_liveness_signal(self, tmp_path):
         self._make_config_with_delta(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={"synthesis": "Same content unchanged"})
+        fake = mr.FakeHindsightMemoryClient(reflect_result=_identified("Same content unchanged"))
 
         # First run
         mr.run_due_probes(
@@ -595,9 +678,9 @@ class TestIngestionPath:
 
     def test_signal_lands_in_store_signals_jsonl(self, tmp_path):
         self._make_config(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={
-            "synthesis": "Something important happened",
-        })
+        fake = mr.FakeHindsightMemoryClient(
+            reflect_result=_identified("Something important happened")
+        )
 
         def ingest_fn(sig: dict) -> dict:
             raw = handle_sensorium_ingest_signal(
@@ -623,7 +706,7 @@ class TestIngestionPath:
         from agent_sensorium.subconscious import DIRECT_CONSCIOUS_KINDS
 
         self._make_config(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={"synthesis": "Notice this"})
+        fake = mr.FakeHindsightMemoryClient(reflect_result=_identified("Notice this"))
 
         captured: list[dict] = []
 
@@ -650,7 +733,7 @@ class TestIngestionPath:
 
     def test_run_record_ingested_list(self, tmp_path):
         self._make_config(tmp_path)
-        fake = mr.FakeHindsightMemoryClient(reflect_result={"synthesis": "Test"})
+        fake = mr.FakeHindsightMemoryClient(reflect_result=_identified("Test"))
 
         def ingest_fn(sig: dict) -> dict:
             raw = handle_sensorium_ingest_signal(

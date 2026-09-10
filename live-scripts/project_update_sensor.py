@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 HOME = Path.home()
-DEFAULT_INSTANCE = os.environ.get("SENSORIUM_INSTANCE") or os.environ.get("AGENT_SENSORIUM_DEFAULT_INSTANCE") or "sera"
+DEFAULT_INSTANCE = os.environ.get("SENSORIUM_INSTANCE") or os.environ.get("AGENT_SENSORIUM_DEFAULT_INSTANCE") or "default"
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("PROJECT_UPDATE_SENSOR_INTERVAL_SECONDS", str(6 * 60 * 60)))
 TIMEOUT_SECONDS = float(os.environ.get("PROJECT_UPDATE_SENSOR_TIMEOUT_SECONDS", "8"))
 DEFAULT_COMMIT_CAP = int(os.environ.get("PROJECT_UPDATE_SENSOR_COMMIT_CAP", "8"))
@@ -80,7 +80,7 @@ def _github_request(path_or_url: str) -> dict | None:
     url = path_or_url if path_or_url.startswith("http") else f"https://api.github.com{path_or_url}"
     req = Request(url, headers={
         "Accept": "application/vnd.github+json",
-        "User-Agent": "Sera-Sensorium-Project-Update-Sensor",
+        "User-Agent": "Sensorium-Project-Update-Sensor",
     })
     try:
         with urlopen(req, timeout=TIMEOUT_SECONDS) as resp:

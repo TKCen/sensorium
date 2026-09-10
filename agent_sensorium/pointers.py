@@ -11,9 +11,10 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .actions import count_active_actions_for_thread
-from .config import load_instance_config, visible_on_surface
+from .config import load_instance_config, resolve_hermes_surface, visible_on_surface
 from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
+from .prospective_evidence import observe_after_success
 
 DEFAULT_POINTER_CONFIG: dict = {
     "enabled": True,
@@ -688,6 +689,7 @@ def record_pointer_presented(
     *,
     session_id: str = "",
     surface: str = "local",
+    platform: str = "",
     foreground_turn_index: int = 0,
 ) -> dict:
     """Record a cooldown receipt after injecting/presenting a pointer.
@@ -713,6 +715,8 @@ def record_pointer_presented(
             "expected_title": guard.get("expected_title", ""),
             "presented_title": guard.get("presented_title", _compact_ws(pointer.get("title"))),
         }
+        if platform:
+            receipt["platform"] = platform
         store.append_jsonl("decisions", receipt)
         return receipt
 
@@ -734,7 +738,17 @@ def record_pointer_presented(
         "subject_id": guard.get("subject_id", ""),
         "presented_title": _compact_ws(pointer.get("title")),
     }
+    if platform:
+        receipt["platform"] = platform
     store.append_jsonl("decisions", receipt)
+    # Receipt existence proves presentation; no outcome is inferred from it.
+    try:
+        capture_config, _ = load_instance_config(state_dir=str(store.root))
+        candidate_id = receipt.get("candidate_id") or receipt.get("origin_candidate_id")
+        if isinstance(candidate_id, str) and candidate_id:
+            observe_after_success(store.root, capture_config.get("prospective_evidence_capture", {}), "presented", {"candidate_id": candidate_id})
+    except Exception:
+        pass
     return receipt
 
 
@@ -806,7 +820,7 @@ def handle_pointer_pre_llm(
     messages: list[dict] | None = None,
 ) -> dict | None:
     """pre_llm_call hook entrypoint. Returns {context} or None."""
-    surface = platform or "local"
+    platform_label, surface = resolve_hermes_surface(platform)
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
     instance_config, _ = load_instance_config(
@@ -841,6 +855,7 @@ def handle_pointer_pre_llm(
             "thread_id": pointer.get("thread_id"),
             "candidate_id": pointer.get("candidate_id"),
             "surface": surface,
+            "platform": platform_label,
             "session_id": session_id,
             "foreground_turn_index": foreground_turn_index,
             "reason": gate.get("reason", "foreground_gate"),
@@ -852,6 +867,7 @@ def handle_pointer_pre_llm(
         pointer,
         session_id=session_id,
         surface=surface,
+        platform=platform_label,
         foreground_turn_index=foreground_turn_index,
     )
     if receipt.get("type") == "pointer.presented.guard":

@@ -10,16 +10,15 @@ Acceptance criteria (from the live repair task):
   (c) Relevant research_source_signal candidates with a kanban SAVE must not
       be silently suppressed away from conscious access; an honest
       saved-candidate state should be visible.
-  (d) These tests cover the exact mismatch shape: a real-world sera profile
+  (d) These tests cover the exact mismatch shape: a real-world profile
       state where a research_source_signal candidate existed with a
       kanban SAVE settlement and no thread was minted, and the live pointer
       was offering a non-existent thread.
 
 The bug shape was:
-  - signals/evt_599831499464 + evt_e4cdf8214518 + evt_e4cdf8214518 coalesced
-    into cand_b39e18bbb527 with kanban_settlement.decision="SAVE", intake
-    t_a0098881, review t_39275e24.
-  - status correctly said no openable thread existed (all 25 archived).
+  - multiple source signals coalesced into an archived candidate with
+    kanban_settlement.decision="SAVE" and intake/review task references.
+  - status correctly said no openable thread existed (all were archived).
   - pre_LLM pointer said "I have something for you" (template) → human-facing
     line "I have a doorway for the arXiv research" → assistant invented
     "open thread X" → opening latest returned "Thread 'latest' not found".
@@ -71,8 +70,8 @@ def _arxiv_candidate(**overrides):
         "updated_at": "2026-07-02T04:39:17Z",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "t_a0098881",
-            "review_task_id": "t_39275e24",
+            "intake_task_id": "task_intake_saved",
+            "review_task_id": "task_review_saved",
             "settled_at": "2026-07-02T04:29:29Z",
             "reason_label": "reason#bdf731842efcbb5b",
         },
@@ -88,7 +87,7 @@ def _correction_candidate(**overrides):
         "kind": "explicit_correction",
         "pressure": 0.716,
         "summary": (
-            "Sebastian corrected Sensorium behavior: do not offer/open a thread "
+            "The user corrected Sensorium behavior: do not offer/open a thread "
             "when no openable thread exists; highly relevant arXiv agent "
             "collaboration/governance salience should remain consciously accessible."
         ),
@@ -116,7 +115,7 @@ def _write_config(state_dir, *, surfaces=("discord", "local")):
 
 
 def _seed_state(tmp_path):
-    """Reproduce the exact mismatch shape from the live sera profile."""
+    """Reproduce the exact mismatch shape from a real-world profile."""
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path)
@@ -162,8 +161,8 @@ def test_pointer_with_no_threads_and_only_saved_residue_says_so_honestly(tmp_pat
     assert pointer["invitation"].lower().startswith("i previously saved")
     # Linked intake visible.
     assert pointer["settlement_decision"] == "SAVE"
-    assert pointer["intake_task_id"] == "t_a0098881"
-    assert pointer["review_task_id"] == "t_39275e24"
+    assert pointer["intake_task_id"] == "task_intake_saved"
+    assert pointer["review_task_id"] == "task_review_saved"
     # Pointer context must explicitly call out that this is NOT a thread, while
     # using the exact candidate id for recovery. Calling status here is unsafe:
     # the pre-LLM hook has already recorded a pointer receipt, so cooldown
@@ -252,8 +251,8 @@ def test_open_candidate_by_id_recovers_archived_saved_residue(tmp_path):
     assert data["kind"] == "research_source_signal"
     # Durability: the kanban settlement block is the trace.
     assert data["kanban_settlement"]["decision"] == "SAVE"
-    assert data["kanban_settlement"]["intake_task_id"] == "t_a0098881"
-    assert data["kanban_settlement"]["review_task_id"] == "t_39275e24"
+    assert data["kanban_settlement"]["intake_task_id"] == "task_intake_saved"
+    assert data["kanban_settlement"]["review_task_id"] == "task_review_saved"
     # Honest title carries the agent-society/arXiv topic markers, so the
     # conscious layer can act on it without further decoding.
     assert "arXiv" in data["title"]
@@ -327,12 +326,12 @@ def test_saved_residue_pointer_includes_kanban_settlement_block():
         "title": "Research source feed (arXiv cs.AI: agent collaboration / governance)",
         "surface": "discord",
         "settlement_decision": "SAVE",
-        "intake_task_id": "t_a0098881",
-        "review_task_id": "t_39275e24",
+        "intake_task_id": "task_intake_saved",
+        "review_task_id": "task_review_saved",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "t_a0098881",
-            "review_task_id": "t_39275e24",
+            "intake_task_id": "task_intake_saved",
+            "review_task_id": "task_review_saved",
             "settled_at": "2026-07-02T04:29:29Z",
             "reason_label": "reason#bdf731842efcbb5b",
         },
@@ -343,7 +342,7 @@ def test_saved_residue_pointer_includes_kanban_settlement_block():
     }
     context = pointer_context_for_llm(pointer)
     assert "Kanban SAVE" in context
-    assert "t_a0098881" in context
+    assert "task_intake_saved" in context
 
 
 # ---------- end-to-end live dispatch via the plugin handler ----------
@@ -394,7 +393,7 @@ def test_plugin_handler_routes_open_to_candidate_when_id_prefixes_cand(tmp_path,
     assert payload["data"]["candidate_id"] == "cand_arxiv_regression"
     assert payload["data"]["is_openable_thread"] is False
     # The arXiv settlement block is visible to the conscious layer.
-    assert payload["data"]["kanban_settlement"]["intake_task_id"] == "t_a0098881"
+    assert payload["data"]["kanban_settlement"]["intake_task_id"] == "task_intake_saved"
 
 
 def test_plugin_handler_status_does_not_invent_thread_when_only_saved_residue(tmp_path):

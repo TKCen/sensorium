@@ -1,11 +1,19 @@
 """JSONL-backed local state store for Agent Sensorium."""
 
+import contextlib
 import json
 import os
 import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from .schemas import sanitize_profile_name
+
+try:  # pragma: no cover - native Linux is the supported runtime.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 _STATE_NAMES = {
     "signals": "signals/inbox.jsonl",
@@ -20,6 +28,24 @@ _STATE_NAMES = {
 }
 
 _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
+_CANDIDATE_LOCKS_GUARD = threading.Lock()
+_CANDIDATE_LOCKS: dict[str, threading.RLock] = {}
+_HELD_CANDIDATE_LOCKS = threading.local()
+_CONSCIOUS_APERTURE_STATE_VERSION = 1
+APERTURE_PRESENTATION_INDEX_LIMIT = 128
+
+
+class CorruptApertureStateError(ValueError):
+    """The bounded aperture metadata index cannot be trusted."""
+
+
+class MissingApertureStateError(FileNotFoundError):
+    """The bounded aperture metadata index has not been initialized."""
+
+
+def _candidate_process_lock(key: str) -> threading.RLock:
+    with _CANDIDATE_LOCKS_GUARD:
+        return _CANDIDATE_LOCKS.setdefault(key, threading.RLock())
 
 
 def _fsync_parent(path: Path) -> None:
@@ -225,13 +251,133 @@ class SensoriumStore:
         self.ensure_dirs()
         atomic_write_json(self._root / "sensors" / "policy.json", policy)
 
+    @property
+    def conscious_aperture_state_path(self) -> Path:
+        return self._root / "inner_life" / "conscious_aperture_state.json"
+
+    @staticmethod
+    def new_conscious_aperture_state() -> dict:
+        """Return a valid empty bounded index for an explicitly safe initialization."""
+        return {
+            "version": _CONSCIOUS_APERTURE_STATE_VERSION,
+            "fairness_last_served_lane": None,
+            "presentation_attempts": [],
+        }
+
+    @staticmethod
+    def _validate_conscious_aperture_state(state: object) -> dict:
+        if not isinstance(state, dict) or state.get("version") != _CONSCIOUS_APERTURE_STATE_VERSION:
+            raise CorruptApertureStateError("invalid aperture state version")
+        lane = state.get("fairness_last_served_lane")
+        if lane not in {None, "recovery", "fresh"}:
+            raise CorruptApertureStateError("invalid fairness lane")
+        attempts = state.get("presentation_attempts")
+        if not isinstance(attempts, list) or len(attempts) > APERTURE_PRESENTATION_INDEX_LIMIT:
+            raise CorruptApertureStateError("invalid presentation index")
+        validated_attempts = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise CorruptApertureStateError("invalid presentation record")
+            aperture_ids = attempt.get("aperture_ids")
+            if (
+                not isinstance(attempt.get("consumer_id"), str)
+                or not isinstance(attempt.get("turn_id"), str)
+                or not isinstance(attempt.get("surface"), str)
+                or (
+                    "platform" in attempt
+                    and not isinstance(attempt.get("platform"), str)
+                )
+                or not isinstance(attempt.get("ts"), str)
+                or not isinstance(attempt.get("items_digest"), str)
+                or len(attempt["items_digest"]) != 64
+                or not isinstance(aperture_ids, list)
+                or not aperture_ids
+                or len(aperture_ids) > 20
+                or not all(isinstance(value, str) and value for value in aperture_ids)
+            ):
+                raise CorruptApertureStateError("invalid presentation record fields")
+            validated_attempts.append(dict(attempt, aperture_ids=list(aperture_ids)))
+        return {
+            "version": _CONSCIOUS_APERTURE_STATE_VERSION,
+            "fairness_last_served_lane": lane,
+            "presentation_attempts": validated_attempts,
+        }
+
+    def read_conscious_aperture_state(self) -> dict:
+        """Read the fixed-bound index, distinguishing absence from valid empty state."""
+        path = self.conscious_aperture_state_path
+        if not path.exists():
+            raise MissingApertureStateError("aperture state missing")
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CorruptApertureStateError("aperture state unreadable") from exc
+        return self._validate_conscious_aperture_state(state)
+
+    def write_conscious_aperture_state(self, state: dict) -> None:
+        """Atomically replace validated bounded aperture metadata."""
+        self.ensure_dirs()
+        atomic_write_json(
+            self.conscious_aperture_state_path,
+            self._validate_conscious_aperture_state(state),
+        )
+
     def _resolve(self, name: str) -> Path:
         rel = _STATE_NAMES.get(name)
         if not rel:
             raise ValueError(f"Unknown state name: {name}")
         return self._root / rel
 
+    @contextlib.contextmanager
+    def candidate_transaction(self) -> Iterator[None]:
+        """Serialize one profile's complete candidate read/mutate/write cycle.
+
+        The per-root in-process lock and filesystem ``flock`` are shared by all
+        candidate writers. Nested use for the same root is intentionally
+        reentrant; nesting different profile roots is rejected so callers cannot
+        create cross-profile lock-order cycles.
+        """
+        self.ensure_dirs()
+        path = self._root / "locks" / "candidates.lock"
+        key = str(path.resolve(strict=False))
+        held = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
+        if held and key not in held:
+            raise RuntimeError("candidate transactions cannot nest across profile roots")
+        process_lock = _candidate_process_lock(key)
+        with process_lock:
+            if held is None:
+                held = {}
+                _HELD_CANDIDATE_LOCKS.locks = held
+            if key in held:
+                held[key]["depth"] += 1
+                try:
+                    yield
+                finally:
+                    held[key]["depth"] -= 1
+                return
+            lock_file = open(path, "a+", encoding="utf-8")
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                held[key] = {"depth": 1, "file": lock_file}
+                try:
+                    yield
+                finally:
+                    held.pop(key, None)
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+
     def append_jsonl(self, name: str, obj: dict) -> None:
+        if name == "candidates":
+            with self.candidate_transaction():
+                self._append_jsonl_unlocked(name, obj)
+            return
+        self._append_jsonl_unlocked(name, obj)
+
+    def _append_jsonl_unlocked(self, name: str, obj: dict) -> None:
         path = self._resolve(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
@@ -241,6 +387,10 @@ class SensoriumStore:
         _fsync_parent(path)
 
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
+        if name == "candidates":
+            with self.candidate_transaction():
+                atomic_rewrite_jsonl(self._resolve(name), rows)
+            return
         atomic_rewrite_jsonl(self._resolve(name), rows)
 
     def read_jsonl(self, name: str, limit: int | None = None) -> list[dict]:

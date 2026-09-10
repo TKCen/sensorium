@@ -1,4 +1,4 @@
-"""Tests for the GET-only flow-DAG topology/config projection (sera-ck9.1)."""
+"""Tests for the GET-only flow-DAG topology/config projection."""
 
 import asyncio
 import importlib.util
@@ -205,7 +205,7 @@ def test_topology_edge_status_is_closed_vocabulary_not_raw_atom(tmp_path, monkey
 
 
 def test_topology_does_not_leak_path_shaped_label(tmp_path, monkeypatch):
-    """Label policy (sera-ck9.3.2): path-shaped labels must be hash-labeled, not echoed.
+    """Label policy: path-shaped labels must be hash-labeled, not echoed.
 
     `/topology` labels are the primary flow-DAG UI affordance, so they're held
     to a stricter bar than generic compact summaries: a registry `label`/`name`
@@ -213,7 +213,7 @@ def test_topology_does_not_leak_path_shaped_label(tmp_path, monkeypatch):
     it isn't "secret-shaped" by the generic hostile-marker heuristic.
     """
     root = tmp_path / "sensorium" / "demo"
-    path_label = "/home/admin/.ssh/id_rsa"
+    path_label = str(tmp_path / "operator-home" / ".ssh" / "id_rsa")
     _write_registry(
         root,
         blocks={"runtime_heartbeat": {"type": "sensor", "label": path_label}},
@@ -230,7 +230,7 @@ def test_topology_does_not_leak_path_shaped_label(tmp_path, monkeypatch):
 
 
 def test_topology_edge_ids_distinguish_parallel_edges_by_kind(tmp_path, monkeypatch):
-    """sera-ck9.3.1: parallel edges (same from/to, different kind) must not collide.
+    """Parallel edges (same from/to, different kind) must not collide.
 
     A bare `from->to` edge id, as used before this fix, collapses two
     legitimately distinct configured edges into one frontend key. Edge ids

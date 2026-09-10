@@ -9,9 +9,9 @@ Dumb fixture layer:
   subconscious-reviewer profile when unresolved intake exists and no review is
   already active.
 
-Profile/instance and the reviewer profile name are resolved from the
-environment with generic defaults, so this bridge ships free of any
-deployment-specific instance/profile values.
+Profile/instance and the reviewer profile name are resolved from the selected
+instance configuration with an optional environment override and a generic
+fallback, so this bridge ships free of deployment-specific values.
 
 Healthy/idle path prints nothing. Use --json for inspection or --force-canary
 for an end-to-end canary intake.
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 HOME = Path.home()
+HERMES_CLI = Path(os.environ.get("HERMES_CLI", HOME / ".local" / "bin" / "hermes"))
 # Profile (state namespace) and the cheap reviewer profile are resolved from the
 # environment with generic defaults; no deployment-specific value is baked in.
 INSTANCE = (
@@ -37,10 +38,10 @@ INSTANCE = (
     or "default"
 )
 BOARD = os.environ.get("SENSORIUM_KANBAN_BOARD", "sensorium")
-# Default to the real `serasubconscious` Hermes profile so newly minted intake
-# rows are claimable by the dispatcher. Override with SENSORIUM_SUBCONSCIOUS_PROFILE
-# only when running against a deployment-specific reviewer profile.
-PROFILE = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "serasubconscious")
+# ``main`` assigns this once after final ``--instance`` selection. Environment
+# and instance config still override the generic profile fallback.
+GENERIC_REVIEWER_PROFILE = "subconscious-reviewer"
+PROFILE = GENERIC_REVIEWER_PROFILE
 
 # Resolve the package root without hardcoding a private checkout path. Prefer the
 # repository copy that ships alongside this script (``<repo>/agent_sensorium``);
@@ -53,6 +54,7 @@ for _candidate in (_SCRIPT_DIR.parent, PLUGIN):
         break
 if str(PLUGIN) not in sys.path:
     sys.path.insert(0, str(PLUGIN))
+from agent_sensorium.config import load_instance_config  # noqa: E402
 from agent_sensorium.settlement import (  # noqa: E402
     DEFAULT_DISPATCH_PRESSURE_THRESHOLD,
     CLOSED_INTAKE_STATUSES,
@@ -100,10 +102,36 @@ def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _resolve_reviewer_profile(instance: str) -> str:
+    """Resolve the one bridge reviewer identity for the selected instance."""
+    override = os.environ.get("SENSORIUM_SUBCONSCIOUS_PROFILE", "").strip()
+    if override:
+        return override
+    state_dir = HOME / ".hermes" / "agent-sensorium" / instance
+    config, _ = load_instance_config(state_dir=str(state_dir))
+    configured = config.get("subconscious_profile")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return GENERIC_REVIEWER_PROFILE
+
+
 def _run(cmd: list[str], *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("HERMES_KANBAN_BOARD", BOARD)
-    return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, env=env)
+    resolved_cmd = [str(HERMES_CLI), *cmd[1:]] if cmd and cmd[0] == "hermes" else cmd
+    trace = os.environ.get("SENSORIUM_KANBAN_TRACE") == "1"
+    started = time.monotonic()
+    if trace:
+        print(f"sensorium_kanban exec: {resolved_cmd!r}", file=sys.stderr, flush=True)
+    proc = subprocess.run(resolved_cmd, text=True, capture_output=True, timeout=timeout, env=env)
+    if trace:
+        elapsed = time.monotonic() - started
+        print(
+            f"sensorium_kanban done: rc={proc.returncode} elapsed={elapsed:.3f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+    return proc
 
 
 def _run_checked(cmd: list[str], *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
@@ -540,12 +568,34 @@ def _inactive_candidate_open_intake_cleanup(
 
 
 def _active_reviews(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    active_status = {"ready", "running", "todo", "blocked"}
+    active_status = {"ready", "running", "todo"}
+
+    def blocked_review_is_active(task: dict[str, Any]) -> bool:
+        failures = task.get("consecutive_failures")
+        if failures is not None:
+            return int(failures or 0) == 0
+        task_id = str(task.get("id") or "")
+        detail = _show_task(task_id) if task_id else task
+        event_kinds = {
+            str(event.get("kind") or "")
+            for event in detail.get("events") or []
+            if isinstance(event, dict)
+        }
+        return not bool(event_kinds & {"gave_up", "block_loop_detected"})
+
     return [
         t
         for t in tasks
         if _task_title(t).startswith("subconscious:review:")
-        and _task_status(t) in active_status
+        and (
+            _task_status(t) in active_status
+            # Preserve deliberate human/worker holds, but do not let a
+            # retry-exhausted mechanical failure suppress review forever.
+            or (
+                _task_status(t) == "blocked"
+                and blocked_review_is_active(t)
+            )
+        )
     ]
 
 
@@ -610,34 +660,50 @@ def _compact_event_body(event: dict[str, Any]) -> str:
     )
 
 
-def _sticky_block_and_assign_intake(task_id: str, reason: str) -> None:
+def _sticky_block_and_assign_intake(
+    task_id: str,
+    reason: str,
+    *,
+    current: dict[str, Any] | None = None,
+) -> None:
     """Make a substrate intake sticky-blocked, then assign it for review.
 
-    Kanban's dependency recompute can auto-promote initial ``blocked`` tasks
-    that have no parents unless there is an explicit block event. Create the
-    substrate row first, emit that sticky block event, and only then assign the
-    review profile so the gateway dispatcher never sees a runnable intake.
+    Create new substrate rows as unassigned ``running`` tasks, emit the explicit
+    sticky block event, and only then assign the review profile. Unassigned
+    rows are not dispatchable, so this sequence closes the execution race.
+
+    Idempotent ``kanban create`` calls return the existing task. Hermes rejects
+    ``blocked -> blocked``, so an already-blocked retry is a satisfied state,
+    not an error. This guard also prevents duplicate BLOCKED comments on every
+    quiet tick.
     """
     if not task_id:
         return
-    _run_checked([
-        "hermes",
-        "kanban",
-        "--board",
-        BOARD,
-        "block",
-        task_id,
-        reason,
-    ], timeout=60)
-    _run_checked([
-        "hermes",
-        "kanban",
-        "--board",
-        BOARD,
-        "assign",
-        task_id,
-        PROFILE,
-    ], timeout=60)
+    state = current or {}
+    status = str(state.get("status") or "")
+    assignee = str(state.get("assignee") or "")
+    if status in {"done", "completed", "archived"}:
+        return
+    if status != "blocked":
+        _run_checked([
+            "hermes",
+            "kanban",
+            "--board",
+            BOARD,
+            "block",
+            task_id,
+            reason,
+        ], timeout=60)
+    if assignee != PROFILE:
+        _run_checked([
+            "hermes",
+            "kanban",
+            "--board",
+            BOARD,
+            "assign",
+            task_id,
+            PROFILE,
+        ], timeout=60)
 
 
 def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
@@ -656,7 +722,7 @@ def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
         "--body",
         body,
         "--initial-status",
-        "blocked",
+        "running",
         "--idempotency-key",
         key,
         "--created-by",
@@ -672,6 +738,7 @@ def _create_intake(event: dict[str, Any]) -> dict[str, Any]:
         _sticky_block_and_assign_intake(
             str(data.get("id") or ""),
             "Sensorium substrate intake: sticky-blocked so only Subconscious review may settle it.",
+            current=data,
         )
     return {"event_id": eid, "title": title, "idempotency_key": key, "create_result": data}
 
@@ -750,7 +817,7 @@ def _create_candidate_intake(candidate: dict[str, Any]) -> dict[str, Any]:
         "--body",
         body,
         "--initial-status",
-        "blocked",
+        "running",
         "--idempotency-key",
         key,
         "--created-by",
@@ -766,6 +833,7 @@ def _create_candidate_intake(candidate: dict[str, Any]) -> dict[str, Any]:
         _sticky_block_and_assign_intake(
             str(data.get("id") or ""),
             "Sensorium reconciliation intake: sticky-blocked so only Subconscious review may settle it.",
+            current=data,
         )
     return {
         "candidate_id": cand_id,
@@ -989,7 +1057,7 @@ def _force_canary_event(label: str | None = None, *, conscious: bool = False) ->
 
 
 def main() -> int:
-    global INSTANCE, EVENTS_PATH
+    global INSTANCE, EVENTS_PATH, PROFILE
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", default=INSTANCE)
     ap.add_argument("--json", action="store_true")
@@ -1002,6 +1070,7 @@ def main() -> int:
     # requested profile so all per-instance reads/writes below stay consistent.
     INSTANCE = args.instance
     EVENTS_PATH = HOME / ".hermes" / "agent-sensorium" / INSTANCE / "events.jsonl"
+    PROFILE = _resolve_reviewer_profile(INSTANCE)
 
     state = _load_json(STATE_PATH, {})
     seen = set(state.get("seen_event_ids") or [])
