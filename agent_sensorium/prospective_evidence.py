@@ -11,10 +11,13 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import secrets
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +57,12 @@ STAGES = frozenset(
 CHANGE_STATES = frozenset({"new", "update", "correction", "retraction", "no_change", "unknown"})
 SETTLEMENTS = frozenset({"chosen", "settled", "held", "dropped", "unknown"})
 VERDICTS = frozenset({"SUFFICIENT_PRIVATE_EVIDENCE", "INSUFFICIENT_PRIVATE_EVIDENCE"})
+OBSERVATION_QUEUE_SIZE = 256
+_OBSERVATION_QUEUE: queue.Queue[tuple[str, dict, str, dict, str]] = queue.Queue(
+    maxsize=OBSERVATION_QUEUE_SIZE
+)
+_OBSERVATION_WRITER: threading.Thread | None = None
+_OBSERVATION_WRITER_START = threading.Lock()
 # Raw ids are accepted only to derive opaque HMAC references, never persisted.
 ALLOWED_KEYS = frozenset(
     {
@@ -729,6 +738,10 @@ class ProspectiveEvidenceCapture:
             ):
                 if row.get(field) in {"yes", "no"}:
                     case[field] = row[field]
+            # Settlement is unknown until a lifecycle owner supplies one of the
+            # closed outcomes. Later unknown rows cannot erase that outcome.
+            if row.get("settlement") in SETTLEMENTS - {"unknown"}:
+                case["settlement"] = row["settlement"]
             case["attention_classes"] = sorted(
                 set(case.get("attention_classes", [])) | set(row.get("attention_classes", []))
             )
@@ -1277,11 +1290,81 @@ class ProspectiveEvidenceCapture:
         return {"maintained": changed}
 
 
+def _snapshot_observation(
+    profile_root: str | Path, config: dict, stage: str, evidence: dict
+) -> tuple[str, dict, str, dict, str] | None:
+    """Copy one accepted closed projection without touching study storage."""
+    if not isinstance(config, dict) or not isinstance(evidence, dict) or stage not in STAGES:
+        return None
+    root_value = os.fspath(profile_root)
+    if not isinstance(root_value, str) or not root_value:
+        return None
+    root = os.path.abspath(root_value)
+    config_snapshot = {
+        key: config.get(key) for key in ("enabled", "start_at", "expires_at")
+    }
+    # Invalid or disabled windows are rejected before starting the optional
+    # writer. This check is pure: it does not read or create study state.
+    if ProspectiveEvidenceCapture(root, config_snapshot)._window() is None:
+        return None
+    evidence_snapshot = {
+        key: list(value) if key == "attention_classes" and isinstance(value, list) else value
+        for key, value in evidence.items()
+    }
+    if not ProspectiveEvidenceCapture._valid_evidence(evidence_snapshot):
+        return None
+    return root, config_snapshot, stage, evidence_snapshot, _iso(_now())
+
+
+def _write_observations() -> None:
+    """Single daemon consumer; no writer exception can escape this thread."""
+    while True:
+        root, config, stage, evidence, observed_at = _OBSERVATION_QUEUE.get()
+        try:
+            ProspectiveEvidenceCapture(root, config).observe(stage, evidence, now=observed_at)
+        except Exception:
+            pass
+        finally:
+            _OBSERVATION_QUEUE.task_done()
+
+
+def _ensure_observation_writer() -> None:
+    global _OBSERVATION_WRITER
+    if _OBSERVATION_WRITER is not None and _OBSERVATION_WRITER.is_alive():
+        return
+    with _OBSERVATION_WRITER_START:
+        if _OBSERVATION_WRITER is None or not _OBSERVATION_WRITER.is_alive():
+            _OBSERVATION_WRITER = threading.Thread(
+                target=_write_observations,
+                name="sensorium-prospective-evidence-writer",
+                daemon=True,
+            )
+            _OBSERVATION_WRITER.start()
+
+
+def _wait_for_observation_queue(timeout: float) -> bool:
+    """Bounded test synchronization; production owners never call this."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _OBSERVATION_QUEUE.all_tasks_done:
+        while _OBSERVATION_QUEUE.unfinished_tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _OBSERVATION_QUEUE.all_tasks_done.wait(remaining)
+    return True
+
+
 def observe_after_success(
     profile_root: str | Path, config: dict, stage: str, evidence: dict
 ) -> None:
-    """Fire-and-forget owner seam. It intentionally has no result/exception path."""
+    """Nonblocking best-effort owner seam with no result/exception path."""
     try:
-        ProspectiveEvidenceCapture(profile_root, config).observe(stage, evidence)
+        observation = _snapshot_observation(profile_root, config, stage, evidence)
+        if observation is None:
+            return
+        _ensure_observation_writer()
+        _OBSERVATION_QUEUE.put_nowait(observation)
+    except queue.Full:
+        pass
     except Exception:
         pass

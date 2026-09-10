@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_sensorium.prospective_evidence import ProspectiveEvidenceCapture, observe_after_success
+from agent_sensorium.prospective_evidence import (
+    ProspectiveEvidenceCapture,
+    _wait_for_observation_queue,
+    observe_after_success,
+)
 
 
 def config(start: str = "2026-01-01T00:00:00Z") -> dict:
@@ -66,6 +70,7 @@ def test_off_is_inert_and_observer_contains_failure(tmp_path, monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(OSError("disk")),
     )
     assert observe_after_success(root, config(), "settled", evidence("raw")) is None
+    assert _wait_for_observation_queue(10)
 
 
 def test_closed_schema_drops_privacy_probes_and_never_persists_raw_values(tmp_path):

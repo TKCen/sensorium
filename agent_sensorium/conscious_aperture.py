@@ -968,14 +968,33 @@ def _validate_current_ownership(
             "candidate_id": candidate.get("id"),
             "expected_consumer_id": expected_consumer,
         }
-    lease_expiry = _parse_iso(current.get("lease_expires_at"))
+    if "lease_expires_at" in current:
+        lease_expiry = _parse_iso(current.get("lease_expires_at"))
+        if lease_expiry is None:
+            return {
+                "success": False,
+                "error": "aperture_lease_expiry_malformed",
+                "candidate_id": candidate.get("id"),
+                "aperture_id": current.get("id"),
+            }
+    else:
+        lease_expiry = _lease_expiry(
+            candidate, stale_after_minutes=DEFAULT_STALE_AFTER_MINUTES
+        )
+        if lease_expiry is None:
+            return {
+                "success": False,
+                "error": "aperture_lease_expiry_malformed",
+                "candidate_id": candidate.get("id"),
+                "aperture_id": current.get("id"),
+            }
     if lease_expiry is not None and now_dt >= lease_expiry:
         return {
             "success": False,
             "error": "aperture_lease_expired",
             "candidate_id": candidate.get("id"),
             "aperture_id": current.get("id"),
-            "lease_expires_at": current.get("lease_expires_at"),
+            "lease_expires_at": _format_iso(lease_expiry),
         }
     binding = current.get("source_binding")
     if isinstance(binding, dict) and binding != _source_binding(candidate):

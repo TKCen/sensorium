@@ -25,6 +25,7 @@ from .conscious_reachout import (
     evaluate_conscious_reachout_policy,
 )
 from .config import load_instance_config
+from .outbox import source_revision_key
 from .schemas import parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -451,11 +452,27 @@ def consume_conscious_advisory(
         None,
     )
     prepared_source_fingerprint = str((outbox_row or {}).get("source_candidate_fingerprint") or "")
+    expected_source_ids = list(packet.get("source_candidate_ids") or [])
+    expected_source_revision = source_revision_key(
+        candidate_id=packet["candidate_id"],
+        source_candidate_ids=expected_source_ids,
+        source_candidate_fingerprint=packet.get("source_candidate_fingerprint", ""),
+    )
     if (
         not isinstance(outbox_row, dict)
         or outbox_row.get("status") != "prepared"
-        or (packet.get("source_candidate_fingerprint") and prepared_source_fingerprint
-            and prepared_source_fingerprint != packet.get("source_candidate_fingerprint"))
+        or outbox_row.get("origin_thread_id") != ""
+        or outbox_row.get("origin_candidate_id") != packet["candidate_id"]
+        or outbox_row.get("surface") != "local"
+        or outbox_row.get("delivery_mode") != "context_pointer"
+        or outbox_row.get("target") != {}
+        or outbox_row.get("allowed_surfaces") != ["local"]
+        or outbox_row.get("source_candidate_ids") != expected_source_ids
+        or prepared_source_fingerprint != packet.get("source_candidate_fingerprint", "")
+        or outbox_row.get("source_revision_key") != expected_source_revision
+        or outbox_row.get("message_preview") != parsed["message"]
+        or str(outbox_row.get("content_hash") or "").lower() != message_hash
+        or outbox_row.get("content_length") != len(parsed["message"])
     ):
         held = _settle(
             store,

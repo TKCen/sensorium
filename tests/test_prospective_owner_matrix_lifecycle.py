@@ -137,6 +137,7 @@ def _run_mode(operation: str, mode: str, root: Path, monkeypatch) -> tuple[dict,
         elif mode == "sqlite_failure":
             patch.setattr(ProspectiveEvidenceCapture, "_connect", lambda self: (_ for _ in ()).throw(OSError("matrix sqlite failure")))
         result, stages = _invoke(operation, root)
+        assert prospective_evidence._wait_for_observation_queue(10)
 
     rows = capture._rows() if mode != "sqlite_failure" else []
     return result, _canonical_files(root), stages, rows

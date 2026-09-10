@@ -341,9 +341,11 @@ class SensoriumStore:
         self.ensure_dirs()
         path = self._root / "locks" / "candidates.lock"
         key = str(path.resolve(strict=False))
+        held = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
+        if held and key not in held:
+            raise RuntimeError("candidate transactions cannot nest across profile roots")
         process_lock = _candidate_process_lock(key)
         with process_lock:
-            held = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
             if held is None:
                 held = {}
                 _HELD_CANDIDATE_LOCKS.locks = held
@@ -354,9 +356,6 @@ class SensoriumStore:
                 finally:
                     held[key]["depth"] -= 1
                 return
-            if held:
-                raise RuntimeError("candidate transactions cannot nest across profile roots")
-
             lock_file = open(path, "a+", encoding="utf-8")
             try:
                 if fcntl is not None:

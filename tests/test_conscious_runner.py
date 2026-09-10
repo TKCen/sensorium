@@ -252,7 +252,8 @@ def test_source_binding_mismatch_is_rejected_before_canonical_write(tmp_path):
     assert before["decisions"]
 
 
-def test_revision_idempotency_survives_partial_settlement_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("same_body", [True, False])
+def test_revision_idempotency_survives_partial_settlement_failure(tmp_path, monkeypatch, same_body):
     import agent_sensorium.conscious_consumer as consumer
 
     store = _store(tmp_path)
@@ -278,15 +279,22 @@ def test_revision_idempotency_survives_partial_settlement_failure(tmp_path, monk
     assert len(store.read_jsonl("outbox")) == 1
 
     monkeypatch.setattr(consumer, "_settle", original_settle)
+    message = (
+        "I thought of you while this quiet thread kept opening."
+        if same_body else "A different wording for the same source revision."
+    )
     second = consume_conscious_advisory(
         store,
-        decision={"decision": "REACH_OUT", "reason": "A regenerated wording must not duplicate the source revision.", "message": "A different wording for the same source revision."},
+        decision={"decision": "REACH_OUT", "reason": "The retry must preserve the exact chosen wording.", "message": message},
         dry_run=False,
         now="2026-08-26T11:01:00Z",
     )
     assert second["success"] is True
-    assert len(store.read_jsonl("outbox")) == 1
-    assert store.read_jsonl("outbox")[0]["source_candidate_fingerprint"] == "source-revision-1"
+    rows = store.read_jsonl("outbox")
+    assert len(rows) == (1 if same_body else 2)
+    assert all(row["source_candidate_fingerprint"] == "source-revision-1" for row in rows)
+    assert rows[-1]["message_preview"] == message
+    assert second["outbox_id"] == rows[-1]["id"]
     assert calls == 1
 
 

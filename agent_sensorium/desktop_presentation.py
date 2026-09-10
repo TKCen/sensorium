@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -228,51 +230,101 @@ def _unavailable(
     )
 
 
-def _read_jsonl(
-    path: Path, *, max_bytes: int, max_rows: int, metrics: dict[str, int] | None = None
-) -> tuple[list[dict[str, Any]], bool]:
-    if not path.exists():
-        return [], True
+def _bounded_instance_bytes(
+    path: Path, *, root: Path, limit: int, tail: bool = False
+) -> tuple[str, bytes | None, int | None, int]:
+    """Read one regular state file through pinned no-follow directories."""
+    directory_fd = leaf_fd = None
     try:
-        if path.stat().st_size > max_bytes:
-            return [], False
-        with path.open("rb") as stream:
-            data = stream.read(max_bytes + 1)
+        parts = path.relative_to(root).parts
+        if not parts or any(part in {".", ".."} for part in parts):
+            return "malformed", None, None, 0
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            return "malformed", None, None, 0
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_fd = os.open(root.resolve(strict=True), directory_flags)
+        for part in parts[:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        leaf_fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd
+        )
+        metadata = os.fstat(leaf_fd)
+        if not stat.S_ISREG(metadata.st_mode) or (not tail and metadata.st_size > limit):
+            return "malformed", None, None, 0
+        start = max(0, metadata.st_size - limit) if tail else 0
+        with os.fdopen(leaf_fd, "rb") as handle:
+            leaf_fd = None
+            if start:
+                handle.seek(start)
+            data = handle.read(limit if tail else limit + 1)
+        if not tail and len(data) > limit:
+            return "malformed", None, None, 0
+        return "ok", data, metadata.st_mtime_ns, start
+    except FileNotFoundError:
+        return "missing", None, None, 0
+    except (OSError, ValueError, RuntimeError):
+        return "malformed", None, None, 0
+    finally:
+        if leaf_fd is not None:
+            os.close(leaf_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _read_jsonl(
+    path: Path,
+    *,
+    root: Path,
+    max_bytes: int,
+    max_rows: int,
+    metrics: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], bool, int | None]:
+    status, data, mtime_ns, _ = _bounded_instance_bytes(path, root=root, limit=max_bytes)
+    if status == "missing":
+        return [], True, None
+    if status != "ok" or data is None:
+        return [], False, None
+    try:
         if metrics is not None:
             metrics[str(path)] = len(data)
-        if len(data) > max_bytes:
-            return [], False
         rows = []
         for line in data.decode("utf-8").splitlines():
             if line.strip():
                 item = json.loads(line)
                 if not isinstance(item, dict):
-                    return [], False
+                    return [], False, None
                 rows.append(item)
                 if len(rows) > max_rows:
-                    return [], False
-        return rows, True
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return [], False
+                    return [], False, None
+        return rows, True, mtime_ns
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return [], False, None
 
 
 def _read_tail_jsonl(
-    path: Path, *, max_bytes: int, max_rows: int, metrics: dict[str, int] | None = None
-) -> tuple[list[dict[str, Any]], bool]:
-    if not path.exists():
-        return [], True
+    path: Path,
+    *,
+    root: Path,
+    max_bytes: int,
+    max_rows: int,
+    metrics: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], bool, int | None]:
+    status, data, mtime_ns, start = _bounded_instance_bytes(
+        path, root=root, limit=max_bytes, tail=True
+    )
+    if status == "missing":
+        return [], True, None
+    if status != "ok" or data is None:
+        return [], False, None
     try:
-        size = path.stat().st_size
-        start = max(0, size - max_bytes)
-        with path.open("rb") as stream:
-            stream.seek(start)
-            data = stream.read(max_bytes)
         if metrics is not None:
             metrics[str(path)] = len(data)
         if start:
             _, separator, data = data.partition(b"\n")
             if not separator:
-                return [], True
+                return [], True, mtime_ns
         if data and not data.endswith(b"\n"):
             data = data.rsplit(b"\n", 1)[0] + (b"\n" if b"\n" in data else b"")
         rows = []
@@ -280,36 +332,35 @@ def _read_tail_jsonl(
             if line.strip():
                 item = json.loads(line)
                 if not isinstance(item, dict):
-                    return [], False
+                    return [], False, None
                 rows.append(item)
-        return rows[-max_rows:], True
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return [], False
+        return rows[-max_rows:], True, mtime_ns
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return [], False, None
 
 
 def _read_clock(
-    path: Path, *, metrics: dict[str, int] | None = None
-) -> tuple[list[dict[str, Any]], bool]:
-    if not path.exists():
-        return [], True
+    path: Path, *, root: Path, metrics: dict[str, int] | None = None
+) -> tuple[list[dict[str, Any]], bool, int | None]:
+    status, data, mtime_ns, _ = _bounded_instance_bytes(
+        path, root=root, limit=MAX_CLOCK_BYTES
+    )
+    if status == "missing":
+        return [], True, None
+    if status != "ok" or data is None:
+        return [], False, None
     try:
-        if path.stat().st_size > MAX_CLOCK_BYTES:
-            return [], False
-        with path.open("rb") as stream:
-            data = stream.read(MAX_CLOCK_BYTES + 1)
         if metrics is not None:
             metrics[str(path)] = len(data)
-        if len(data) > MAX_CLOCK_BYTES:
-            return [], False
         value = json.loads(data.decode("utf-8"))
-        return ([value], True) if isinstance(value, dict) else ([], False)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return [], False
+        return ([value], True, mtime_ns) if isinstance(value, dict) else ([], False, None)
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return [], False, None
 
 
 def _read_state(
     root: Path, *, metrics: dict[str, int] | None = None
-) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+) -> tuple[dict[str, list[dict[str, Any]]], bool, list[int]]:
     paths = {
         "candidates": root / "candidates.jsonl",
         "decisions": root / "decisions.jsonl",
@@ -325,16 +376,25 @@ def _read_state(
         "blockers": (MAX_BLOCKERS_TAIL_BYTES, MAX_BLOCKERS_TAIL_ROWS),
     }
     result: dict[str, list[dict[str, Any]]] = {}
+    mtimes_ns: list[int] = []
     valid = True
     for name, path in paths.items():
         byte_cap, row_cap = specs[name]
         reader = _read_jsonl if name in {"candidates", "outbox"} else _read_tail_jsonl
-        result[name], current = reader(path, max_bytes=byte_cap, max_rows=row_cap, metrics=metrics)
+        result[name], current, mtime_ns = reader(
+            path, root=root, max_bytes=byte_cap, max_rows=row_cap, metrics=metrics
+        )
         valid &= current
+        if mtime_ns is not None:
+            mtimes_ns.append(mtime_ns)
     for name in ("last_native_clock", "last_conscious_clock"):
-        result[name], current = _read_clock(root / f"{name}.json", metrics=metrics)
+        result[name], current, mtime_ns = _read_clock(
+            root / f"{name}.json", root=root, metrics=metrics
+        )
         valid &= current
-    return result, valid
+        if mtime_ns is not None:
+            mtimes_ns.append(mtime_ns)
+    return result, valid, mtimes_ns
 
 
 def _schema_is_known(rows: dict[str, list[dict[str, Any]]]) -> bool:
@@ -442,12 +502,8 @@ def project_desktop_presentation(
             generated=generated,
             reason="malformed_state",
         )
-    if not root_path.exists() or not root_path.is_dir():
-        return _unavailable(
-            instance=instance, profile=profile, surface=surface, generated=generated
-        )
     try:
-        rows, valid = _read_state(root_path)
+        rows, valid, mtimes_ns = _read_state(root_path)
     except (OSError, ValueError):
         return _unavailable(
             instance=instance, profile=profile, surface=surface, generated=generated
@@ -593,20 +649,12 @@ def project_desktop_presentation(
                 )
                 posture, headline, detail = "settled", "settled_lifecycle", "settled_lifecycle"
     try:
-        owned_paths = []
-        for relative in _STATE_FILES:
-            path = root_path / relative
-            try:
-                if path.stat().st_mode:
-                    owned_paths.append(path)
-            except FileNotFoundError:
-                continue
         observed_dt = (
-            datetime.fromtimestamp(max(path.stat().st_mtime for path in owned_paths), timezone.utc)
-            if owned_paths
+            datetime.fromtimestamp(max(mtimes_ns) / 1_000_000_000, timezone.utc)
+            if mtimes_ns
             else None
         )
-    except (OSError, ValueError, OverflowError):
+    except (ValueError, OverflowError):
         return _unavailable(
             instance=instance, profile=profile, surface=surface, generated=generated
         )

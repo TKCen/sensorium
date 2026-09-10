@@ -296,6 +296,8 @@ def validate_admission_binding(store, binding: Any) -> tuple[bool, str]:
 
 
 def _decision_projection(row: dict) -> dict:
+    binding = row.get("admission_binding")
+    binding = binding if isinstance(binding, dict) else {}
     return {
         "ts": row.get("ts"),
         "type": row.get("type"),
@@ -304,8 +306,21 @@ def _decision_projection(row: dict) -> dict:
         "output_action": row.get("output_action"),
         "candidate_id": row.get("candidate_id"),
         "reason_code": row.get("reason_code"),
-        "admission_key": (row.get("admission_binding") or {}).get("admission_key"),
+        "admission_key": binding.get("admission_key"),
     }
+
+
+def _advisory_meta(row: dict) -> dict:
+    meta = row.get("advisory_meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _advisory_binding(row: dict) -> dict | None:
+    binding = row.get("admission_binding")
+    if isinstance(binding, dict):
+        return binding
+    nested = _advisory_meta(row).get("admission_binding")
+    return nested if isinstance(nested, dict) else None
 
 
 def _is_successful_applying_disposition(row: dict) -> bool:
@@ -375,7 +390,7 @@ def _memory_prior_rows(
     for row in snap["candidates"]:
         if row.get("kind") != "subconscious_advisory":
             continue
-        prior = row.get("admission_binding") or (row.get("advisory_meta") or {}).get("admission_binding")
+        prior = _advisory_binding(row)
         if not isinstance(prior, dict):
             continue
         attributed, limitation = _memory_members_for_prior(store, prior, binding, snap)
@@ -387,7 +402,7 @@ def _memory_prior_rows(
         projection = {
             "ts": row.get("updated_at") or row.get("created_at"),
             "type": "subconscious.advisory.candidate",
-            "action": (row.get("advisory_meta") or {}).get("action"),
+            "action": _advisory_meta(row).get("action"),
             "candidate_id": row.get("id"),
             "status": row.get("status"),
             "admission_key": prior.get("admission_key"),
@@ -424,12 +439,12 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
     for row in snap["candidates"]:
         if row.get("kind") != "subconscious_advisory":
             continue
-        prior = row.get("admission_binding") or (row.get("advisory_meta") or {}).get("admission_binding")
+        prior = _advisory_binding(row)
         if isinstance(prior, dict) and prior.get("item_key") == binding["item_key"]:
             relevant.append({
                 "ts": row.get("updated_at") or row.get("created_at"),
                 "type": "subconscious.advisory.candidate",
-                "action": (row.get("advisory_meta") or {}).get("action"),
+                "action": _advisory_meta(row).get("action"),
                 "candidate_id": row.get("id"),
                 "status": row.get("status"),
                 "admission_key": prior.get("admission_key"),

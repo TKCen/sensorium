@@ -28,6 +28,7 @@ from .schemas import (
     intersect_allowed_surfaces,
     merge_sensitivity,
     normalize_signal,
+    parse_utc_z_checkpoint,
     sanitize_profile_name,
     truncate_text,
     utc_now_iso,
@@ -1082,6 +1083,15 @@ def _handle_sensorium_candidate_update_locked(
         return _err(instance, "candidate_leased_requires_exact_settlement")
     if action == "resume" and old_status != "held":
         return _err(instance, f"Candidate '{candidate_id}' is {old_status} and cannot be resumed.")
+    if action == "resume" and target.get("held_return") is not None:
+        held_return = target.get("held_return")
+        if not isinstance(held_return, dict) or held_return.get("reason_code") != "time_checkpoint":
+            return _err(instance, "candidate_checkpoint_malformed")
+        checkpoint = parse_utc_z_checkpoint(held_return.get("not_before"))
+        if checkpoint is None:
+            return _err(instance, "candidate_checkpoint_malformed")
+        if datetime.now(timezone.utc) < checkpoint[1]:
+            return _err(instance, "candidate_checkpoint_not_due")
     if action == "suppress":
         new_status = "suppressed"
     elif action == "hold":
@@ -1101,6 +1111,7 @@ def _handle_sensorium_candidate_update_locked(
         target["hold_reason"] = reason
     elif action == "resume":
         target["hold_reason"] = ""
+        target.pop("held_return", None)
     if action in {"suppress", "cancel", "mark_reviewed"}:
         reason_lower = reason.lower()
         if action == "suppress" or "reject" in reason_lower or "silence" in reason_lower:

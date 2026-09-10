@@ -157,23 +157,45 @@ def prepare_local_outbox_request(
     if delivery_mode in DIRECT_DELIVERY_MODES:
         return _denied("direct_modes_disabled", "The local consumer cannot prepare direct delivery modes.")
 
-    effective_content_hash = content_hash or hashlib.sha256(
-        (message_preview or title or "").encode()
-    ).hexdigest()[:16]
-    content_length = len(message_preview or title or "")
+    stored_title = truncate_text(title, 200) if title else ""
+    stored_message = truncate_text(message_preview, 500) if message_preview else ""
+    authored_content = stored_message or stored_title
+    effective_content_hash = hashlib.sha256(authored_content.encode()).hexdigest()[:16]
+    if content_hash and str(content_hash).lower() != effective_content_hash:
+        return _denied(
+            "content_hash_mismatch",
+            "The supplied content hash does not match the exact authored content.",
+        )
+    content_length = len(authored_content)
+    revision_key = source_revision_key(
+        candidate_id=candidate_id,
+        source_candidate_ids=source_candidate_ids,
+        source_candidate_fingerprint=source_candidate_fingerprint,
+    )
     idempotency_key = _compute_idempotency_key(
         origin_thread_id=candidate_id,
         delivery_mode=delivery_mode,
         target={},
-        content_hash=source_revision_key(
-            candidate_id=candidate_id,
-            source_candidate_ids=source_candidate_ids,
-            source_candidate_fingerprint=source_candidate_fingerprint,
-        ),
+        content_hash=f"{revision_key}:{request_type}:{effective_content_hash}",
     )
     existing_requests = store.read_jsonl("outbox")
     existing = _find_existing_outbox_request(existing_requests, idempotency_key)
     if existing is not None:
+        if (
+            existing.get("origin_candidate_id") != candidate_id
+            or existing.get("source_revision_key") != revision_key
+            or existing.get("source_candidate_ids") != list(source_candidate_ids or [])
+            or existing.get("source_candidate_fingerprint")
+            != str(source_candidate_fingerprint or "")
+            or existing.get("request_type") != request_type
+            or existing.get("message_preview") != stored_message
+            or str(existing.get("content_hash") or "").lower() != effective_content_hash
+            or existing.get("content_length") != content_length
+        ):
+            return _denied(
+                "idempotency_content_mismatch",
+                "The existing local request does not match the exact source and authored content.",
+            )
         return {"success": True, "data": existing, "idempotent_hit": True}
 
     now = utc_now_iso()
@@ -188,18 +210,14 @@ def prepare_local_outbox_request(
         "surface": surface,
         "delivery_mode": delivery_mode,
         "target": {},
-        "title": truncate_text(title, 200) if title else "",
-        "message_preview": truncate_text(message_preview, 500) if message_preview else "",
+        "title": stored_title,
+        "message_preview": stored_message,
         "media_refs": [],
         "content_hash": effective_content_hash,
         "content_length": content_length,
         "source_candidate_ids": list(source_candidate_ids or []),
         "source_candidate_fingerprint": str(source_candidate_fingerprint or ""),
-        "source_revision_key": source_revision_key(
-            candidate_id=candidate_id,
-            source_candidate_ids=source_candidate_ids,
-            source_candidate_fingerprint=source_candidate_fingerprint,
-        ),
+        "source_revision_key": revision_key,
         "idempotency_key": idempotency_key,
         "sensitivity": sensitivity,
         "allowed_surfaces": ["local"],

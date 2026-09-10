@@ -163,6 +163,7 @@ def test_actual_production_owners_freeze_exact_sufficient_48(tmp_path, monkeypat
             dry_run=False,
             now=f"2026-01-02T0{i}:05:00Z",
         )["success"]
+    assert prospective_evidence._wait_for_observation_queue(10)
     result = capture.closeout(now="2026-01-15T00:00:00Z")
     assert result["verdict"] == "SUFFICIENT_PRIVATE_EVIDENCE", result
     counts = json.loads(capture.manifest_path.read_text())["counts"]
