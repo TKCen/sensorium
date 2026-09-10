@@ -52,7 +52,7 @@ def _schema(name: str, description: str, properties: dict[str, Any] | None = Non
 def register(ctx) -> None:
     """Register Agent Sensorium plugin tools, command, and bundled skill."""
     from .commands import handle_sensorium_command
-    from .config import load_instance_config
+    from .config import load_instance_config, resolve_hermes_surface
     from .conscious_aperture import settle_conscious_aperture_item
     from .conscious_doorway import handle_conscious_doorway_pre_llm
     from .conscious_reachout import apply_conscious_reachout_decision
@@ -93,7 +93,8 @@ def register(ctx) -> None:
         instance = _arg_instance(args)
         if instance is None:
             return _live_result({"success": False, "instance": None, "data": None, "error": "invalid_instance"})
-        surface = str(args.get("surface") or kw.get("platform") or "local").strip() or "local"
+        requested_platform = kw.get("platform") or args.get("surface") or "local"
+        platform_label, surface = resolve_hermes_surface(requested_platform)
         text = str(args.get("text") or "").strip()
         target_id = str(args.get("id") or "latest").strip() or "latest"
         state_dir = kw.get("state_dir")
@@ -158,6 +159,7 @@ def register(ctx) -> None:
                     text=text,
                     kind=kind,
                     surface=surface,
+                    platform=platform_label,
                     intent=intent,
                     ingested=False,
                     skipped_reason=ingest_reason,
@@ -181,6 +183,7 @@ def register(ctx) -> None:
                 "strength_hint": strength,
                 "sensitivity": "private",
                 "allowed_surfaces": allowed_surfaces,
+                "platform": platform_label,
                 "correlation_keys": [
                     "active-session",
                     f"surface:{surface}",
@@ -198,6 +201,7 @@ def register(ctx) -> None:
                 text=text,
                 kind=kind,
                 surface=surface,
+                platform=platform_label,
                 intent=intent,
                 signal_id=signal_id,
                 ingested=bool(parsed.get("success")),
@@ -239,6 +243,7 @@ def register(ctx) -> None:
                 settlement_decisions = {
                     "mark_reviewed": "REVIEWED",
                     "reviewed": "REVIEWED",
+                    "no_action": "REVIEWED",
                     "settle": "SETTLED",
                     "hold": "HELD",
                 }
@@ -384,7 +389,10 @@ def register(ctx) -> None:
                     "type": "string",
                     "description": "Update keyword: close, hold, settle, resume, archive, mark_reviewed, pin, or unpin.",
                 },
-                "surface": {"type": "string", "description": "local or discord; defaults local."},
+                "surface": {
+                    "type": "string",
+                    "description": "Sensorium policy surface; desktop, tui, and cli use the local domain.",
+                },
             },
         ),
         handler=_handle_live_sensorium,

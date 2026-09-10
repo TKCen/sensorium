@@ -14,7 +14,13 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .outbox import DiscordAdapter, DIRECT_DELIVERY_MODES, dispatch_outbox_request, prepare_outbox_request
+from .outbox import (
+    DiscordAdapter,
+    DIRECT_DELIVERY_MODES,
+    dispatch_outbox_request,
+    prepare_local_outbox_request,
+    prepare_outbox_request,
+)
 from .schemas import SENSITIVITY_RANK, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -52,6 +58,7 @@ _BLOCKED_REASONS = frozenset({
     "target_not_allowed",
     "sensitivity_exceeds_policy",
     "missing_message",
+    "message_too_long",
     "missing_outbox_id",
     "outbox_not_found",
     "outbox_not_prepared",
@@ -204,6 +211,56 @@ def _cooldown_active(decisions: list[dict[str, Any]], *, now_dt: datetime, coold
     return False
 
 
+def evaluate_conscious_reachout_policy(
+    store: SensoriumStore,
+    *,
+    decision: str,
+    actor_tier: str = "conscious",
+    reason: str = "",
+    message: str = "",
+    surface: str = "local",
+    target_ref: str = "",
+    target: dict | None = None,
+    sensitivity: str = "private",
+    config: dict | None = None,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Pure/read-only policy validation for a prospective Conscious choice."""
+    cfg = _merged_reachout_config(config)
+    decision = str(decision or "").strip()
+    actor_tier = str(actor_tier or "").strip()
+    surface = str(surface or "local").strip()
+    target = target if isinstance(target, dict) else {}
+    target_ref = _target_ref(surface, str(target_ref or ""), target)
+    sensitivity = sensitivity if sensitivity in SENSITIVITY_RANK else "private"
+    message = " ".join(str(message or "").split())
+    if decision not in REACHOUT_DECISIONS:
+        return {"success": False, "error": "invalid_decision"}
+    if not cfg.get("enabled"):
+        return {"success": False, "error": "reachout_disabled"}
+    if actor_tier != "conscious" and decision not in {"no_action", "hold"}:
+        return {"success": False, "error": "subconscious_may_not_reach_out"}
+    if surface not in cfg["allowed_surfaces"]:
+        return {"success": False, "error": "surface_not_allowed"}
+    if cfg["allowed_targets"] and target_ref not in cfg["allowed_targets"]:
+        return {"success": False, "error": "target_not_allowed"}
+    if SENSITIVITY_RANK[sensitivity] > SENSITIVITY_RANK[cfg["max_sensitivity"]]:
+        return {"success": False, "error": "sensitivity_exceeds_policy"}
+    if decision in _CONTENT_DECISIONS and not message:
+        return {"success": False, "error": "missing_message"}
+    max_chars = min(500, int(cfg["max_message_chars"]))
+    if decision in _CONTENT_DECISIONS and len(message) > max_chars:
+        return {"success": False, "error": "message_too_long", "max_chars": max_chars}
+    if decision in _DIRECT_DECISIONS and _cooldown_active(
+        store.read_jsonl("decisions"),
+        now_dt=_parse_utc(now) or datetime.now(timezone.utc),
+        cooldown_minutes=int(cfg["cooldown_minutes"]),
+        target_ref=target_ref,
+    ):
+        return {"success": False, "error": "cooldown_active"}
+    return {"success": True, "target_ref": target_ref, "max_chars": max_chars}
+
+
 def apply_conscious_reachout_decision(
     store: SensoriumStore,
     *,
@@ -217,6 +274,9 @@ def apply_conscious_reachout_decision(
     target: dict | None = None,
     sensitivity: str = "private",
     thread_id: str = "",
+    origin_candidate_id: str = "",
+    source_candidate_ids: list[str] | None = None,
+    source_candidate_fingerprint: str = "",
     outbox_id: str = "",
     config: dict | None = None,
     execute: bool = False,
@@ -236,7 +296,7 @@ def apply_conscious_reachout_decision(
     now_dt = _parse_utc(now_iso) or datetime.now(timezone.utc)
     decision = str(decision or "").strip()
     surface = str(surface or "local").strip()
-    message = truncate_text(message.strip(), int(cfg["max_message_chars"])) if message else ""
+    message = " ".join(message.split()) if message else ""
     target = target if isinstance(target, dict) else {}
     outbox_id = str(outbox_id or "").strip()
     prepared_for_delivery: dict[str, Any] | None = None
@@ -270,6 +330,29 @@ def apply_conscious_reachout_decision(
         receipt["thread_id"] = thread_id
     if outbox_id:
         receipt["outbox_id"] = outbox_id
+    if origin_candidate_id:
+        receipt["origin_candidate_id"] = origin_candidate_id
+    if source_candidate_ids is not None:
+        receipt["source_candidate_ids"] = list(source_candidate_ids)
+    if source_candidate_fingerprint:
+        receipt["source_candidate_fingerprint"] = source_candidate_fingerprint
+
+    if decision in {"prepare_message", "reach_out"}:
+        policy = evaluate_conscious_reachout_policy(
+            store,
+            decision=decision,
+            actor_tier=actor_tier,
+            reason=reason,
+            message=message,
+            surface=surface,
+            target_ref=target_ref,
+            target=target,
+            sensitivity=sensitivity,
+            config=config,
+            now=now_iso,
+        )
+        if not policy.get("success"):
+            return _append_denied(store, receipt, str(policy.get("error") or "policy_denied"))
 
     if decision not in REACHOUT_DECISIONS:
         return _append_denied(store, receipt, "invalid_decision")
@@ -361,20 +444,38 @@ def apply_conscious_reachout_decision(
             return _append_denied(store, receipt, "direct_delivery_surface_unsupported")
         if adapter is None:
             return _append_denied(store, receipt, "missing_delivery_adapter")
-    elif thread_id:
-        prepared = prepare_outbox_request(
-            store,
-            thread_id=thread_id,
-            request_type="REACH_OUT",
-            surface=surface,
-            delivery_mode=delivery_mode,
-            target=target,
-            title="Conscious reach-out",
-            message_preview=message,
-            content_hash=_content_hash(message),
-            config=outbox_cfg,
-            dry_run=False,
-        )
+    elif thread_id or origin_candidate_id:
+        if thread_id:
+            prepared = prepare_outbox_request(
+                store,
+                thread_id=thread_id,
+                request_type="REACH_OUT",
+                surface=surface,
+                delivery_mode=delivery_mode,
+                target=target,
+                title="Conscious reach-out",
+                message_preview=message,
+                content_hash=_content_hash(message),
+                config=outbox_cfg,
+                dry_run=False,
+            )
+        else:
+            prepared = prepare_local_outbox_request(
+                store,
+                origin_candidate_id=origin_candidate_id,
+                request_type="REACH_OUT",
+                surface=surface,
+                delivery_mode=delivery_mode,
+                target=target,
+                title="Conscious reach-out",
+                message_preview=message,
+                content_hash=_content_hash(message),
+                sensitivity=sensitivity,
+                allowed_surfaces=[surface],
+                source_candidate_ids=source_candidate_ids,
+                source_candidate_fingerprint=source_candidate_fingerprint,
+                dry_run=False,
+            )
         if not prepared.get("success"):
             reason = str(prepared.get("error") or "outbox_prepare_failed")
             return _append_denied(store, receipt, reason if reason in _BLOCKED_REASONS else "outbox_prepare_failed")

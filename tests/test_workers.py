@@ -664,12 +664,20 @@ class TestSubconsciousDelegateWork:
             "correlation_keys": ["kanban_pressure"],
             "sensitivity": "local_only", "allowed_surfaces": ["local"],
         })
+        store.append_jsonl("candidates", {
+            "id": "cand_1", "status": "candidate", "kind": "unresolved_question",
+            "summary": "Kanban pressure may warrant bounded delegation review",
+            "pressure": 0.75, "event_ids": ["evt_1"],
+            "correlation_keys": ["kanban_pressure"],
+            "sensitivity": "local_only", "allowed_surfaces": ["local"],
+            "created_at": "2026-05-26T10:00:00Z", "updated_at": "2026-05-26T10:00:00Z",
+        })
 
         output = {
             "action": "CREATE_CONSCIOUS_TASK",
             "rationale": "Kanban pressure warrants worker delegation.",
             "event_ids": ["evt_1"],
-            "candidate_ids": [],
+            "candidate_ids": ["cand_1"],
             "pressure": 0.75,
             "conscious_task": {
                 "request_type": "DELEGATE_WORK",
@@ -685,8 +693,9 @@ class TestSubconsciousDelegateWork:
 
         assert result["action"] == "created_conscious_task_candidate"
         candidates = store.read_jsonl("candidates")
-        assert len(candidates) == 1
-        assert candidates[0]["conscious_task"]["request_type"] == "DELEGATE_WORK"
+        assert len(candidates) == 2
+        advisory = next(c for c in candidates if c["kind"] == "subconscious_advisory")
+        assert advisory["conscious_task"]["request_type"] == "DELEGATE_WORK"
 
         assert store.read_jsonl("worker_requests") == []
 

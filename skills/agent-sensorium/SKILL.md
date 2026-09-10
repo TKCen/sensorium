@@ -4,7 +4,7 @@ Bounded inner-lifecycle substrate for Hermes agents. Captures salient signals, p
 
 ## Repair posture (for the host agent reading this skill)
 
-If you are a host agent or maintainer and you are reading this skill because Sensorium itself is broken or you want to change it: **do not patch the substrate inline.** Sensorium is an *attention substrate*, and altering it from the foreground compromises the very attention you are using to fix it.
+If you are a host agent or lead and you are reading this skill because Sensorium itself is broken or you want to change it: **do not patch the substrate inline.** Sensorium is an *attention substrate*, and altering it from the foreground compromises the very attention you are using to fix it.
 
 - ≤3 tool calls, reversible, mostly judgment/synthesis → foreground is fine (a `status`/`ingest` smoke, a one-line config read).
 - 4+ tool calls, repo-wide inspection, code patch, migration, gateway/runtime sync, ambiguous substrate repair, or anything touching `~/.hermes/plugins/agent-sensorium/` live state → dispatch a worker lane (OMC `/ultrawork` in an isolated worktree, or OMX for surgical). The host keeps the DM cockpit; the lane does the work; the host reviews the report and decides.

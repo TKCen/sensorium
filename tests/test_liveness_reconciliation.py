@@ -20,7 +20,13 @@ def _candidate(candidate_id, pressure=0.9, status="candidate"):
 def _conscious_candidate(candidate_id, status="candidate"):
     row = _candidate(candidate_id, status=status)
     row["kind"] = "subconscious_advisory"
-    row["conscious_task"] = {"id": f"task_{candidate_id}", "request_type": "THINK"}
+    row["conscious_task"] = {
+        "id": f"task_{candidate_id}",
+        "request_type": "THINK",
+        "title": "Review liveness fixture",
+        "why": "Exercise exact recoverable aperture semantics.",
+        "expected_decision": "Settle or retain the item explicitly.",
+    }
     return row
 
 

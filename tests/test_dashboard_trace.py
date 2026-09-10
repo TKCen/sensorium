@@ -50,6 +50,7 @@ def test_trace_topology_node_shows_configured_neighbors_and_overlay_status(tmp_p
     _append_jsonl(root / "signals" / "inbox.jsonl", {"id": "sig_1", "sensor": "runtime_heartbeat", "ts": "2026-06-21T10:00:00Z"})
 
     mod = _load_dashboard(monkeypatch, root)
+    monkeypatch.setattr(mod, "_now", lambda: "2026-06-21T10:01:00Z")
     data = asyncio.run(mod.trace(node_id="sensor:runtime_heartbeat", instance="demo"))
 
     assert data["ok"] is True

@@ -2,6 +2,11 @@
 
 Sensorium can optionally return proposed context for a bounded set of internal advisory candidates to a foreground Hermes turn. The doorway is disabled by default and remains local-only unless an operator narrows and enables another permitted surface.
 
+Hermes identifies its local interactive frontends as `desktop`, `tui`, `cli`,
+or `local`. Sensorium maps only that closed set to the existing `local` policy
+domain while retaining the original platform label in presentation receipts.
+Remote and unknown platform labels are not treated as local.
+
 ## Lifecycle contract
 
 Each eligible candidate has one canonical execution owner at a time:

@@ -288,6 +288,187 @@ def test_capacity_one_persists_alternation_so_neither_lane_starves(tmp_path):
     assert lanes == ["recovery", "fresh", "recovery", "fresh"]
 
 
+def _due_held(candidate_id: str) -> dict:
+    row = _candidate(candidate_id, pressure=0.2)
+    row["status"] = "held"
+    row["held_return"] = {
+        "not_before": "2026-06-07T11:00:00Z",
+        "reason_code": "time_checkpoint",
+    }
+    return row
+
+
+def test_same_owner_capacity_one_yields_to_existing_fairness_and_preserves_context(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    incumbent = _candidate("incumbent")
+    incumbent["summary"] = "Meaningful incumbent context"
+    store.append_jsonl("candidates", incumbent)
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+        lease_minutes=30, dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    old_item = first["aperture"][0]
+    rows = store.read_jsonl("candidates")
+    rows.extend([_due_held("due"), _candidate("fresh-0"), _candidate("fresh-1")])
+    store.rewrite_jsonl("candidates", rows)
+
+    picks = []
+    for minute in (1, 2, 3):
+        packet = open_conscious_aperture(
+            store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+            lease_minutes=30, dry_run=False, now=f"2026-06-07T12:0{minute}:00Z",
+        )
+        picks.append(packet["candidate_ids"][0])
+        rows = store.read_jsonl("candidates")
+        rows.append(_candidate(f"pressure-{minute}", pressure=0.99,
+                               created_at=f"2026-06-07T12:0{minute}:30Z"))
+        store.rewrite_jsonl("candidates", rows)
+
+    assert picks[0] == "due"
+    assert "incumbent" in picks[:3]
+    preserved = next(row for row in store.read_jsonl("candidates") if row["id"] == "incumbent")
+    assert preserved["summary"] == "Meaningful incumbent context"
+    assert preserved["conscious_task"] == incumbent["conscious_task"]
+    assert preserved["conscious_aperture"]["generation"] == 2
+    yielded = [row for row in store.read_jsonl("decisions")
+               if row.get("type") == "conscious.aperture.yielded"]
+    assert yielded and yielded[0] == {
+        "ts": "2026-06-07T12:01:00Z",
+        "type": "conscious.aperture.yielded",
+        "candidate_id": "incumbent",
+        "aperture_id": old_item["aperture_id"],
+        "consumer_id": "same-owner",
+        "reason_code": "same_owner_fairness_yield",
+        "decision_preserved": True,
+        "previous_lease_expires_at": "2026-06-07T12:30:00Z",
+        "lease_expires_at": "2026-06-07T12:01:00Z",
+    }
+    assert not any(row.get("decision") for row in yielded)
+
+
+def test_fixed_clock_reopen_yields_incumbent_and_serves_due_without_settlement(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    now = "2026-06-07T12:00:00Z"
+    store.append_jsonl("candidates", _candidate("incumbent"))
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+        lease_minutes=30, dry_run=False, now=now,
+    )
+    rows = store.read_jsonl("candidates")
+    rows.append(_due_held("due"))
+    store.rewrite_jsonl("candidates", rows)
+
+    tracked = [
+        store.root / name
+        for name in (
+            "candidates.jsonl", "decisions.jsonl", "conscious-aperture.json",
+            "outbox.jsonl", "worker-requests.jsonl",
+        )
+    ]
+    before_preview = {
+        path.name: path.read_bytes() if path.exists() else None for path in tracked
+    }
+    preview = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+        lease_minutes=30, dry_run=True, now=now,
+    )
+    assert preview["candidate_ids"] == ["due"]
+    assert {
+        path.name: path.read_bytes() if path.exists() else None for path in tracked
+    } == before_preview
+
+    reopened = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+        lease_minutes=30, dry_run=False, now=now,
+    )
+    assert reopened["action"] == "opened_aperture"
+    assert reopened["candidate_ids"] == ["due"]
+    yielded = [
+        row for row in store.read_jsonl("decisions")
+        if row.get("type") == "conscious.aperture.yielded"
+    ]
+    assert yielded == [{
+        "ts": now,
+        "type": "conscious.aperture.yielded",
+        "candidate_id": "incumbent",
+        "aperture_id": first["aperture_id"],
+        "consumer_id": "same-owner",
+        "reason_code": "same_owner_fairness_yield",
+        "decision_preserved": True,
+        "previous_lease_expires_at": "2026-06-07T12:30:00Z",
+        "lease_expires_at": now,
+    }]
+    assert not [
+        row for row in store.read_jsonl("decisions")
+        if row.get("type") == "conscious.aperture.settled"
+    ]
+
+
+def test_same_owner_yield_dry_run_ineligible_and_no_contender_are_nonmutating(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.append_jsonl("candidates", _candidate("incumbent"))
+    first = open_conscious_aperture(
+        store, aperture_size=1, max_active_sessions=1, consumer_id="same-owner",
+        lease_minutes=5, dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    renewed = open_conscious_aperture(
+        store, aperture_size=1, max_active_sessions=1, consumer_id="same-owner",
+        lease_minutes=20, dry_run=False, now="2026-06-07T12:01:00Z",
+    )
+    assert renewed["action"] == "resumed_aperture"
+    assert renewed["aperture"][0]["lease_expires_at"] == "2026-06-07T12:21:00Z"
+
+    hidden = _candidate("hidden")
+    hidden["allowed_surfaces"] = ["discord"]
+    rows = store.read_jsonl("candidates")
+    rows.append(hidden)
+    store.rewrite_jsonl("candidates", rows)
+    before = {name: store.read_jsonl(name) for name in ("candidates", "decisions")}
+    preview = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
+        surface="local", instance_config={"allowed_surfaces": ["local", "discord"]},
+        dry_run=True, now="2026-06-07T12:02:00Z",
+    )
+    assert preview["action"] == "resumed_aperture"
+    assert {name: store.read_jsonl(name) for name in ("candidates", "decisions")} == before
+    assert not [row for row in store.read_jsonl("decisions")
+                if row.get("type") == "conscious.aperture.yielded"]
+    assert first["aperture_id"] == renewed["aperture_id"]
+
+
+def test_same_owner_yield_never_preempts_third_party_and_old_token_cannot_mutate(tmp_path):
+    store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
+    store.rewrite_jsonl("candidates", [_candidate("mine"), _candidate("theirs")])
+    mine = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=2, consumer_id="same-owner",
+        dry_run=False, now="2026-06-07T12:00:00Z",
+    )
+    theirs = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=2, consumer_id="other-owner",
+        dry_run=False, now="2026-06-07T12:00:10Z",
+    )
+    rows = store.read_jsonl("candidates")
+    rows.append(_due_held("due"))
+    store.rewrite_jsonl("candidates", rows)
+    served = open_conscious_aperture(
+        store, aperture_size=1, max_active_items=2, consumer_id="same-owner",
+        dry_run=False, now="2026-06-07T12:01:00Z",
+    )
+    assert served["candidate_ids"] == ["due"]
+    third_party = next(row for row in store.read_jsonl("candidates") if row["id"] == "theirs")
+    assert third_party["conscious_aperture"]["consumer_id"] == "other-owner"
+    assert third_party["conscious_aperture"]["lease_expires_at"] == theirs["lease_expires_at"]
+
+    before = store.read_jsonl("candidates")
+    stale = settle_conscious_aperture_item(
+        store, candidate_id="mine", aperture_id=mine["aperture_id"],
+        consumer_id="same-owner", decision="SETTLED", reason="Old token.",
+        dry_run=False, now="2026-06-07T12:01:30Z",
+    )
+    assert stale["error"] == "aperture_lease_expired"
+    assert store.read_jsonl("candidates") == before
+
+
 def test_foreground_open_and_presentation_decode_zero_decision_rows(tmp_path, monkeypatch):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
     for index in range(600):

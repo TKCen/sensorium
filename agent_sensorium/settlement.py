@@ -22,6 +22,7 @@ from .gate import is_feedback_self_loop
 from .conscious_aperture import requires_exact_settlement
 from .schemas import parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
+from .prospective_evidence import observe_after_success
 
 VALID_SETTLEMENT_DECISIONS = {"DROP", "SAVE", "PROMOTE_CONSCIOUS"}
 RECEIPT_SCHEMA = "sensorium.decision_receipt.v1"
@@ -676,7 +677,7 @@ def apply_kanban_settlement(
 ) -> dict:
     """Apply a Kanban settlement under the profile-wide candidate transaction."""
     with store.candidate_transaction():
-        return _apply_kanban_settlement_locked(
+        result = _apply_kanban_settlement_locked(
             store,
             decision=decision,
             candidate_id=candidate_id,
@@ -689,6 +690,25 @@ def apply_kanban_settlement(
             reason=reason,
             record_receipt=record_receipt,
         )
+    # The detached observer never runs while the canonical candidate lock is held.
+    if result.get("updated_candidate_ids"):
+        try:
+            from .config import load_instance_config
+            capture_config, _ = load_instance_config(state_dir=str(store.root))
+            for settled_id in result["updated_candidate_ids"]:
+                observe_after_success(
+                    store.root,
+                    capture_config.get("prospective_evidence_capture", {}),
+                    "settled",
+                    {
+                        "candidate_id": settled_id,
+                        "source_class": "kanban",
+                        "settlement": "settled",
+                    },
+                )
+        except Exception:
+            pass
+    return result
 
 
 def apply_settlement_record(store: SensoriumStore, record: dict) -> dict:

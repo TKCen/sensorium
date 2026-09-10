@@ -507,7 +507,7 @@
     "memory reflection": "Reflects compact memory pressure before it becomes candidate attention.",
     "signal inbox": "Aggregates incoming signals/events before gates or review choose what matters.",
     "promotion gate": "Decides whether pressure stays quiet, becomes a candidate, or opens review.",
-    "conscious aperture": "Foreground/conscious review lane for choices that require deliberate judgment.",
+    "conscious aperture": "Foreground/conscious review lane for choices that need agent-level judgment.",
     "subconscious review": "Cheap/background triage that classifies candidates before conscious work.",
     "attention inbox": "Visible attention surface: what can be offered or opened now.",
     "kanban bridge": "Converts approved durable work into task-board pressure without owning judgment.",

@@ -10,6 +10,7 @@ from pathlib import Path
 
 def _load_dashboard(monkeypatch, state_dir: Path):
     monkeypatch.setenv("SENSORIUM_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("SENSORIUM_METRICS_DIR", str(state_dir.parent / "isolated-metrics"))
     path = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
     spec = importlib.util.spec_from_file_location("sensorium_dashboard_runtime_status_test", path)
     assert spec is not None
@@ -39,7 +40,7 @@ def test_runtime_status_route_is_get_only(tmp_path, monkeypatch):
     assert routes["/runtime-status"] == ["GET"]
 
 
-def test_runtime_status_configured_nodes_default_quiet_with_no_runtime_rows(tmp_path, monkeypatch):
+def test_runtime_status_configured_nodes_default_unknown_with_no_runtime_rows(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     _write_registry(
         root,
@@ -60,13 +61,14 @@ def test_runtime_status_configured_nodes_default_quiet_with_no_runtime_rows(tmp_
     assert data["topology_config_version"].startswith("sha256:")
     assert set(data["status_vocab"]) == {
         "active", "quiet", "degraded", "error", "processing", "waiting",
-        "reviewing", "blocked", "held", "settled", "stale",
+        "reviewing", "blocked", "held", "settled", "stale", "unknown",
+        "awaiting_checkpoint", "overdue", "prepared",
     }
 
     nodes_by_id = {node["id"]: node for node in data["nodes"]}
-    assert nodes_by_id["sensor:runtime_heartbeat"]["status"] == "quiet"
-    assert nodes_by_id["processor:dispatcher"]["status"] == "quiet"
-    assert nodes_by_id["gate:conscious_aperture"]["status"] == "quiet"
+    assert nodes_by_id["sensor:runtime_heartbeat"]["status"] == "unknown"
+    assert nodes_by_id["processor:dispatcher"]["status"] == "unknown"
+    assert nodes_by_id["gate:conscious_aperture"]["status"] == "unknown"
     for node in data["nodes"]:
         assert node["status"] in data["status_vocab"]
 
@@ -76,7 +78,7 @@ def test_runtime_status_configured_nodes_default_quiet_with_no_runtime_rows(tmp_
     assert data["meta"]["is_stale"] is False
 
 
-def test_runtime_status_sensor_node_active_via_recent_signal(tmp_path, monkeypatch):
+def test_runtime_status_retained_signal_is_not_replayed_as_recent_activity(tmp_path, monkeypatch):
     root = tmp_path / "sensorium" / "demo"
     _write_registry(root, blocks={"runtime_heartbeat": {"type": "sensor", "status": "active"}})
     _append_jsonl(root / "signals" / "inbox.jsonl", {
@@ -90,8 +92,8 @@ def test_runtime_status_sensor_node_active_via_recent_signal(tmp_path, monkeypat
     data = asyncio.run(mod.runtime_status(instance="demo"))
 
     nodes_by_id = {node["id"]: node for node in data["nodes"]}
-    assert nodes_by_id["sensor:runtime_heartbeat"]["status"] == "active"
-    assert nodes_by_id["sensor:runtime_heartbeat"]["source"] == "signal_match"
+    assert nodes_by_id["sensor:runtime_heartbeat"]["status"] == "unknown"
+    assert nodes_by_id["sensor:runtime_heartbeat"]["source"] == "no_observation"
 
 
 def test_runtime_status_maps_candidate_review_held_stale_cases(tmp_path, monkeypatch):
@@ -123,9 +125,9 @@ def test_runtime_status_maps_candidate_review_held_stale_cases(tmp_path, monkeyp
     data = asyncio.run(mod.runtime_status(instance="demo"))
 
     nodes_by_id = {node["id"]: node for node in data["nodes"] if node["origin"] == "instance"}
-    assert any(n["status"] == "waiting" for n in nodes_by_id.values() if n["kind"] == "candidate")
+    assert any(n["status"] == "active" for n in nodes_by_id.values() if n["kind"] == "candidate")
     assert any(n["status"] == "settled" for n in nodes_by_id.values() if n["kind"] == "candidate")
-    assert any(n["status"] == "stale" for n in nodes_by_id.values() if n["kind"] == "candidate")
+    assert sum(n["status"] == "settled" for n in nodes_by_id.values() if n["kind"] == "candidate") == 2
     thread_nodes = [n for n in nodes_by_id.values() if n["kind"] == "thread"]
     # closed thread is not an "active" instance and must not be surfaced at all.
     assert len(thread_nodes) == 1
@@ -228,7 +230,7 @@ def test_runtime_status_unknown_and_hostile_status_does_not_leak(tmp_path, monke
     # entirely rather than surfaced with a guessed status.
     assert not any(n["kind"] == "candidate" for n in data["nodes"])
     sensor_node = next(n for n in data["nodes"] if n["kind"] == "sensor")
-    assert sensor_node["status"] == "quiet"
+    assert sensor_node["status"] == "unknown"
 
 
 def test_runtime_status_bounded_for_many_rows(tmp_path, monkeypatch):

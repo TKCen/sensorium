@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .config import load_instance_config
+from .config import load_instance_config, resolve_hermes_surface
 from .conscious_aperture import (
     DEFAULT_APERTURE_SIZE,
     DEFAULT_LEASE_MINUTES,
@@ -202,18 +202,18 @@ def handle_conscious_doorway_pre_llm(
     """Claim and attempt to present recoverable attention for one foreground turn."""
     try:
         store = SensoriumStore(instance=instance, state_dir=state_dir)
-        store.ensure_dirs()
         instance_config, _ = load_instance_config(state_dir=str(store.root))
         doorway_config = normalized_conscious_doorway_config(
             config if config is not None else instance_config.get("conscious_doorway")
         )
-        surface = str(platform or "local").strip() or "local"
+        platform_label, surface = resolve_hermes_surface(platform)
         if (
             not doorway_config["enabled"]
             or surface != "local"
             or surface not in doorway_config["surfaces"]
         ):
             return None
+        store.ensure_dirs()
         owner = foreground_consumer_id(session_id=session_id, turn_id=turn_id)
         packet = open_conscious_aperture(
             store,
@@ -238,6 +238,7 @@ def handle_conscious_doorway_pre_llm(
             consumer_id=owner,
             turn_id=receipt_turn_id,
             surface=surface,
+            platform=platform_label,
         )
         if not attempted.get("success"):
             return None

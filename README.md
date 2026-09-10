@@ -4,7 +4,7 @@ An environment-reactive attention substrate for Hermes agents. Agent Sensorium c
 
 **Authority boundary.** Agent Sensorium is an attention substrate, not an outbound automation switch. It does not send messages, create tasks, or reach out on any platform without explicit operator configuration and a conscious-tier receipt from the agent. Sensitivity tuning, surface gating, and action policies are recorded in operator-controlled configuration files so the runtime boundary stays auditable.
 
-**Repair posture (host-agent note).** Sensorium is local code, but a host agent repairing its own attention substrate from the foreground is a self-referential hazard: the attention used to fix the substrate is itself reshaped mid-repair. Host agents must apply their deployment's delegate-versus-foreground gate before patching this repository, an installed plugin tree, or the gateway/scheduler that drives it. Inline repair should remain limited to small, reversible judgment or synthesis slices.
+**Repair posture (host-agent note).** Sensorium is local code, but a host agent repairing its own attention substrate from the foreground is a self-referential hazard: the very attention it is using to fix the substrate gets re-shaped mid-repair. Host agents and their leads must apply the delegate-vs-foreground gate from `lead-orchestrator-posture` before patching anything in this repo, the installed `~/.hermes/plugins/agent-sensorium/` tree, or the gateway/cron that drives it. The bundled `agent-sensorium` skill has the *Repair posture* section. Inline repair is reserved for ≤3 tool-call reversible judgment/synthesis slices.
 
 ---
 
@@ -44,11 +44,11 @@ Signals  →  Events  →  Candidates  →  Conscious thread capsules
 
 Core pieces:
 
-- **Plugin registration (`agent_sensorium/plugin.py`)** — registers one live tool, the admin toolset, three `pre_llm_call` hooks, and the bundled skill.
+- **Plugin registration (`agent_sensorium/plugin.py`)** — registers one live tool, the admin toolset, two `pre_llm_call` hooks, and the bundled skill.
 - **Profile state (`agent_sensorium/store.py`, `config.py`)** — stores signals, events, candidates, threads, decisions, artifacts, and per-profile config under `~/.hermes/agent-sensorium/<profile>/`.
 - **Gate and promotion pipeline (`gate.py`, `attention.py`, `threads.py`)** — normalizes salience, applies sensitivity/surface policy, and builds candidate/thread state.
 - **Memory Volunteering Protocol (`docs/memory-volunteering-protocol.md`)** — formalizes the evidence-cited capsule → transparent confidence proposal → Conscious authorization sequence for any Subconscious/Sensorium path that wants to volunteer memory, insight, or offer candidates.
-- **Pre-LLM hooks (`conscious_doorway.py`, `pointers.py`, `pre_llm_salience.py`)** — lease a bounded exact-source attention packet when enabled, inject compact reminders/pointers, and keep unresolved items recoverable without creating outbound authority.
+- **Pre-LLM hooks (`pointers.py`, `pre_llm_salience.py`)** — inject compact reminders/pointers before model calls without mutating state.
 - **Deterministic tick scripts (`scripts/sensorium_tick.py`)** — run heartbeat/pressure sensors, compaction, and thread service from cron or manual smoke tests.
 - **Hot-reload registries** — per-profile `sensors/registry.json` and optional `actuators/registry.json` let deployers add/tune trusted local script sensors and prepare-only actuators without changing the gateway schema.
 - **Admin tools** — inspect and manage profiles, sensors, attention inboxes, artifacts, policies, and diagnostics.
@@ -218,8 +218,7 @@ The plugin ships generic reusable code. Deployment-specific values are read from
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `conscious_doorway` | disabled; batch `3`, active limit `3`, lease `15m`, local only | Optional recoverable foreground attention lease; `agent_label` injects deployment identity |
-| `subconscious_profile` | `"subconscious-reviewer"` | Generic reviewer fallback; inject the real Hermes profile name per deployment |
+| `subconscious_profile` | `"subconscious-reviewer"` | Hermes profile name the bridge assigns intake to (must be a real dispatcher profile) |
 | `tick_quiet_filename` | `"sensorium_tick_quiet.latest.json"` | Dashboard quiet-tick freshness file |
 | `tts` block | see below | Local TTS/talking-head sidecar (dormant until `sidecar_base`/`control_command` are set) |
 | `thresholds.single_signal_strength` / `important_kind_strength` / `candidate_pressure` / `dispatch_pressure` | gate defaults | Runtime hot-loaded salience and dispatch thresholds |
@@ -267,15 +266,13 @@ Changing these files does not require a gateway restart. Restart/new-session is 
 
 ## Pre-LLM Hooks
 
-Three `pre_llm_call` hooks run automatically before each LLM call:
+Two `pre_llm_call` hooks run automatically before each LLM call:
 
-1. **Recoverable Conscious doorway** — When explicitly enabled in profile config, leases a small bounded set of source-bound advisory candidates, records one packet-level `presentation_attempted` receipt, and returns proposed context with exact ownership tokens and settlement calls. The hook return does not prove that Hermes incorporated the context into the model API request. Unresolved items remain semantically open and can be resumed by the same consumer or reclaimed after lease expiry.
+1. **Pending-thread pointer injection** — If a conscious thread capsule is pending review, a compact pointer is prepended to the context window. The agent sees that something is waiting; it does not see the full capsule content until it explicitly calls `sensorium(action="open", ...)`.
 
-2. **Pending-thread pointer injection** — If a conscious thread capsule is pending review, a compact pointer is prepended to the context window. The agent sees that something is waiting; it does not see the full capsule content until it explicitly calls `sensorium(action="open", ...)`.
+2. **Live salience-capture reminder** — A lightweight reminder that the sensorium is active and available. This keeps the `sensorium(action="ingest", ...)` pathway salient without consuming significant context.
 
-3. **Live salience-capture reminder** — A lightweight reminder that the sensorium is active and available. This keeps the `sensorium(action="ingest", ...)` pathway salient without consuming significant context.
-
-The pointer and salience hooks are read-only from the pipeline perspective. The optional Conscious doorway writes only local lease/presentation-attempt receipts; it never records canonical consumption, dispatches, or grants outbound authority. See `docs/conscious-attention-lifecycle.md`.
+Both hooks are read-only from the pipeline perspective: they inject text, they do not mutate state.
 
 ---
 

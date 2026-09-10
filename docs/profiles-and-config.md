@@ -126,8 +126,7 @@ These fields have safe generic defaults and are dormant until configured:
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `default_actor` | `"background_conscious"` | Actor identifier for the deprecated background-conscious lease lane |
-| `conscious_doorway` | disabled; batch `3`, active limit `3`, lease `15m`, local only | Optional exact-source foreground attention leases; inject deployment identity with `agent_label` |
-| `subconscious_profile` | `"subconscious-reviewer"` | Generic reviewer profile fallback; inject the real Hermes profile name per deployment |
+| `subconscious_profile` | `"subconscious-reviewer"` | The Hermes profile name the bridge assigns intake to (must be a real dispatcher profile) |
 | `tick_quiet_filename` | `"sensorium_tick_quiet.latest.json"` | Dashboard quiet-tick freshness file name |
 | `tts` | see below | Local TTS/talking-head sidecar config — dormant until `sidecar_base`/`control_command` are set |
 

@@ -320,6 +320,19 @@ class TestKanbanBridgePrimitives:
     wrapper.
     """
 
+    def test_bridge_resolves_hermes_cli_without_scheduler_path(self, monkeypatch):
+        bridge = _load_live_bridge_module()
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+        bridge._run(["hermes", "kanban", "boards", "list"])
+
+        assert calls == [[str(bridge.HERMES_CLI), "kanban", "boards", "list"]]
+
     def _hindsight_event(self, *, eid: str, summary: str, fingerprint: str) -> dict:
         # `handle_sensorium_ingest_event` recomputes `fingerprint` from a
         # canonical content hash, so callers that need to settle by fingerprint
@@ -696,7 +709,9 @@ class TestRuntimeKanbanBridgeIntakeRows:
         created_by: str,
     ) -> None:
         assert cmd[:5] == ["hermes", "kanban", "--board", "sensorium", "create"]
-        assert self._flag_value(cmd, "--initial-status") == "blocked"
+        # The row is deliberately unassigned while running, then receives an
+        # explicit sticky block event before the real review profile is bound.
+        assert self._flag_value(cmd, "--initial-status") == "running"
         assert self._flag_value(cmd, "--created-by") == created_by
         assert "--assignee" not in cmd
         assert "--triage" not in cmd
@@ -710,6 +725,64 @@ class TestRuntimeKanbanBridgeIntakeRows:
         # profile, whatever it is — a generic invariant that holds for the
         # generic repo default and for any deployment-configured runtime copy.
         assert calls[start + 1][-1] == expected_profile
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_sticky_block_retry_is_idempotent_for_existing_blocked_intake(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """An idempotent create retry must not attempt blocked -> blocked."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        bridge._sticky_block_and_assign_intake(
+            "t_existing",
+            "already sticky-blocked",
+            current={"status": "blocked", "assignee": bridge.PROFILE},
+        )
+        assert calls == []
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_sticky_block_repairs_promoted_unassigned_intake(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A promoted retry is blocked before it gains a spawnable assignee."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        bridge._sticky_block_and_assign_intake(
+            "t_promoted",
+            "restore sticky block",
+            current={"status": "ready", "assignee": None},
+        )
+        self._assert_sticky_block_then_assign(calls, 0, bridge.PROFILE)
 
     @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
     def test_event_and_reconciliation_intakes_are_blocked_assigned(
@@ -857,6 +930,40 @@ class TestRuntimeKanbanBridgeIntakeRows:
 
         assert bridge._active_conscious([blocked, todo]) == []
         assert bridge._active_conscious([ready]) == [ready]
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_retry_exhausted_blocked_review_does_not_starve_replacement(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A dead failed review is not an active batch head forever."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        failed = {
+            "id": "t_failed_review",
+            "title": "subconscious:review:sensorium-batch:failed",
+            "status": "blocked",
+        }
+        deliberate_hold = {
+            "id": "t_held_review",
+            "title": "subconscious:review:sensorium-batch:held",
+            "status": "blocked",
+            "consecutive_failures": 0,
+        }
+
+        monkeypatch.setattr(
+            bridge,
+            "_show_task",
+            lambda task_id: {
+                **failed,
+                "events": [{"kind": "gave_up"}, {"kind": "blocked"}],
+            },
+        )
+
+        assert bridge._active_reviews([failed]) == []
+        assert bridge._active_reviews([deliberate_hold]) == [deliberate_hold]
 
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:

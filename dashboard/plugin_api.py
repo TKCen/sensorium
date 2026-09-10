@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from collections import Counter, deque
 from datetime import datetime, timezone
@@ -186,6 +187,8 @@ def _safe_surface_projection(prefix: str, value: Any, *, limit: int = 160) -> An
 
 
 def _read_json(path: Path, default: Any) -> Any:
+    if path.parent.name == "sensors" and path.name in {"registry.json", "edges.json"}:
+        return _registry_json(path.parent.parent, path.name, default)
     if not path.exists():
         return default
     try:
@@ -395,6 +398,200 @@ def _safe_liveness_timestamp(value: Any) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+_HEALTH_JSON_LIMIT = 64 * 1024
+_REGISTRY_JSON_LIMIT = 1024 * 1024
+_RUN_STATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\Z")
+_ATTENTION_PRECEDENCE = (
+    "error", "stale", "overdue", "blocked", "reviewing", "active", "held",
+    "awaiting_checkpoint", "prepared", "unknown", "quiet", "settled",
+)
+
+
+def _bounded_instance_bytes(path: Path, *, root: Path, limit: int) -> tuple[str, bytes | None]:
+    """Read bounded regular files through a pinned no-follow instance directory.
+
+    Hosts without descriptor-relative no-follow support fail closed rather than
+    falling back to a path read vulnerable to symlink-parent replacement.
+    """
+    directory_fd = leaf_fd = None
+    try:
+        parts = path.relative_to(root).parts
+        if not parts or any(part in {".", ".."} for part in parts):
+            return "malformed", None
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            return "malformed", None
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_fd = os.open(root.resolve(strict=True), directory_flags)
+        for part in parts[:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        metadata = os.fstat(leaf_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
+            return "malformed", None
+        with os.fdopen(leaf_fd, "rb") as handle:
+            leaf_fd = None
+            raw = handle.read(limit + 1)
+        return ("ok", raw) if len(raw) <= limit else ("malformed", None)
+    except FileNotFoundError:
+        return "missing", None
+    except (OSError, ValueError, RuntimeError):
+        return "malformed", None
+    finally:
+        if leaf_fd is not None:
+            os.close(leaf_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _bounded_json_object(path: Path, *, root: Path) -> tuple[str, dict[str, Any] | None]:
+    read_status, raw = _bounded_instance_bytes(path, root=root, limit=_HEALTH_JSON_LIMIT)
+    if raw is None:
+        return read_status, None
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError):
+        return "malformed", None
+    return ("ok", value) if isinstance(value, dict) else ("malformed", None)
+
+
+def _registry_json(root: Path, name: str, default: Any) -> Any:
+    _, raw = _bounded_instance_bytes(root / "sensors" / name, root=root, limit=_REGISTRY_JSON_LIMIT)
+    if raw is not None:
+        try:
+            return json.loads(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            pass
+    return default
+
+
+def _strict_timestamp(value: Any) -> tuple[str, datetime] | None:
+    safe = _safe_liveness_timestamp(value)
+    if safe is None:
+        return None
+    parsed = _parse_dt(safe)
+    return (safe, parsed) if parsed is not None else None
+
+
+def _canonical_findings(
+    candidates: list[dict[str, Any]], *, now: str, outbox: list[dict[str, Any]] | None = None,
+    represented_candidate_ids: set[str] | None = None, historical_outbox_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    import sys
+    plugin_root = Path(__file__).resolve().parents[1]
+    if str(plugin_root) not in sys.path:
+        sys.path.insert(0, str(plugin_root))
+    from agent_sensorium.settlement import classify_liveness_snapshot
+    result = classify_liveness_snapshot(
+        candidates, now=now, represented_candidate_ids=represented_candidate_ids,
+        historical_outbox_ids=historical_outbox_ids, outbox=outbox or [],
+    )
+    return list(result.get("findings") or [])
+
+
+def _attention_health(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = Counter(str(row.get("state") or "unknown") for row in findings)
+    if not findings:
+        status, reason = "unknown", "no_observation"
+    else:
+        status = next((state for state in _ATTENTION_PRECEDENCE if counts.get(state)), "unknown")
+        reason = next((str(row.get("reason_code")) for row in findings if row.get("state") == status), "candidate_unknown_status")
+    return {"status": status, "reason_code": reason, "counts_by_state": dict(sorted(counts.items())), "observation_scope": "bounded_dashboard_snapshot"}
+
+
+def _execution_health(root: Path, *, now: str) -> dict[str, Any]:
+    read_status, state = _bounded_json_object(root / "native_clock_state.json", root=root)
+    unknown = {"status": "unknown", "reason_code": "attempt_receipt_malformed", "observed_at": None}
+    if read_status == "missing":
+        return {"status": "unknown", "reason_code": "no_observation", "observed_at": None}
+    if read_status != "ok" or state is None:
+        return unknown
+    active = state.get("active_attempt")
+    if active is not None and not isinstance(active, dict):
+        return unknown
+    attempt: Any = active
+    if attempt is None:
+        history = state.get("attempt_history", [])
+        if not isinstance(history, list):
+            return unknown
+        if history:
+            attempt = history[-1]
+            if not isinstance(attempt, dict) or not isinstance(attempt.get("status"), str) or attempt["status"] not in {"failed", "succeeded"}:
+                return unknown
+    if attempt is None:
+        return {"status": "unknown", "reason_code": "no_observation", "observed_at": None}
+    attempt_id, status = attempt.get("attempt_id"), attempt.get("status")
+    started, deadline = _strict_timestamp(attempt.get("started_at")), _strict_timestamp(attempt.get("deadline_at"))
+    now_value = _strict_timestamp(now)
+    if not isinstance(attempt_id, str) or not attempt_id.strip() or len(attempt_id) > 128 or not isinstance(status, str) or status not in {"active", "failed", "succeeded"} or not started or not deadline or not now_value:
+        return unknown
+    if (active is not None and status != "active") or not started[1] < deadline[1] or started[1] > now_value[1]:
+        return unknown
+    if status == "active":
+        if attempt.get("completed_at") is not None:
+            return unknown
+        projected = "stale" if now_value[1] >= deadline[1] else "active"
+        return {"status": projected, "reason_code": f"attempt_{projected}", "observed_at": started[0]}
+    completed = _strict_timestamp(attempt.get("completed_at"))
+    if completed is None or not started[1] <= completed[1] <= now_value[1]:
+        return unknown
+    return {"status": status, "reason_code": f"attempt_{status}", "observed_at": completed[0]}
+
+
+def _sensing_health(root: Path, blocks_obj: dict[str, Any], *, now: str) -> dict[str, Any]:
+    relevant = []
+    for raw_id, block in sorted(blocks_obj.items(), key=lambda item: str(item[0])):
+        if isinstance(block, dict):
+            kind = block.get("type", block.get("kind", "sensor"))
+            if not isinstance(kind, str) or kind in {"sensor", "temporal_sensor", "memory_reflector"}:
+                relevant.append((str(raw_id), block))
+    truncated, sources, now_value = len(relevant) > 250, [], _strict_timestamp(now)
+    for raw_id, block in relevant[:250]:
+        enabled = block.get("enabled") if isinstance(block.get("enabled"), bool) else True
+        kind, attempt_at = block.get("type", block.get("kind", "sensor")), None
+        if not isinstance(kind, str) or ("enabled" in block and not isinstance(block["enabled"], bool)):
+            producer_status, reason = "malformed", "receipt_malformed"
+        elif enabled is False:
+            producer_status, reason = "disabled", "source_disabled"
+        elif kind == "memory_reflector":
+            producer_status, reason = "unconnected", "projection_unconnected"
+        elif not _RUN_STATE_ID_RE.fullmatch(raw_id):
+            producer_status, reason = "malformed", "identity_mismatch"
+        else:
+            read_status, receipt = _bounded_json_object(root / "sensors" / "run_state" / f"{raw_id}.json", root=root)
+            if read_status == "missing":
+                producer_status, reason = "no_receipt", "receipt_absent"
+            elif read_status != "ok" or receipt is None:
+                producer_status, reason = "malformed", "receipt_malformed"
+            else:
+                receipt_id, receipt_status = receipt.get("id"), receipt.get("status")
+                timestamp, ok_value = _strict_timestamp(receipt.get("last_run_at")), receipt.get("ok")
+                exit_code, emitted = receipt.get("exit_code"), receipt.get("emitted")
+                malformed = not isinstance(receipt_status, str) or receipt_status not in {"ok", "error"} or timestamp is None or now_value is None or timestamp[1] > now_value[1] or ("ok" in receipt and not isinstance(ok_value, bool)) or ("exit_code" in receipt and (not isinstance(exit_code, int) or isinstance(exit_code, bool))) or ("emitted" in receipt and not isinstance(emitted, bool))
+                if receipt_id != raw_id:
+                    producer_status, reason = "malformed", "identity_mismatch"
+                elif malformed:
+                    producer_status, reason = "malformed", "receipt_malformed"
+                else:
+                    attempt_at = timestamp[0]
+                    failed = receipt_status == "error" or ok_value is False or (isinstance(exit_code, int) and exit_code != 0)
+                    cadence = block.get("min_interval_seconds")
+                    valid_cadence = isinstance(cadence, int) and not isinstance(cadence, bool) and cadence > 0
+                    if failed:
+                        producer_status, reason = "failed", "attempt_failed"
+                    elif valid_cadence and now_value and (now_value[1] - timestamp[1]).total_seconds() > 2 * cadence:
+                        producer_status, reason = "stale", "attempt_stale"
+                    elif valid_cadence:
+                        producer_status, reason = "attempted", "attempt_completed_observation_unknown"
+                    else:
+                        producer_status, reason = "attempted", "cadence_unknown"
+        sources.append({"id": _safe_surface_atom("source", raw_id), "producer_status": producer_status, "reason_code": reason, "attempt_at": attempt_at, "observation_status": "unknown"})
+    counts = Counter(row["producer_status"] for row in sources)
+    aggregate = "failed" if counts.get("failed") else ("stale" if counts.get("stale") else "unknown")
+    return {"status": aggregate, "counts_by_status": dict(sorted(counts.items())), "sources": sources, "truncated": truncated}
+
+
 def _current_budgets(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     try:
         import sys
@@ -510,34 +707,22 @@ def _liveness_item(*, state: str, reason_code: str, observed_at: Any, source: st
     }
 
 
-def _candidate_liveness(candidate: dict[str, Any]) -> dict[str, Any]:
-    status = str(candidate.get("status") or "")
-    observed_at = candidate.get("updated_at") or candidate.get("created_at")
-    if status == "in_conscious_aperture":
-        aperture = (candidate.get("conscious_aperture") if isinstance(candidate.get("conscious_aperture"), dict) else {}) or {}
-        explicit_expiry = aperture.get("lease_expires_at")
-        if explicit_expiry not in (None, ""):
-            expiry = _parse_dt(explicit_expiry)
-            stale = expiry is None or datetime.now(timezone.utc) >= expiry
-        else:
-            opened = _parse_dt(aperture.get("opened_at") or candidate.get("updated_at"))
-            stale = opened is None or (datetime.now(timezone.utc) - opened).total_seconds() >= 180 * 60
-        stale = aperture.get("state") == "stale" or stale
-        state = "stale" if stale else "reviewing"
-        return _liveness_item(state=state, reason_code="stale_aperture" if stale else "reviewing_open_aperture", observed_at=observed_at, source="candidate_status", actionable=stale, terminal=False)
-    if status == "candidate":
-        try:
-            above = float(candidate.get("pressure", 0) or 0) >= 0.5
-        except (TypeError, ValueError):
-            above = False
-        return _liveness_item(state="active" if above else "quiet", reason_code="above_threshold_unrepresented" if above else "candidate_below_threshold", observed_at=observed_at, source="candidate_status", actionable=above, terminal=False)
-    if status == "held":
-        return _liveness_item(state="held", reason_code="candidate_held", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
-    if status == "prepared_external_work":
-        return _liveness_item(state="prepared", reason_code="candidate_prepared", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
-    if status in {"reviewed", "suppressed", "cancelled", "archived"}:
-        return _liveness_item(state="settled", reason_code="candidate_settled", observed_at=observed_at, source="candidate_status", actionable=False, terminal=True)
-    return _liveness_item(state="unknown", reason_code="candidate_unknown_status", observed_at=observed_at, source="candidate_status", actionable=False, terminal=False)
+def _candidate_liveness(candidate: dict[str, Any], *, now: str | None = None) -> dict[str, Any]:
+    """Thin compatibility adapter over the canonical pure classifier."""
+    captured = now or _now()
+    findings = _canonical_findings([candidate], now=captured)
+    if not findings:
+        return _liveness_item(state="unknown", reason_code="candidate_unknown_status", observed_at=captured, source="candidate_status", actionable=False, terminal=False)
+    finding = findings[0]
+    return {
+        "state": finding.get("state"),
+        "reason_code": finding.get("reason_code"),
+        "observed_at": _safe_liveness_timestamp(finding.get("observed_at")),
+        "source": "candidate_status",
+        "actionable": bool(finding.get("actionable")),
+        "terminal": bool(finding.get("terminal")),
+        "related_refs": [],
+    }
 
 
 def _thread_liveness(thread: dict[str, Any]) -> dict[str, Any]:
@@ -586,7 +771,7 @@ def _thread_item(thread: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
+def _candidate_item(candidate: dict[str, Any], *, now: str | None = None) -> dict[str, Any]:
     return {
         "id": _safe_trace_candidate_id(candidate.get("id")),
         "status": _safe_surface_atom("candidate_status", candidate.get("status")),
@@ -596,7 +781,7 @@ def _candidate_item(candidate: dict[str, Any]) -> dict[str, Any]:
         "sensitivity": _safe_surface_atom("sensitivity", candidate.get("sensitivity")),
         "allowed_surfaces": [_safe_surface_atom("surface", s) for s in (candidate.get("allowed_surfaces") or [])][:8],
         "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
-        "liveness": _candidate_liveness(candidate),
+        "liveness": _candidate_liveness(candidate, now=now),
     }
 
 
@@ -1689,11 +1874,16 @@ def _health(
     open_actions: int,
     warning_count: int,
     state: dict[str, Any],
+    *, attention: dict[str, Any], execution: dict[str, Any], sensing: dict[str, Any],
 ) -> dict[str, Any]:
     if counts.get("corrupt_lines", 0):
         band = "red"
         status = "corrupt_state"
-    elif actionable_outbox or warning_count or open_actions:
+    elif (
+        actionable_outbox or warning_count or open_actions
+        or attention.get("status") in {"active", "overdue", "blocked", "stale", "error"}
+        or execution.get("status") in {"failed", "stale"}
+    ):
         band = "yellow"
         status = "needs_review"
     elif active_threads:
@@ -1701,7 +1891,8 @@ def _health(
         status = "threads_visible"
     else:
         band = "neutral"
-        status = "quiet"
+        attention_status = str(attention.get("status") or "unknown")
+        status = "unknown" if attention_status in {"quiet", "unknown"} else attention_status
     raw_last_dispatch = state.get("last_dispatch_result")
     last_dispatch: dict[str, Any] = raw_last_dispatch if isinstance(raw_last_dispatch, dict) else {}
     return {
@@ -1709,6 +1900,9 @@ def _health(
         "band": band,
         "last_dispatch_action": _safe_surface_atom("dispatch_action", last_dispatch.get("action")),
         "last_dispatch_reason": _safe_surface_text("dispatch_reason", last_dispatch.get("reason"), limit=120),
+        "attention": attention,
+        "execution": execution,
+        "sensing": sensing,
     }
 
 
@@ -2032,17 +2226,16 @@ def _topology_config_version(root: Path) -> str:
     parts: list[bytes] = []
     for rel in ("sensors/registry.json", "sensors/edges.json", "instance.config.json"):
         path = root / rel
-        try:
-            parts.append(path.read_bytes() if path.exists() else b"")
-        except Exception:
-            parts.append(b"")
+        _, raw = _bounded_instance_bytes(path, root=root, limit=_REGISTRY_JSON_LIMIT)
+        parts.append(raw if raw is not None else b"")
     digest = hashlib.sha256(b"\x00".join(parts)).hexdigest()
     return f"sha256:{digest}"
 
 
 _RUNTIME_STATUSES = {
     "active", "quiet", "degraded", "error", "processing", "waiting",
-    "reviewing", "blocked", "held", "settled", "stale",
+    "reviewing", "blocked", "held", "settled", "stale", "unknown",
+    "awaiting_checkpoint", "overdue", "prepared",
 }
 # Runtime-status vocabulary note: not every member is emitted by
 # this slice yet. Documenting why, rather than emitting a guessed value:
@@ -2104,20 +2297,33 @@ def _runtime_is_stale(root: Path) -> tuple[bool, str | None]:
     return age_seconds > _RUNTIME_STALE_SECONDS, canonical_mtime
 
 
-def _recent_signal_sensors(root: Path, *, limit: int = 200) -> set[str]:
+def _recent_signal_sensors(root: Path, *, now: str | None = None, limit: int = 200) -> set[str]:
     """Sensor names with a signal in the most recent window.
 
     `signals/inbox.jsonl` rows already carry a `sensor` field naming the same
     registry block id /topology projects, so this is the one honest per-node
-    runtime-activity signal available today (see runtime-status guidance on
+    runtime-activity signal available today (following the requirement to avoid
     not fabricating processor/gate runtime state).
     """
     rows, _ = _read_jsonl(root, "signals", limit=limit)
-    return {str(row.get("sensor")) for row in rows if row.get("sensor")}
+    now_value = _strict_timestamp(now or _now())
+    if now_value is None:
+        return set()
+    recent: set[str] = set()
+    for row in rows:
+        sensor = row.get("sensor")
+        observed = _strict_timestamp(row.get("ts") or row.get("created_at") or row.get("updated_at"))
+        if not isinstance(sensor, str) or observed is None:
+            continue
+        age = (now_value[1] - observed[1]).total_seconds()
+        if 0 <= age <= _RUNTIME_STALE_SECONDS:
+            recent.add(sensor)
+    return recent
 
 
 def _runtime_node_overlays(
-    blocks_obj: dict[str, Any], *, active_sensors: set[str], is_stale: bool
+    blocks_obj: dict[str, Any], *, active_sensors: set[str], is_stale: bool,
+    sensing_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Closed-vocabulary runtime status overlay for every configured topology node.
 
@@ -2135,13 +2341,18 @@ def _runtime_node_overlays(
         elif is_stale:
             status, source = "stale", "freshness_stale"
         else:
-            status, source = "quiet", "configured_default"
-        overlays.append({"id": node_id, "kind": topo_node["kind"], "status": status, "source": source, "origin": "topology"})
+            status, source = "unknown", "no_observation"
+        overlay = {"id": node_id, "kind": topo_node["kind"], "status": status, "source": source, "origin": "topology"}
+        diagnostic = (sensing_by_id or {}).get(_safe_surface_atom("source", raw_id))
+        if diagnostic:
+            overlay.update({"producer_status": diagnostic["producer_status"], "reason_code": diagnostic["reason_code"], "attempt_at": diagnostic["attempt_at"], "observation_status": "unknown"})
+        overlays.append(overlay)
     return overlays
 
 
-def _runtime_candidate_node(candidate: dict[str, Any]) -> dict[str, Any]:
-    status = _RUNTIME_CANDIDATE_STATUS.get(str(candidate.get("status") or "").strip().lower(), "quiet")
+def _runtime_candidate_node(candidate: dict[str, Any], *, now: str | None = None) -> dict[str, Any]:
+    liveness = _candidate_liveness(candidate, now=now)
+    status = str(liveness.get("state") or "unknown")
     return {
         "id": f"candidate:{_safe_trace_candidate_id(candidate.get('id'))}",
         "kind": "candidate",
@@ -2152,6 +2363,7 @@ def _runtime_candidate_node(candidate: dict[str, Any]) -> dict[str, Any]:
         "detail": _safe_surface_text("candidate_summary", candidate.get("summary"), limit=160),
         "pressure": candidate.get("pressure"),
         "updated_at": candidate.get("updated_at") or candidate.get("created_at"),
+        "liveness": liveness,
         "contents": _instance_contents("candidate", candidate),
     }
 
@@ -2497,6 +2709,7 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
     if resolved is None:
         return {"ok": False, "error": "invalid_instance"}
     effective_instance, root = resolved
+    ts = _now()
 
     raw_registry = _read_json(root / "sensors" / "registry.json", {})
     blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
@@ -2506,8 +2719,10 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
         blocks_obj = {}
 
     is_stale, freshness_mtime = _runtime_is_stale(root)
-    active_sensors = _recent_signal_sensors(root)
-    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=active_sensors, is_stale=is_stale)
+    active_sensors = _recent_signal_sensors(root, now=ts)
+    sensing_health = _sensing_health(root, blocks_obj, now=ts)
+    sensing_by_id = {row["id"]: row for row in sensing_health["sources"]}
+    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=active_sensors, is_stale=is_stale, sensing_by_id=sensing_by_id)
 
     candidates, _ = _read_jsonl(root, "candidates", limit=2000)
     threads, _ = _read_jsonl(root, "threads", limit=2000)
@@ -2518,7 +2733,10 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
     action_for_outbox = _find_action_for_outbox(actions)
     config = _read_json(root / "instance.config.json", {})
 
-    eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in _RUNTIME_CANDIDATE_STATUS]
+    eligible_candidates = [c for c in candidates if str(c.get("status") or "").strip().lower() in {
+        "candidate", "in_conscious_aperture", "held", "prepared_external_work",
+        "reviewed", "suppressed", "cancelled", "archived",
+    }]
     eligible_threads = [t for t in threads if t.get("status") in ACTIVE_THREAD_STATUSES]
     eligible_actions = [a for a in actions if a.get("status") in ACTIVE_ACTION_STATUSES]
     outbox_safety_by_id = {
@@ -2536,7 +2754,7 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
     ]
 
     candidate_nodes = [
-        _runtime_candidate_node(c) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
+        _runtime_candidate_node(c, now=ts) for c in sorted(eligible_candidates, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
     ]
     thread_nodes = [
         _runtime_thread_node(t) for t in sorted(eligible_threads, key=_sort_key, reverse=True)[:_RUNTIME_INSTANCE_LIMIT]
@@ -2562,7 +2780,10 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
         outbox=eligible_outbox,
     )
 
-    ts = _now()
+    represented = {str(row.get("origin_candidate_id")) for row in threads + actions + outbox if row.get("origin_candidate_id")}
+    historical_ids = {raw_id for raw_id, safety in outbox_safety_by_id.items() if safety.get("label") == "historical_prepared_pointer"}
+    attention_health = _attention_health(_canonical_findings(candidates, now=ts, outbox=outbox, represented_candidate_ids=represented, historical_outbox_ids=historical_ids))
+    execution_health = _execution_health(root, now=ts)
     return {
         "ok": True,
         "privacy": "compact_only",
@@ -2571,6 +2792,7 @@ async def runtime_status(instance: str | None = None) -> dict[str, Any]:
         "instance": effective_instance,
         "topology_config_version": _topology_config_version(root),
         "status_vocab": sorted(_RUNTIME_STATUSES),
+        "health": {"attention": attention_health, "execution": execution_health, "sensing": sensing_health},
         "nodes": nodes,
         "edges": runtime_edges,
         "meta": {
@@ -2680,8 +2902,8 @@ def _instance_contents(kind: str, row: dict[str, Any], *, upstream_count: int = 
 def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
     """Trace for a configured `/topology` node: configured neighbors plus its current runtime overlay status.
 
-    Config refs name the sanitized config source/kind/version (flow-DAG
-    honesty requirement), never a raw file path or config blob. There is no
+    Config refs name the sanitized config source/kind/version, never a raw file
+    path or config blob. There is no
     honest per-node runtime timestamp source for configured topology nodes
     yet, so `timestamps` stays empty with a `limitations` note instead of
     fabricating one.
@@ -2698,7 +2920,7 @@ def _trace_topology_node(root: Path, node_id: str) -> dict[str, Any] | None:
         _trace_compact_ref(e["to"], "topology_node", e["kind"]) for e in built["edges"] if e["from"] == node_id
     ][:24]
     is_stale, _ = _runtime_is_stale(root)
-    active_sensors = _recent_signal_sensors(root)
+    active_sensors = _recent_signal_sensors(root, now=_now())
     overlays = _runtime_node_overlays(built["blocks_obj"], active_sensors=active_sensors, is_stale=is_stale)
     overlay = next((o for o in overlays if o["id"] == node_id), None)
     return {
@@ -2776,7 +2998,7 @@ def _trace_runtime_edge(root: Path, edge_id: str) -> dict[str, Any] | None:
         blocks_obj = {}
 
     is_stale, _ = _runtime_is_stale(root)
-    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=_recent_signal_sensors(root), is_stale=is_stale)
+    topology_nodes = _runtime_node_overlays(blocks_obj, active_sensors=_recent_signal_sensors(root, now=_now()), is_stale=is_stale)
     candidates, _ = _read_jsonl(root, "candidates", limit=2000)
     threads, _ = _read_jsonl(root, "threads", limit=2000)
     actions, _ = _read_jsonl(root, "thread_actions", limit=2000)
@@ -3352,6 +3574,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     if resolved is None:
         return {"ok": False, "error": "invalid_instance"}
     effective_instance, root = resolved
+    ts = _now()
     state = _read_json(root / "state.latest.json", {})
     config = _read_json(root / "instance.config.json", {})
     freshness = _freshness_snapshot(root)
@@ -3474,9 +3697,19 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
     conscious_reachout_metrics = _conscious_reachout_metrics(decisions)
     attention_footprint = _attention_footprint(counts, metrics=metrics_data)
 
+    represented = {str(row.get("origin_candidate_id")) for row in threads + actions + outbox if row.get("origin_candidate_id")}
+    historical_ids = {str(raw.get("id")) for raw, item in zip(recent_outbox, outbox_items_all) if raw.get("id") and item.get("safety", {}).get("label") == "historical_prepared_pointer"}
+    attention_health = _attention_health(_canonical_findings(candidates, now=ts, outbox=outbox, represented_candidate_ids=represented, historical_outbox_ids=historical_ids))
+    execution_health = _execution_health(root, now=ts)
+    raw_registry = _read_json(root / "sensors" / "registry.json", {})
+    blocks_obj = raw_registry.get("blocks") if isinstance(raw_registry, dict) else {}
+    if not isinstance(blocks_obj, dict):
+        blocks_obj = {}
+    sensing_health = _sensing_health(root, blocks_obj, now=ts)
+
     return {
         "ok": True,
-        "generated_at": _now(),
+        "generated_at": ts,
         "instance": effective_instance,
         "state_dir": _safe_surface_text("state_dir", str(root), limit=240),
         "state_exists": root.exists(),
@@ -3506,6 +3739,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
             len(open_actions),
             len(warnings),
             state,
+            attention=attention_health, execution=execution_health, sensing=sensing_health,
         ),
         "status_breakdown": {
             "threads": dict(Counter(_safe_surface_atom("thread_status", t.get("status") or "unknown") for t in threads)),
@@ -3516,7 +3750,7 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         },
         "views": _dashboard_views(counts, recent_signals=len(recent_signals[:12]), footprint=attention_footprint),
         "perception_traces": perception_traces,
-        "top_candidates": [_candidate_item(c) for c in active_candidates[:6]],
+        "top_candidates": [_candidate_item(c, now=ts) for c in active_candidates[:6]],
         "recent_signals": [_signal_item(s) for s in recent_signals[:12]],
         "threads": [_thread_item(t) for t in visible_threads[:8]],
         "actions": [_action_item(a) for a in recent_actions[:10]],
@@ -3528,3 +3762,80 @@ async def snapshot(instance: str | None = None) -> dict[str, Any]:
         "budgets": _current_budgets(root, config),
         "metrics": metrics_data,
     }
+
+
+def _emergency_unavailable_presentation() -> dict[str, Any]:
+    """Minimal private copy of the v1 unavailable projection contract."""
+    generated = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return {
+        "schema_version": 1,
+        "ok": False,
+        "instance": "default",
+        "profile": "default",
+        "surface": "sensorium-dashboard",
+        "policy": {
+            "read_only": True,
+            "content_included": False,
+            "may_prepare": False,
+            "may_deliver": False,
+            "may_create_work": False,
+        },
+        "generated_at": generated,
+        "freshness": {
+            "state": "unavailable",
+            "observed_at": None,
+            "age_seconds": 0,
+            "reason_code": "unavailable_state",
+        },
+        "posture": "unavailable",
+        "headline_code": "unavailable_state",
+        "detail_code": "unavailable_state",
+        "counts": {
+            "unresolved_candidates": 0,
+            "open_apertures": 0,
+            "held_apertures": 0,
+            "verified_prepared_reachouts": 0,
+            "blocked_items": 0,
+        },
+        "latest": {
+            "kind": "runtime",
+            "opaque_ref": None,
+            "state": "unknown",
+            "reason_code": "unavailable_state",
+            "updated_at": None,
+            "artifact": {
+                "available": False,
+                "verified": False,
+                "content_hash": None,
+                "content_length": 0,
+                "allowed_surface": None,
+            },
+        },
+        "links": {"dashboard_path": "/sensorium"},
+    }
+
+
+@router.get("/presentation")
+async def presentation(instance: str | None = None) -> dict[str, Any]:
+    """Read-only canonical Desktop presentation projection."""
+    try:
+        # Keep the canonical import inside the fail-closed boundary: a broken
+        # optional projection module must not take down the dashboard route.
+        from agent_sensorium.desktop_presentation import project_instance_desktop_presentation
+    except Exception:
+        return _emergency_unavailable_presentation()
+
+    resolved = _resolve_instance(instance)
+    if resolved is None:
+        try:
+            return project_instance_desktop_presentation(instance="default", profile="default", surface="sensorium-dashboard", state_dir=Path("/__sensorium_invalid_instance__"))
+        except Exception:
+            return _emergency_unavailable_presentation()
+    effective_instance, root = resolved
+    try:
+        return project_instance_desktop_presentation(instance=effective_instance, profile="default", surface="sensorium-dashboard", state_dir=root)
+    except Exception:
+        try:
+            return project_instance_desktop_presentation(instance="default", profile="default", surface="sensorium-dashboard", state_dir=Path("/__sensorium_presentation_error__"))
+        except Exception:
+            return _emergency_unavailable_presentation()

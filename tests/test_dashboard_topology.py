@@ -213,7 +213,7 @@ def test_topology_does_not_leak_path_shaped_label(tmp_path, monkeypatch):
     it isn't "secret-shaped" by the generic hostile-marker heuristic.
     """
     root = tmp_path / "sensorium" / "demo"
-    path_label = "/home/admin/.ssh/id_rsa"
+    path_label = str(tmp_path / "operator-home" / ".ssh" / "id_rsa")
     _write_registry(
         root,
         blocks={"runtime_heartbeat": {"type": "sensor", "label": path_label}},

@@ -80,7 +80,7 @@ def _github_request(path_or_url: str) -> dict | None:
     url = path_or_url if path_or_url.startswith("http") else f"https://api.github.com{path_or_url}"
     req = Request(url, headers={
         "Accept": "application/vnd.github+json",
-        "User-Agent": "Agent-Sensorium-Project-Update-Sensor",
+        "User-Agent": "Sensorium-Project-Update-Sensor",
     })
     try:
         with urlopen(req, timeout=TIMEOUT_SECONDS) as resp:

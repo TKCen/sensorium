@@ -13,7 +13,8 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 
-from .config import visible_on_surface
+from .config import load_instance_config, visible_on_surface
+from .prospective_evidence import attention_snapshot_evidence, observe_after_success
 from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import (
     APERTURE_PRESENTATION_INDEX_LIMIT,
@@ -91,7 +92,11 @@ def _source_binding(candidate: dict) -> dict:
         "candidate_id": str(candidate.get("id") or ""),
         "conscious_task_id": str(task.get("id") or ""),
         "candidate_fingerprint": str(candidate.get("fingerprint") or ""),
-        "source_fingerprint": str(advisory.get("source_fingerprint") or ""),
+        "source_fingerprint": str(
+            advisory.get("source_fingerprint")
+            or candidate.get("source_candidate_fingerprint")
+            or ""
+        ),
         "source_revision": str(
             candidate.get("source_revision") or advisory.get("source_revision") or ""
         ),
@@ -167,10 +172,25 @@ def _is_pending_conscious_task(candidate: dict) -> bool:
         _candidate_has_valid_authority(candidate)
         and candidate.get("status") == PENDING_STATUS
         and candidate.get("kind") == CONSCIOUS_KIND
-        and isinstance(candidate.get("conscious_task"), dict)
+        and _is_valid_conscious_task(candidate.get("conscious_task"))
         and (
             candidate.get("advisory_meta") is None
             or isinstance(candidate.get("advisory_meta"), dict)
+        )
+    )
+
+
+def _is_valid_conscious_task(task: object) -> bool:
+    """Accept only the typed task shape produced by the advisory owner."""
+    if not isinstance(task, dict):
+        return False
+    from .subconscious import VALID_REQUEST_TYPES
+
+    return (
+        task.get("request_type") in VALID_REQUEST_TYPES
+        and all(
+            isinstance(task.get(field), str) and bool(task[field].strip())
+            for field in ("id", "title", "why", "expected_decision")
         )
     )
 
@@ -181,7 +201,7 @@ def _is_due_held_checkpoint(candidate: dict, *, now: datetime) -> bool:
         _candidate_has_valid_authority(candidate)
         and candidate.get("status") == "held"
         and candidate.get("kind") == CONSCIOUS_KIND
-        and isinstance(candidate.get("conscious_task"), dict)
+        and _is_valid_conscious_task(candidate.get("conscious_task"))
         and (
             candidate.get("advisory_meta") is None
             or isinstance(candidate.get("advisory_meta"), dict)
@@ -275,7 +295,7 @@ def _presentation_items_digest(items: list[dict]) -> str:
 
 
 def _presentation_receipt(attempt: dict, items: list[dict]) -> dict:
-    return {
+    receipt = {
         "ts": attempt["ts"],
         "type": "conscious.aperture.presentation_attempted",
         "candidate_ids": [item["candidate_id"] for item in items],
@@ -286,6 +306,9 @@ def _presentation_receipt(attempt: dict, items: list[dict]) -> dict:
         "items": items,
         "host_consumption_confirmed": False,
     }
+    if attempt.get("platform"):
+        receipt["platform"] = attempt["platform"]
+    return receipt
 
 
 def _select_fair_claims(
@@ -368,8 +391,10 @@ def open_conscious_aperture(
     consumer_id: str | None = None,
     surface: str | None = None,
     instance_config: dict | None = None,
+    candidate_kind: str | None = None,
     dry_run: bool = True,
     now: str | None = None,
+    _locked: bool = False,
 ) -> dict:
     """Claim a bounded packet without globally blocking on stale ownership.
 
@@ -377,6 +402,28 @@ def open_conscious_aperture(
     use ``max_active_items`` because the limit is global per-item ownership, not
     a session count.
     """
+    if not dry_run and not _locked:
+        store.ensure_dirs()
+        with store.candidate_transaction():
+            packet = open_conscious_aperture(
+                store,
+                aperture_size=aperture_size,
+                max_active_sessions=max_active_sessions,
+                max_active_items=max_active_items,
+                stale_after_minutes=stale_after_minutes,
+                lease_minutes=lease_minutes,
+                consumer_id=consumer_id,
+                surface=surface,
+                instance_config=instance_config,
+                candidate_kind=candidate_kind,
+                dry_run=False,
+                now=now,
+                _locked=True,
+            )
+        attention_evidence = packet.pop("_observer_attention_snapshot", None)
+        _observe_open_after_commit(store, packet, attention_evidence)
+        return packet
+
     store.ensure_dirs()
     now_iso = now or utc_now_iso()
     now_dt = _parse_iso(now_iso) or datetime.now(UTC)
@@ -449,6 +496,18 @@ def open_conscious_aperture(
                 for candidate in active
                 if str((candidate.get("conscious_aperture") or {}).get("consumer_id") or "")
                 == owner
+                and valid_authority_token(
+                    (candidate.get("conscious_aperture") or {}).get("id")
+                )
+                and _validate_current_ownership(
+                    candidate,
+                    aperture_id=str(
+                        (candidate.get("conscious_aperture") or {}).get("id") or ""
+                    ),
+                    consumer_id=owner,
+                    now_dt=now_dt,
+                )
+                is None
                 and _visible(
                     candidate, surface=surface, instance_config=instance_config
                 )
@@ -457,31 +516,92 @@ def open_conscious_aperture(
             else []
         )
         resumable = sorted(resumable, key=_candidate_sort_key)[:size]
+
+        recovery_eligible = []
+        fresh_eligible = []
+        for candidate in candidates:
+            recovery_candidate = (
+                _is_due_held_checkpoint(candidate, now=now_dt) or candidate in stale_active
+            )
+            fresh_candidate = _is_pending_conscious_task(candidate)
+            if not recovery_candidate and not fresh_candidate:
+                continue
+            candidate_id = str(candidate.get("id") or "")
+            if candidate_kind and candidate.get("kind") != candidate_kind:
+                continue
+            if canonical_ids.get(_logical_source_key(candidate)) != candidate_id:
+                continue
+            if not _visible(candidate, surface=surface, instance_config=instance_config):
+                continue
+            if recovery_candidate:
+                recovery_eligible.append(candidate)
+            elif fresh_candidate:
+                fresh_eligible.append(candidate)
+        eligible = recovery_eligible + fresh_eligible
+
+        # A same-owner reopen must not indefinitely consume the only execution
+        # slot while other eligible work waits. Release only the owner's minimum
+        # capacity needed for one pass through the existing persisted lane
+        # arbiter. The released row is deliberately excluded from this call's
+        # recovery lane, so it remains reclaimable on a later activation rather
+        # than immediately winning back the slot it yielded.
+        # ``resumable`` is a pre-selection snapshot. Any row opened below is
+        # created later in this transaction and cannot be yielded here, so all
+        # distinct opens participate in fairness even when their supplied clock
+        # value is identical.
+        yielded: list[dict] = []
+        reopenable = list(resumable)
+        if explicit_consumer and reopenable and eligible:
+            required_release = max(
+                0,
+                len(resumable) - size + 1,
+                len(active) - active_limit + 1,
+            )
+            if required_release and len(reopenable) >= required_release:
+                yielded = reopenable[:required_release]
+                yielded_ids = {
+                    str(candidate.get("id") or "") for candidate in yielded
+                }
+                resumable = [
+                    candidate
+                    for candidate in resumable
+                    if str(candidate.get("id") or "") not in yielded_ids
+                ]
+            else:
+                yielded_ids = set()
+        else:
+            yielded_ids = set()
+
         renewal_floor = now_dt + timedelta(minutes=lease_duration)
         resumed_preview_rows: dict[str, dict] = {}
         renewed_ids: list[str] = []
-        for candidate in resumable:
+        for candidate in [*yielded, *resumable]:
             candidate_id = str(candidate.get("id") or "")
             updated = dict(candidate)
             ownership = dict(candidate.get("conscious_aperture") or {})
-            existing_expiry = _lease_expiry(
-                candidate, stale_after_minutes=stale_after_minutes
-            )
-            renewed_expiry = max(
-                expiry for expiry in (existing_expiry, renewal_floor) if expiry is not None
-            )
-            renewed_expiry_iso = _format_iso(renewed_expiry)
-            if ownership.get("lease_expires_at") != renewed_expiry_iso:
-                ownership["lease_expires_at"] = renewed_expiry_iso
-                ownership["renewed_at"] = now_iso
+            if candidate_id in yielded_ids:
+                ownership["lease_expires_at"] = now_iso
                 updated["updated_at"] = now_iso
                 updated["conscious_aperture"] = ownership
-                renewed_ids.append(candidate_id)
+            else:
+                existing_expiry = _lease_expiry(
+                    candidate, stale_after_minutes=stale_after_minutes
+                )
+                renewed_expiry = max(
+                    expiry for expiry in (existing_expiry, renewal_floor) if expiry is not None
+                )
+                renewed_expiry_iso = _format_iso(renewed_expiry)
+                if ownership.get("lease_expires_at") != renewed_expiry_iso:
+                    ownership["lease_expires_at"] = renewed_expiry_iso
+                    ownership["renewed_at"] = now_iso
+                    updated["updated_at"] = now_iso
+                    updated["conscious_aperture"] = ownership
+                    renewed_ids.append(candidate_id)
             resumed_preview_rows[candidate_id] = updated
         resumable = [
             resumed_preview_rows[str(candidate.get("id") or "")] for candidate in resumable
         ]
-        if legacy_limit_mode and active and not resumable:
+        if legacy_limit_mode and active and not resumable and not yielded:
             return {
                 "success": True,
                 "action": "active_aperture_exists",
@@ -495,27 +615,7 @@ def open_conscious_aperture(
                 "aperture": [],
             }
         remaining_size = max(0, size - len(resumable))
-        available_capacity = max(0, active_limit - len(active))
-
-        recovery_eligible = []
-        fresh_eligible = []
-        for candidate in candidates:
-            recovery_candidate = (
-                _is_due_held_checkpoint(candidate, now=now_dt) or candidate in stale_active
-            )
-            fresh_candidate = _is_pending_conscious_task(candidate)
-            if not recovery_candidate and not fresh_candidate:
-                continue
-            candidate_id = str(candidate.get("id") or "")
-            if canonical_ids.get(_logical_source_key(candidate)) != candidate_id:
-                continue
-            if not _visible(candidate, surface=surface, instance_config=instance_config):
-                continue
-            if recovery_candidate:
-                recovery_eligible.append(candidate)
-            elif fresh_candidate:
-                fresh_eligible.append(candidate)
-        eligible = recovery_eligible + fresh_eligible
+        available_capacity = max(0, active_limit - (len(active) - len(yielded)))
         selected, service_lanes = _select_fair_claims(
             recovery_eligible,
             fresh_eligible,
@@ -650,6 +750,13 @@ def open_conscious_aperture(
         if dry_run or not selected:
             return packet
 
+        # Bind class-only observer evidence to the exact selection transaction.
+        # The outer call removes this private field and observes only after the
+        # canonical lock has been released.
+        packet["_observer_attention_snapshot"] = attention_snapshot_evidence(
+            selected, candidates
+        )
+
         rewritten = [
             preview_rows.get(
                 str(candidate.get("id") or ""),
@@ -658,6 +765,24 @@ def open_conscious_aperture(
             for candidate in candidates
         ]
         store.rewrite_jsonl("candidates", rewritten)
+        for candidate in yielded:
+            candidate_id = str(candidate.get("id") or "")
+            previous = candidate.get("conscious_aperture") or {}
+            yielded_ownership = resumed_preview_rows[candidate_id]["conscious_aperture"]
+            store.append_jsonl(
+                "decisions",
+                {
+                    "ts": now_iso,
+                    "type": "conscious.aperture.yielded",
+                    "candidate_id": candidate_id,
+                    "aperture_id": previous.get("id", ""),
+                    "consumer_id": owner,
+                    "reason_code": "same_owner_fairness_yield",
+                    "decision_preserved": True,
+                    "previous_lease_expires_at": previous.get("lease_expires_at", ""),
+                    "lease_expires_at": yielded_ownership.get("lease_expires_at", ""),
+                },
+            )
         for candidate_id in renewed_ids:
             renewed = resumed_preview_rows[candidate_id]["conscious_aperture"]
             store.append_jsonl(
@@ -722,6 +847,37 @@ def open_conscious_aperture(
                 },
             )
         return packet
+
+
+def _observe_open_after_commit(
+    store: SensoriumStore,
+    packet: dict,
+    attention_evidence: dict | None,
+) -> None:
+    """Emit detached prospective callbacks after canonical commit/unlock."""
+    candidate_ids = packet.get("candidate_ids") or []
+    if packet.get("action") != "opened_aperture" or not candidate_ids:
+        return
+    config, _ = load_instance_config(state_dir=str(store.root))
+    capture = config.get("prospective_evidence_capture", {})
+    for candidate_id in candidate_ids:
+        observe_after_success(
+            store.root, capture, "opened", {"candidate_id": candidate_id}
+        )
+    bounded_attention = (
+        attention_evidence
+        if isinstance(attention_evidence, dict)
+        else {
+            "attention_classes": ["unknown"],
+            "same_window_external_protected": False,
+        }
+    )
+    observe_after_success(
+        store.root,
+        capture,
+        "attention_snapshot",
+        {"candidate_id": candidate_ids[0], **bounded_attention},
+    )
 
 
 def _find_candidate_index(candidates: list[dict], candidate_id: str) -> int | None:
@@ -832,6 +988,73 @@ def _validate_current_ownership(
     return None
 
 
+def resolve_conscious_aperture(
+    store: SensoriumStore,
+    *,
+    candidate_id: str,
+    aperture_id: str,
+    consumer_id: str,
+    now: str | None = None,
+) -> dict:
+    """Resolve one exact current owner without selecting, renewing, or writing."""
+    exact_candidate = str(candidate_id or "").strip()
+    exact_aperture = str(aperture_id or "").strip()
+    exact_consumer = str(consumer_id or "").strip()
+    if not valid_authority_token(exact_candidate):
+        return {"success": False, "error": "invalid_candidate_id"}
+    if not valid_authority_token(exact_aperture):
+        return {
+            "success": False,
+            "error": "invalid_aperture_id",
+            "candidate_id": exact_candidate,
+        }
+    if not valid_authority_token(exact_consumer):
+        return {
+            "success": False,
+            "error": "invalid_consumer_id",
+            "candidate_id": exact_candidate,
+        }
+    now_iso = now or utc_now_iso()
+    now_dt = _parse_iso(now_iso)
+    if now_dt is None:
+        return {
+            "success": False,
+            "error": "invalid_now",
+            "candidate_id": exact_candidate,
+        }
+
+    with store.candidate_transaction():
+        candidates = store.read_jsonl("candidates")
+        idx = _find_candidate_index(candidates, exact_candidate)
+        if idx is None:
+            return {
+                "success": False,
+                "error": "candidate_not_found",
+                "candidate_id": exact_candidate,
+            }
+        candidate = candidates[idx]
+        ownership_error = _validate_current_ownership(
+            candidate,
+            aperture_id=exact_aperture,
+            consumer_id=exact_consumer,
+            now_dt=now_dt,
+        )
+        if ownership_error:
+            return ownership_error
+        item = _aperture_item(candidate)
+        return {
+            "success": True,
+            "action": "resolved_conscious_aperture",
+            "dry_run": True,
+            "aperture_id": exact_aperture,
+            "candidate_ids": [exact_candidate],
+            "aperture": [item],
+            "_candidate_source_fingerprint": candidate.get(
+                "source_candidate_fingerprint"
+            ),
+        }
+
+
 def record_conscious_aperture_presentation_attempt(
     store: SensoriumStore,
     *,
@@ -839,6 +1062,7 @@ def record_conscious_aperture_presentation_attempt(
     consumer_id: str,
     turn_id: str,
     surface: str,
+    platform: str = "",
     now: str | None = None,
 ) -> dict:
     """Atomically validate a whole packet and record only a presentation attempt."""
@@ -934,6 +1158,7 @@ def record_conscious_aperture_presentation_attempt(
             "consumer_id": owner,
             "turn_id": normalized_turn_id,
             "surface": str(surface or "local"),
+            "platform": str(platform or surface or "local"),
             "aperture_ids": aperture_ids,
             "items_digest": items_digest,
         }
@@ -961,8 +1186,29 @@ def settle_conscious_aperture_item(
     allow_legacy_ownerless: bool = False,
     dry_run: bool = True,
     now: str | None = None,
+    _locked: bool = False,
 ) -> dict:
     """Settle one exact owned item; never dispatch external work."""
+    if not dry_run and not _locked:
+        store.ensure_dirs()
+        with store.candidate_transaction():
+            result = settle_conscious_aperture_item(
+                store,
+                candidate_id=candidate_id,
+                decision=decision,
+                reason=reason,
+                aperture_id=aperture_id,
+                consumer_id=consumer_id,
+                return_at=return_at,
+                external_work=external_work,
+                allow_legacy_ownerless=allow_legacy_ownerless,
+                dry_run=False,
+                now=now,
+                _locked=True,
+            )
+        _observe_settlement_after_commit(store, result)
+        return result
+
     store.ensure_dirs()
     candidate_id = str(candidate_id or "").strip()
     normalized_decision = str(decision or "").strip().upper()
@@ -1155,3 +1401,25 @@ def settle_conscious_aperture_item(
             "new_status": updated["status"],
             "receipt": receipt,
         }
+
+
+def _observe_settlement_after_commit(store: SensoriumStore, result: dict) -> None:
+    """Emit detached prospective callbacks after canonical commit/unlock."""
+    if result.get("action") != "settled_aperture_item":
+        return
+    config, _ = load_instance_config(state_dir=str(store.root))
+    capture = config.get("prospective_evidence_capture", {})
+    candidate_id = result.get("candidate_id")
+    receipt = result.get("receipt") or {}
+    observe_after_success(
+        store.root, capture, "chosen", {"candidate_id": candidate_id}
+    )
+    observe_after_success(
+        store.root,
+        capture,
+        "settled",
+        {
+            "candidate_id": candidate_id,
+            "settlement": "held" if receipt.get("decision") == "HELD" else "settled",
+        },
+    )

@@ -283,6 +283,10 @@ class SensoriumStore:
                 not isinstance(attempt.get("consumer_id"), str)
                 or not isinstance(attempt.get("turn_id"), str)
                 or not isinstance(attempt.get("surface"), str)
+                or (
+                    "platform" in attempt
+                    and not isinstance(attempt.get("platform"), str)
+                )
                 or not isinstance(attempt.get("ts"), str)
                 or not isinstance(attempt.get("items_digest"), str)
                 or len(attempt["items_digest"]) != 64
