@@ -99,6 +99,117 @@ def _bridge_intake_script_paths() -> list[tuple[str, Path]]:
     return paths
 
 
+class TestKanbanBridgeReviewerProfileResolution:
+    def _write_config(self, bridge, home, instance, value):
+        state_dir = home / ".hermes" / "agent-sensorium" / instance
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "instance.config.json").write_text(
+            json.dumps({"instance_name": instance, "subconscious_profile": value}),
+            encoding="utf-8",
+        )
+
+    def test_config_only_and_environment_override_precedence(self, tmp_path, monkeypatch):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "ordinary", "configured-reviewer")
+        assert bridge._resolve_reviewer_profile("ordinary") == "configured-reviewer"
+
+        monkeypatch.setenv("SENSORIUM_SUBCONSCIOUS_PROFILE", "   ")
+        assert bridge._resolve_reviewer_profile("ordinary") == "configured-reviewer"
+
+        monkeypatch.setenv("SENSORIUM_SUBCONSCIOUS_PROFILE", " override-reviewer ")
+        assert bridge._resolve_reviewer_profile("ordinary") == "override-reviewer"
+
+    def test_explicit_instance_selects_that_instances_validated_config(
+        self, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "instance-a", "reviewer-a")
+        self._write_config(bridge, tmp_path, "instance-b", "reviewer-b")
+        bridge.INSTANCE = "instance-a"
+
+        observed = {}
+
+        def stop_after_resolution():
+            observed.update(instance=bridge.INSTANCE, profile=bridge.PROFILE)
+            raise RuntimeError("stop-after-profile-resolution")
+
+        monkeypatch.setattr(bridge, "_ensure_board", stop_after_resolution)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["sensorium_kanban_sensor_tick.py", "--instance", "instance-b"],
+        )
+        assert bridge.main() == 1
+        assert observed == {"instance": "instance-b", "profile": "reviewer-b"}
+
+    @pytest.mark.parametrize("payload", [None, "{not-json", {"subconscious_profile": ""}])
+    def test_missing_corrupt_or_invalid_config_uses_generic_fallback(
+        self, payload, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        state_dir = tmp_path / ".hermes" / "agent-sensorium" / "ordinary"
+        state_dir.mkdir(parents=True)
+        if payload is not None:
+            text = payload if isinstance(payload, str) else json.dumps(payload)
+            (state_dir / "instance.config.json").write_text(text, encoding="utf-8")
+        assert bridge._resolve_reviewer_profile("ordinary") == "subconscious-reviewer"
+
+    def test_all_intake_and_review_creators_share_one_resolved_profile(
+        self, tmp_path, monkeypatch
+    ):
+        bridge = _load_live_bridge_module()
+        monkeypatch.setattr(bridge, "HOME", tmp_path)
+        monkeypatch.delenv("SENSORIUM_SUBCONSCIOUS_PROFILE", raising=False)
+        self._write_config(bridge, tmp_path, "ordinary", "configured-reviewer")
+        bridge.PROFILE = bridge._resolve_reviewer_profile("ordinary")
+        commands = []
+
+        def fake_run_checked(cmd, *, timeout=90):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": "task-1"}), "")
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        event = {
+            "id": "evt-profile",
+            "kind": "design_decision",
+            "summary": "Profile resolution",
+            "strength": 0.9,
+            "correlation_keys": ["profile"],
+            "allowed_surfaces": ["local"],
+            "sensitivity": "private",
+        }
+        candidate = {
+            "id": "cand-profile",
+            "kind": "design_decision",
+            "summary": "Candidate profile resolution",
+            "pressure": 0.9,
+            "event_ids": ["evt-profile"],
+            "correlation_keys": ["profile"],
+        }
+        intake = {"id": "intake-1", "title": "sensor:intake:design_decision"}
+        bridge._create_intake(event)
+        bridge._create_candidate_intake(candidate)
+        bridge._create_review([intake])
+
+        create_commands = [command for command in commands if "create" in command]
+        assign_commands = [command for command in commands if "assign" in command]
+        assert len(create_commands) == 3
+        assert len(assign_commands) == 2
+        review_create = next(command for command in create_commands if "--assignee" in command)
+        assert review_create[review_create.index("--assignee") + 1] == "configured-reviewer"
+        assert all(command[-1] == "configured-reviewer" for command in assign_commands)
+        assert all(
+            "configured-reviewer" in command[command.index("--body") + 1]
+            for command in create_commands
+        )
+
+
 
 class TestDispatchActivationGate:
     """Sensorium dispatch must not become a second activation substrate."""
@@ -208,6 +319,19 @@ class TestKanbanBridgePrimitives:
     bridge primitives directly so the invariant survives any rewording of the
     wrapper.
     """
+
+    def test_bridge_resolves_hermes_cli_without_scheduler_path(self, monkeypatch):
+        bridge = _load_live_bridge_module()
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+        bridge._run(["hermes", "kanban", "boards", "list"])
+
+        assert calls == [[str(bridge.HERMES_CLI), "kanban", "boards", "list"]]
 
     def _hindsight_event(self, *, eid: str, summary: str, fingerprint: str) -> dict:
         # `handle_sensorium_ingest_event` recomputes `fingerprint` from a
@@ -585,7 +709,9 @@ class TestRuntimeKanbanBridgeIntakeRows:
         created_by: str,
     ) -> None:
         assert cmd[:5] == ["hermes", "kanban", "--board", "sensorium", "create"]
-        assert self._flag_value(cmd, "--initial-status") == "blocked"
+        # The row is deliberately unassigned while running, then receives an
+        # explicit sticky block event before the real review profile is bound.
+        assert self._flag_value(cmd, "--initial-status") == "running"
         assert self._flag_value(cmd, "--created-by") == created_by
         assert "--assignee" not in cmd
         assert "--triage" not in cmd
@@ -599,6 +725,64 @@ class TestRuntimeKanbanBridgeIntakeRows:
         # profile, whatever it is — a generic invariant that holds for the
         # generic repo default and for any deployment-configured runtime copy.
         assert calls[start + 1][-1] == expected_profile
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_sticky_block_retry_is_idempotent_for_existing_blocked_intake(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """An idempotent create retry must not attempt blocked -> blocked."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        bridge._sticky_block_and_assign_intake(
+            "t_existing",
+            "already sticky-blocked",
+            current={"status": "blocked", "assignee": bridge.PROFILE},
+        )
+        assert calls == []
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_sticky_block_repairs_promoted_unassigned_intake(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A promoted retry is blocked before it gains a spawnable assignee."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        calls: list[list[str]] = []
+
+        def fake_run_checked(cmd: list[str], *, timeout: int = 90):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+
+        monkeypatch.setattr(bridge, "_run_checked", fake_run_checked)
+        bridge._sticky_block_and_assign_intake(
+            "t_promoted",
+            "restore sticky block",
+            current={"status": "ready", "assignee": None},
+        )
+        self._assert_sticky_block_then_assign(calls, 0, bridge.PROFILE)
 
     @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
     def test_event_and_reconciliation_intakes_are_blocked_assigned(
@@ -658,7 +842,7 @@ class TestRuntimeKanbanBridgeIntakeRows:
         """Regression: no `subconscious_worker` ghost assignee in any intake path.
 
         The bridge must default to a profile that the Hermes dispatcher
-        actually knows about (currently ``serasubconscious``) so newly minted
+        can claim so newly minted
         `sensor:intake:*` rows are immediately claimable. Override via
         ``SENSORIUM_SUBCONSCIOUS_PROFILE`` is honored, but the hardcoded
         fallback must never reintroduce the legacy ghost name.
@@ -669,7 +853,7 @@ class TestRuntimeKanbanBridgeIntakeRows:
         # 1. The module's default profile constant must not be the ghost.
         assert bridge.PROFILE != "subconscious_worker", (
             f"{label}: bridge.PROFILE still defaults to the ghost 'subconscious_worker'; "
-            "update the script default to a real Hermes profile (e.g. 'serasubconscious')."
+            "update the script default to a claimable Hermes profile."
         )
 
         # 2. Drive both intake paths and assert no emitted command argument
@@ -746,6 +930,40 @@ class TestRuntimeKanbanBridgeIntakeRows:
 
         assert bridge._active_conscious([blocked, todo]) == []
         assert bridge._active_conscious([ready]) == [ready]
+
+    @pytest.mark.parametrize("label,path", _bridge_intake_script_paths())
+    def test_retry_exhausted_blocked_review_does_not_starve_replacement(
+        self,
+        label: str,
+        path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A dead failed review is not an active batch head forever."""
+        assert path.exists(), label
+        bridge = self._load_bridge(path)
+        failed = {
+            "id": "t_failed_review",
+            "title": "subconscious:review:sensorium-batch:failed",
+            "status": "blocked",
+        }
+        deliberate_hold = {
+            "id": "t_held_review",
+            "title": "subconscious:review:sensorium-batch:held",
+            "status": "blocked",
+            "consecutive_failures": 0,
+        }
+
+        monkeypatch.setattr(
+            bridge,
+            "_show_task",
+            lambda task_id: {
+                **failed,
+                "events": [{"kind": "gave_up"}, {"kind": "blocked"}],
+            },
+        )
+
+        assert bridge._active_reviews([failed]) == []
+        assert bridge._active_reviews([deliberate_hold]) == [deliberate_hold]
 
 
 class TestLiveKanbanBridgeReviewedOpenCleanup:

@@ -12,10 +12,36 @@ SCRIPT = ROOT / "scripts" / "sensorium_create_conscious_task.py"
 
 def test_create_conscious_task_script_creates_internal_candidate(tmp_path):
     state_dir = tmp_path / "sensorium"
+    store = SensoriumStore(instance="test", state_dir=str(state_dir))
+    store.ensure_dirs()
+    store.append_jsonl("events", {
+        "id": "evt_aperture_1",
+        "ts": "2026-05-26T10:00:00Z",
+        "type": "sensor.event.promoted",
+        "kind": "design_decision",
+        "summary": "Aperture design correction remains unresolved",
+        "strength": 0.8,
+        "correlation_keys": ["aperture-design"],
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+    })
+    store.append_jsonl("candidates", {
+        "id": "cand_aperture_1",
+        "status": "candidate",
+        "kind": "design_decision",
+        "summary": "Aperture design correction remains unresolved",
+        "pressure": 0.74,
+        "event_ids": ["evt_aperture_1"],
+        "correlation_keys": ["aperture-design"],
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+        "created_at": "2026-05-26T10:00:00Z",
+        "updated_at": "2026-05-26T10:00:00Z",
+    })
     record = {
         "rationale": "worth one coherent Conscious aperture pass",
         "event_ids": ["evt_aperture_1"],
-        "candidate_ids": [],
+        "candidate_ids": ["cand_aperture_1"],
         "pressure": 0.74,
         "conscious_task": {
             "request_type": "THINK",
@@ -48,10 +74,9 @@ def test_create_conscious_task_script_creates_internal_candidate(tmp_path):
     assert data["action"] == "created_conscious_task_candidate"
     candidate_id = data["candidate_id"]
 
-    store = SensoriumStore(instance="test", state_dir=str(state_dir))
     candidates = store.read_jsonl("candidates")
-    assert [c["id"] for c in candidates] == [candidate_id]
-    candidate = candidates[0]
+    assert [c["id"] for c in candidates] == ["cand_aperture_1", candidate_id]
+    candidate = candidates[1]
     assert candidate["kind"] == "subconscious_advisory"
     assert candidate["conscious_task"]["request_type"] == "THINK"
     assert candidate["conscious_task"]["title"] == "Review aperture design correction"

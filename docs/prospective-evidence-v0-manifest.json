@@ -1,0 +1,14 @@
+{
+  "schema": "sensorium.prospective_evidence.review_manifest.v2",
+  "status": "READY_FOR_INDEPENDENT_REVIEW",
+  "base": "d98b69c2a901e3b41848167e1d20aebe4dbb9352",
+  "scope": "detached prospective recorder seams only",
+  "verification": {
+    "focused": "python -m pytest -q tests/test_prospective_evidence.py tests/test_prospective_owner_seams.py",
+    "full": "python -m pytest tests -q",
+    "compile": "python -m py_compile agent_sensorium/*.py scripts/*.py",
+    "diff_check": "git diff --check"
+  },
+  "activation_authorized": false,
+  "live_mutation": false
+}

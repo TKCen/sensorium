@@ -16,7 +16,7 @@ reviewed, shared, or left silent.
 
 from __future__ import annotations
 
-from .config import load_instance_config
+from .config import load_instance_config, resolve_hermes_surface
 from .store import SensoriumStore
 
 EXAMPLE_SALIENCE_KINDS: frozenset[str] = frozenset({
@@ -70,14 +70,18 @@ def handle_salience_pre_llm(
 ) -> dict | None:
     """pre_llm_call hook entrypoint.
 
-    Returns ``{"context": <salience instruction string>}`` for normal live
-    turns. Returns ``None`` only when local Sensorium initialization unexpectedly
-    fails; hook failure must never crash the user-facing turn.
+    Returns ``{"context": <salience instruction string>}`` for known local
+    Hermes interactive turns. Returns ``None`` for remote/unknown platforms or
+    when local Sensorium initialization unexpectedly fails; hook failure must
+    never crash the user-facing turn.
 
     This hook is separate from the pointer hook. It does NOT write
     pointer.presented receipts — that is the pointer hook's concern.
     """
     try:
+        _, surface = resolve_hermes_surface(platform)
+        if surface != "local":
+            return None
         store = SensoriumStore(instance=instance, state_dir=state_dir)
         store.ensure_dirs()
         # Load config to exercise the same instance/config path used by other
@@ -87,7 +91,7 @@ def handle_salience_pre_llm(
             config_path=None,
             state_dir=str(store.root),
         )
-        _ = instance_config, platform, session_id, config
+        _ = instance_config, session_id, config
         return {"context": salience_context_for_llm()}
     except Exception:
         return None

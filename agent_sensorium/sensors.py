@@ -630,6 +630,26 @@ def _body_pressure_signal(
     }
 
 
+def _transition_sequence(state: dict) -> int | None:
+    """Read the producer-owned episode counter without laundering bad state."""
+    if "transition_sequence" not in state:
+        state["transition_sequence"] = 0
+    value = state.get("transition_sequence")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _bind_transition_revision(signal: dict, state: dict, *, increment: bool) -> None:
+    sequence = _transition_sequence(state)
+    if sequence is None:
+        return
+    if increment:
+        sequence += 1
+        state["transition_sequence"] = sequence
+    signal["source_revision"] = str(sequence)
+
+
 def classify_machine_body_pressure(
     sample: dict,
     *,
@@ -648,6 +668,7 @@ def classify_machine_body_pressure(
     st.setdefault("pending_count", 0)
     st.setdefault("healthy_count", 0)
     st.setdefault("samples_since_emit", 0)
+    _transition_sequence(st)
 
     observed_level, reason = _worst_pressure(sample, cfg)
     current_level = st["level"]
@@ -669,6 +690,7 @@ def classify_machine_body_pressure(
                 sample=sample,
                 window_samples=int(st["samples_since_emit"]),
             )
+            _bind_transition_revision(signal, st, increment=False)
             st["samples_since_emit"] = 0
         return signal, st
 
@@ -689,6 +711,7 @@ def classify_machine_body_pressure(
                 sample=sample,
                 window_samples=int(cfg["recovery_samples"]),
             )
+            _bind_transition_revision(signal, st, increment=True)
         return signal, st
 
     if _LEVEL_RANK[observed_level] > _LEVEL_RANK[current_level]:
@@ -713,6 +736,7 @@ def classify_machine_body_pressure(
                 sample=sample,
                 window_samples=needed,
             )
+            _bind_transition_revision(signal, st, increment=True)
         return signal, st
 
     # Improvement from critical to degraded is not full recovery; require the
@@ -736,6 +760,7 @@ def classify_machine_body_pressure(
             sample=sample,
             window_samples=int(cfg["degraded_samples"]),
         )
+        _bind_transition_revision(signal, st, increment=True)
     return signal, st
 
 
@@ -806,6 +831,7 @@ def _transition_classifier(
     correlation_key: str,
 ) -> tuple[dict | None, dict]:
     st = dict(state or {})
+    _transition_sequence(st)
     previous = st.get("level", "healthy")
     st["level"] = observed_level
     st["last_sample"] = dict(values)
@@ -822,6 +848,7 @@ def _transition_classifier(
             values=values,
             correlation_key=correlation_key,
         )
+        _bind_transition_revision(signal, st, increment=True)
     return signal, st
 
 
@@ -830,6 +857,8 @@ CODEX_USAGE_DEFAULT_CONFIG = {
     "primary_over_expected_critical_pp": 25.0,
     "weekly_over_expected_degraded_pp": 5.0,
     "weekly_over_expected_critical_pp": 15.0,
+    "primary_projected_overrun_percent": 105.0,
+    "weekly_projected_overrun_percent": 105.0,
     "reset_near_seconds": 3600,
 }
 
@@ -857,6 +886,13 @@ def _window_pace_points(*, used_percent, reset_after_seconds, window_seconds) ->
     elapsed_percent = ((window - reset_after) / window) * 100.0
     over_expected_pp = used - elapsed_percent
     return round(used, 3), round(elapsed_percent, 3), round(over_expected_pp, 3)
+
+
+def _window_projected_percent(pace: tuple[float, float, float] | None) -> float | None:
+    """Project window usage from elapsed-window average, matching burn tracking."""
+    if pace is None or pace[1] <= 0:
+        return None
+    return round((pace[0] / pace[1]) * 100.0, 3)
 
 
 def codex_usage_sample(
@@ -911,14 +947,38 @@ def provider_budget_sample(
     return collect_provider_budget_sample(probe_path=probe_path, timeout_seconds=timeout_seconds)
 
 
+def _codex_main_windows(main: dict) -> tuple[dict, dict]:
+    """Return (short/primary, weekly) without trusting WHAM field position.
+
+    Current Pro payloads may expose only a seven-day window under ``primary``;
+    older payloads exposed a short window under ``primary`` and weekly under
+    ``secondary``. Duration is semantic. A lone weekly window must never be
+    fabricated as short-window pressure.
+    """
+    slots = [
+        window
+        for key in ("primary", "secondary")
+        if isinstance((window := main.get(key)), dict) and window
+    ]
+    weekly = next(
+        (window for window in slots if _safe_float(window.get("window_seconds"), -1.0) == 7 * 24 * 60 * 60),
+        {},
+    )
+    non_weekly = [window for window in slots if window is not weekly]
+    if non_weekly:
+        primary = non_weekly[0]
+    elif not weekly and slots:
+        primary = slots[0]
+    else:
+        primary = {}
+    return primary, weekly
+
+
 def codex_usage_compact_sample(codex: dict, *, generated_at: str | None = None) -> dict:
     """Sanitize a Codex usage payload down to pressure-relevant fields."""
     raw_main = codex.get("main_rate_limit")
     main = raw_main if isinstance(raw_main, dict) else {}
-    raw_primary = main.get("primary")
-    primary = raw_primary if isinstance(raw_primary, dict) else {}
-    raw_secondary = main.get("secondary")
-    secondary = raw_secondary if isinstance(raw_secondary, dict) else {}
+    primary, secondary = _codex_main_windows(main)
     extras: list[dict] = []
     for item in codex.get("additional_rate_limits") or []:
         if not isinstance(item, dict):
@@ -989,8 +1049,10 @@ def classify_codex_usage_pressure(
     )
     primary_elapsed = primary_pace[1] if primary_pace else 0.0
     primary_over = primary_pace[2] if primary_pace else primary_used
+    primary_projected = _window_projected_percent(primary_pace)
     weekly_elapsed = weekly_pace[1] if weekly_pace else 0.0
     weekly_over = weekly_pace[2] if weekly_pace else weekly_used
+    weekly_projected = _window_projected_percent(weekly_pace)
     reset_near = bool(reset_after and reset_after <= int(cfg["reset_near_seconds"]))
     level = "healthy"
     family = "codex_usage"
@@ -1019,20 +1081,30 @@ def classify_codex_usage_pressure(
         level = "degraded"
         family = "primary_pace"
         reason = f"primary_over_expected={primary_over:.0f}pp used={primary_used:.0f}% elapsed={primary_elapsed:.0f}%"
+    elif weekly_projected is not None and weekly_projected > float(cfg["weekly_projected_overrun_percent"]):
+        level = "degraded"
+        family = "weekly_projection"
+        reason = f"weekly_projected={weekly_projected:.0f}% used={weekly_used:.0f}% elapsed={weekly_elapsed:.0f}%"
+    elif primary_projected is not None and primary_projected > float(cfg["primary_projected_overrun_percent"]):
+        level = "degraded"
+        family = "primary_projection"
+        reason = f"primary_projected={primary_projected:.0f}% used={primary_used:.0f}% elapsed={primary_elapsed:.0f}%"
 
     values = {
         "provider": "codex_openai",
         "plan_type": sample.get("plan_type") or "",
-        "primary_used_percent": primary_used,
-        "primary_reset_after_seconds": reset_after,
-        "primary_window_seconds": primary_window,
+        "primary_used_percent": primary_used if primary_pace is not None else None,
+        "primary_reset_after_seconds": reset_after if primary_pace is not None else None,
+        "primary_window_seconds": primary_window if primary_pace is not None else None,
         "primary_elapsed_percent": primary_elapsed,
         "primary_over_expected_pp": primary_over,
-        "weekly_used_percent": weekly_used,
-        "weekly_reset_after_seconds": weekly_reset_after,
-        "weekly_window_seconds": weekly_window,
+        "primary_projected_window_percent": primary_projected,
+        "weekly_used_percent": weekly_used if weekly_pace is not None else None,
+        "weekly_reset_after_seconds": weekly_reset_after if weekly_pace is not None else None,
+        "weekly_window_seconds": weekly_window if weekly_pace is not None else None,
         "weekly_elapsed_percent": weekly_elapsed,
         "weekly_over_expected_pp": weekly_over,
+        "weekly_projected_window_percent": weekly_projected,
         "reset_near": reset_near,
         "additional_limit_count": len(sample.get("additional_limits") or []),
     }

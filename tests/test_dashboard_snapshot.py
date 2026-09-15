@@ -138,7 +138,7 @@ def test_snapshot_surfaces_completed_lakmus_outbox_as_historical_pointer(tmp_pat
     assert data["counts"]["historical_outbox"] == 1
     assert data["counts"]["actionable_outbox"] == 0
     assert data["counts"]["lifecycle_warnings"] == 0
-    assert data["health"]["status"] == "quiet"
+    assert data["health"]["status"] == "settled"
     assert data["outbox"][0]["safety"]["label"] == "historical_prepared_pointer"
     assert data["outbox"][0]["liveness"]["state"] == "settled"
     assert data["outbox"][0]["liveness"]["reason_code"] == "historical_prepared_pointer"

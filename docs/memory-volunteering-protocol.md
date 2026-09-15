@@ -2,7 +2,7 @@
 
 Status: accepted design contract, 2026-07-04
 
-This protocol governs any Sensorium/Subconscious path that wants to volunteer a memory, insight, recalled fact, private salience, or offer candidate to Conscious Sera.
+This protocol governs any Sensorium/Subconscious path that wants to volunteer a memory, insight, recalled fact, private salience, or offer candidate to Conscious review.
 
 It exists to keep confidence useful without letting confidence become authority. A high score may earn attention; it may not create truth, write durable memory, or authorize delivery.
 

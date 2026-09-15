@@ -48,9 +48,20 @@ def signal_fingerprint(signal: dict) -> str:
     key_material = json.dumps(
         {
             "sensor": signal.get("sensor", ""),
+            "source": signal.get("source", ""),
             "kind": signal.get("kind", ""),
             "correlation_keys": sorted(signal.get("correlation_keys", [])),
             "summary": signal.get("summary", ""),
+            # Existing producer-owned identity/revision fields participate in
+            # ingest replay equality. Wrapper IDs and timestamps still do not.
+            "artifact_meta": {
+                key: (signal.get("artifact_meta") or {}).get(key)
+                for key in ("source_id", "item_id", "entry_id", "sha256")
+                if isinstance(signal.get("artifact_meta"), dict)
+                and key in signal["artifact_meta"]
+            },
+            "metric_family": signal.get("metric_family"),
+            "source_revision": signal.get("source_revision"),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -244,6 +255,88 @@ def should_promote_signal(signal: dict, config: dict | None = None) -> tuple[boo
         return True, f"kind '{kind}' with strength {strength} >= {thresholds['important_kind_strength']}"
 
     return False, f"below threshold (strength={strength}, kind='{kind}')"
+
+
+def _support_component(value) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 512:
+        return None
+    return value
+
+
+def _support_classification(signal: dict) -> tuple[str, tuple[str, ...]] | None:
+    """Classify only evidence allowed to contribute positive recurrence weight."""
+    sensor = _support_component(signal.get("sensor"))
+    source = _support_component(signal.get("source"))
+    if sensor is None or source is None:
+        return None
+    if source in {"memory", "feedback"} or signal.get("unverified") or signal.get("copied"):
+        return None
+
+    meta = signal.get("artifact_meta")
+    if meta is not None and not isinstance(meta, dict):
+        return None
+    meta = meta if isinstance(meta, dict) else {}
+    research_present = "source_id" in meta or "item_id" in meta
+    frontier_present = "entry_id" in meta or "sha256" in meta
+    if research_present and frontier_present:
+        return None
+    if research_present:
+        source_id = _support_component(meta.get("source_id"))
+        item_id = _support_component(meta.get("item_id"))
+        if source_id is None or item_id is None:
+            return None
+        return "source_owned", (sensor, source, "research_feed", source_id, item_id)
+    if frontier_present:
+        entry_id = _support_component(meta.get("entry_id"))
+        revision = _support_component(meta.get("sha256"))
+        if entry_id is None or revision is None:
+            return None
+        return "source_owned", (sensor, source, "frontier", entry_id)
+
+    keys = {str(key) for key in signal.get("correlation_keys") or []}
+    if (
+        sensor == "sensorium.live_turn"
+        and source == "hermes_session"
+        and any(key.startswith("live-residue:") for key in keys)
+    ):
+        return "foreground_residue", (sensor, source)
+    return None
+
+
+def should_promote_supported_signal(
+    signal: dict,
+    prior_signals: list[dict],
+    config: dict | None = None,
+) -> tuple[bool, str]:
+    """Let weak residue matter only with distinct source-owned support.
+
+    This is salience support, not an independent-evidence or truth claim. Exact
+    replay has already been removed by the ingest fingerprint owner.
+    """
+    cfg = config or DEFAULT_CONFIG
+    thresholds = dict(DEFAULT_CONFIG["thresholds"])
+    if isinstance(cfg.get("thresholds"), dict):
+        thresholds.update(cfg["thresholds"])
+    incoming_support = _support_classification(signal)
+    if incoming_support is None:
+        return False, "no_source_owned_support"
+    keys = {
+        str(key) for key in signal.get("correlation_keys") or []
+        if str(key) and not str(key).startswith(("surface:", "foreground:", "live-residue:"))
+    }
+    strength = _clamp(signal.get("strength_hint", 0.0))
+    for prior in reversed(prior_signals):
+        prior_support = _support_classification(prior)
+        if prior_support is None:
+            continue
+        if "source_owned" not in {incoming_support[0], prior_support[0]}:
+            continue
+        if incoming_support == prior_support:
+            continue
+        prior_keys = {str(key) for key in prior.get("correlation_keys") or []}
+        if keys & prior_keys and strength + _clamp(prior.get("strength_hint", 0.0)) >= thresholds["single_signal_strength"]:
+            return True, "distinct_source_support_crossed_salience_threshold"
+    return False, "insufficient_distinct_source_support"
 
 
 def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:

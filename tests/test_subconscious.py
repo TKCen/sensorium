@@ -123,12 +123,13 @@ def test_create_conscious_task_rejects_reach_out_until_policy_phase():
 def test_dry_run_stores_receipt_but_does_not_create_candidate_or_thread(state_dir):
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
-    store.append_jsonl("events", _event(1, kind="hindsight_pressure", summary="failed=9"))
+    store.append_jsonl("events", _event(1, summary="A repeated session theme remains unresolved"))
+    store.append_jsonl("candidates", _candidate(1, summary="Review the unresolved session theme"))
     output = {
         "action": "CREATE_CONSCIOUS_TASK",
         "rationale": "Hindsight failures are persistent enough to inspect.",
         "event_ids": ["evt_1"],
-        "candidate_ids": [],
+        "candidate_ids": ["cand_1"],
         "pressure": 0.72,
         "conscious_task": {
             "request_type": "THINK",
@@ -143,7 +144,7 @@ def test_dry_run_stores_receipt_but_does_not_create_candidate_or_thread(state_di
     assert result["action"] == "would_create_conscious_task"
     assert result["dry_run"] is True
     assert result["candidate_preview"]["kind"] == "subconscious_advisory"
-    assert store.read_jsonl("candidates") == []
+    assert [candidate["id"] for candidate in store.read_jsonl("candidates")] == ["cand_1"]
     assert store.read_jsonl("threads") == []
     receipts = [d for d in store.read_jsonl("decisions") if d.get("type") == "subconscious.advisory"]
     assert len(receipts) == 1
@@ -186,12 +187,13 @@ def test_disabled_path_never_invokes_model_transport(state_dir):
 def test_enabled_non_dry_run_creates_internal_candidate_only(state_dir):
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
-    store.append_jsonl("events", _event(2, kind="kanban_pressure", summary="blocked=17"))
+    store.append_jsonl("events", _event(2, summary="A design decision remains unresolved"))
+    store.append_jsonl("candidates", _candidate(2, summary="Review the unresolved design decision"))
     output = {
         "action": "CREATE_CONSCIOUS_TASK",
         "rationale": "Kanban pressure is actionable.",
         "event_ids": ["evt_2"],
-        "candidate_ids": [],
+        "candidate_ids": ["cand_2"],
         "pressure": 0.7,
         "conscious_task": {
             "request_type": "THINK",
@@ -205,9 +207,9 @@ def test_enabled_non_dry_run_creates_internal_candidate_only(state_dir):
 
     assert result["action"] == "created_conscious_task_candidate"
     candidates = store.read_jsonl("candidates")
-    assert len(candidates) == 1
-    assert candidates[0]["kind"] == "subconscious_advisory"
-    assert candidates[0]["conscious_task"]["title"] == "Review blocked Kanban tasks"
+    assert len(candidates) == 2
+    advisory = next(candidate for candidate in candidates if candidate["kind"] == "subconscious_advisory")
+    assert advisory["conscious_task"]["title"] == "Review blocked Kanban tasks"
     assert store.read_jsonl("threads") == []
 
 
@@ -277,6 +279,7 @@ def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
     store.append_jsonl("events", _event(4, kind="design_decision", summary="repeated session theme"))
+    store.append_jsonl("candidates", _candidate(4, summary="Repeated session theme"))
 
     def fake_generate(context, *, config):
         assert context["recent_events"]
@@ -285,7 +288,7 @@ def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
             "action": "CREATE_CONSCIOUS_TASK",
             "rationale": "Cheap model saw repeated Hindsight failure pressure.",
             "event_ids": ["evt_4"],
-            "candidate_ids": [],
+            "candidate_ids": ["cand_4"],
             "pressure": 0.71,
             "conscious_task": {
                 "request_type": "THINK",
@@ -306,8 +309,9 @@ def test_enabled_model_lane_reasons_when_no_advisory_output(state_dir):
     assert result["action"] == "created_conscious_task_candidate"
     assert result["model_used"] is True
     candidates = store.read_jsonl("candidates")
-    assert len(candidates) == 1
-    assert candidates[0]["summary"] == "Review Hindsight pressure"
+    assert len(candidates) == 2
+    advisory = next(candidate for candidate in candidates if candidate["kind"] == "subconscious_advisory")
+    assert advisory["summary"] == "Review Hindsight pressure"
 
 
 def test_tool_handler_runs_advisory_dry_run(state_dir):

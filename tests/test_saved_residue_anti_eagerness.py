@@ -4,7 +4,7 @@ Background
 ----------
 The foreground patch added an honest saved-residue pointer pathway so
 archived candidates with a Kanban SAVE/PROMOTE_CONSCIOUS settlement remain
-consciously accessible. Sera flagged that the pathway, taken on its own,
+consciously accessible. Review flagged that the pathway, taken on its own,
 risks two eagerness smells when no active candidate is present:
 
   * "archive-confetti" — the same archive of old saved residue keeps

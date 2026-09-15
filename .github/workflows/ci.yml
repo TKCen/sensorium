@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install tools
-        run: python -m pip install --upgrade pip && pip install ruff -e ".[test]"
+        run: python -m pip install --upgrade pip && pip install ruff==0.15.22 -e ".[test]"
 
       - name: Lint
         run: ruff check agent_sensorium tests

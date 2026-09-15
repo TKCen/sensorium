@@ -34,8 +34,8 @@ def test_liveness_timestamp_projection_and_candidate_reasons_are_closed(tmp_path
         state="held", reason_code="candidate_held", observed_at="2026-07-09T14:00:00+02:00",
         source="candidate_status", actionable=False, terminal=False,
     )
-    fresh = mod._candidate_liveness({"status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"opened_at": "2099-01-01T00:00:00Z"}})
-    stale = mod._candidate_liveness({"status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"state": "stale"}})
+    fresh = mod._candidate_liveness({"id": "cand_fresh", "status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"opened_at": "2099-01-01T00:00:00Z"}})
+    stale = mod._candidate_liveness({"id": "cand_stale", "status": "in_conscious_aperture", "updated_at": "2026-07-09T12:00:00Z", "conscious_aperture": {"state": "stale"}})
 
     assert hostile["observed_at"] is None
     assert valid["observed_at"] == "2026-07-09T12:00:00Z"

@@ -416,7 +416,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Flow DAG (sera-ck9.3): primary graph view. Fetches /topology +
+  // Flow DAG: primary graph view. Fetches /topology +
   // /runtime-status and merges them client-side instead of reusing the
   // /snapshot-shaped inner-life projection below. Configured-but-unobserved
   // topology nodes are first-class here (they come straight from /topology,

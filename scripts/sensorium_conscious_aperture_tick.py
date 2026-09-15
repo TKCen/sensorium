@@ -28,6 +28,9 @@ def main() -> int:
     )
     ap.add_argument("--aperture-size", type=int, default=5)
     ap.add_argument("--max-active-sessions", type=int, default=1)
+    ap.add_argument("--max-active-items", type=int, default=None)
+    ap.add_argument("--lease-minutes", type=int, default=15)
+    ap.add_argument("--consumer-id", default=None)
     ap.add_argument("--stale-after-minutes", type=int, default=180)
     ap.add_argument("--now", default=None, help="Testing override for opened_at timestamp")
     ap.add_argument("--open", action="store_true", help="Persist the aperture state; default is dry-run preview")
@@ -39,6 +42,9 @@ def main() -> int:
         store,
         aperture_size=args.aperture_size,
         max_active_sessions=args.max_active_sessions,
+        max_active_items=args.max_active_items,
+        lease_minutes=args.lease_minutes,
+        consumer_id=args.consumer_id,
         stale_after_minutes=args.stale_after_minutes,
         dry_run=not args.open,
         now=args.now,

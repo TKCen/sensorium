@@ -96,13 +96,14 @@ def build_live_ingest_receipt(
     kind: str,
     surface: str,
     intent: dict[str, Any],
+    platform: str = "",
     signal_id: str = "",
     ingested: bool = False,
     skipped_reason: str = "",
 ) -> dict[str, Any]:
     """Build a compact receipt for a live-turn ingest decision."""
 
-    return {
+    receipt = {
         "id": new_id("lturn"),
         "type": "live_turn.ingest_decision",
         "ts": utc_now_iso(),
@@ -118,6 +119,9 @@ def build_live_ingest_receipt(
         "signal_id": signal_id,
         "skipped_reason": skipped_reason,
     }
+    if platform:
+        receipt["platform"] = platform
+    return receipt
 
 
 def should_ingest_live_residue(intent: dict[str, Any]) -> tuple[bool, str]:

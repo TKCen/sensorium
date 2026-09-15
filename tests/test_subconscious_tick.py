@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from agent_sensorium.store import SensoriumStore
+from agent_sensorium.tools import handle_sensorium_ingest_signal
 
 TICK_SCRIPT = str(Path(__file__).resolve().parent.parent / "scripts" / "sensorium_tick.py")
 
@@ -46,7 +47,7 @@ def test_subconscious_flag_runs_disabled_dry_run_advisory(tmp_path):
     assert store.read_jsonl("threads") == []
 
 
-def test_subconscious_model_flag_enables_model_lane_without_external_side_effects(tmp_path):
+def test_subconscious_model_flag_event_only_skips_before_provider_attempt(tmp_path):
     state_dir = str(tmp_path / "sensorium")
     store = SensoriumStore(instance="test", state_dir=state_dir)
     store.ensure_dirs()
@@ -72,9 +73,69 @@ def test_subconscious_model_flag_enables_model_lane_without_external_side_effect
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["success"] is True
-    assert out["subconscious_advisory"]["action"] == "model_unavailable"
-    assert out["subconscious_advisory"]["model"] == "MiniMax-M3"
+    assert out["subconscious_advisory"]["action"] == "skipped_no_eligible_source"
+    assert out["subconscious_advisory"]["model_used"] is False
     assert store.read_jsonl("candidates") == []
+    assert store.read_jsonl("threads") == []
+    assert not any(
+        row.get("type") == "subconscious.advisory"
+        for row in store.read_jsonl("decisions")
+    )
+
+
+def test_subconscious_model_flag_eligible_source_reaches_missing_key_without_side_effects(tmp_path):
+    state_dir = str(tmp_path / "sensorium")
+    store = SensoriumStore(instance="test", state_dir=state_dir)
+    store.ensure_dirs()
+    signal = {
+        "id": "sig_tick_model_eligible",
+        "sensor": "research.source_feed",
+        "source": "artifact",
+        "kind": "creative_pull",
+        "summary": "Synthetic eligible source for model flag wiring",
+        "actor": "tool",
+        "strength_hint": 0.9,
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
+        "correlation_keys": ["subject:model-flag"],
+        "artifact_meta": {"source_id": "feed-model-flag", "item_id": "item-model-flag"},
+    }
+    ingested = json.loads(handle_sensorium_ingest_signal(
+        signal=signal, instance="test", state_dir=state_dir, config={},
+    ))
+    assert ingested["success"] is True
+    assert ingested["data"]["promoted"] is True
+    source_candidate_id = ingested["data"]["candidate_id"]
+
+    missing_key = "SENSORIUM_MISSING_TEST_KEY"
+    env = dict(__import__("os").environ)
+    env.pop(missing_key, None)
+    env["SENSORIUM_SUBCONSCIOUS_API_KEY_ENV"] = missing_key
+    proc = subprocess.run(
+        [
+            sys.executable,
+            TICK_SCRIPT,
+            "--instance", "test",
+            "--state-dir", state_dir,
+            "--subconscious-advisory",
+            "--subconscious-model",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["success"] is True
+    assert out["subconscious_advisory"]["action"] == "model_unavailable"
+    assert out["subconscious_advisory"]["model_used"] is False
+    assert out["subconscious_advisory"]["model"] == "MiniMax-M3"
+    candidates = store.read_jsonl("candidates")
+    assert [row["id"] for row in candidates] == [source_candidate_id]
+    assert not any(row.get("kind") == "subconscious_advisory" for row in candidates)
     assert store.read_jsonl("threads") == []
 
 

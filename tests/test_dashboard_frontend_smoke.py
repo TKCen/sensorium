@@ -1,4 +1,4 @@
-"""Deterministic, DOM-free smoke checks for the flow-DAG frontend rewire (sera-ck9.3).
+"""Deterministic, DOM-free smoke checks for the flow-DAG frontend rewire.
 
 A real browser smoke (load the bundle in Chrome, click a node, watch /trace
 fire) is not available from this worker environment -- there is no display

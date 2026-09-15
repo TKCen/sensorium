@@ -52,6 +52,10 @@ def _schema(name: str, description: str, properties: dict[str, Any] | None = Non
 def register(ctx) -> None:
     """Register Agent Sensorium plugin tools, command, and bundled skill."""
     from .commands import handle_sensorium_command
+    from .config import load_instance_config, resolve_hermes_surface
+    from .conscious_aperture import settle_conscious_aperture_item
+    from .conscious_doorway import handle_conscious_doorway_pre_llm
+    from .conscious_reachout import apply_conscious_reachout_decision
     from .live_turn import (
         build_live_ingest_receipt,
         normalize_live_turn_intent,
@@ -60,8 +64,6 @@ def register(ctx) -> None:
     from .pointers import handle_pointer_pre_llm
     from .pre_llm_salience import handle_salience_pre_llm
     from .store import SensoriumStore
-    from .config import load_instance_config
-    from .conscious_reachout import apply_conscious_reachout_decision
     from .tools import (
         handle_sensorium_attention_pointer,
         handle_sensorium_candidate_open,
@@ -91,9 +93,11 @@ def register(ctx) -> None:
         instance = _arg_instance(args)
         if instance is None:
             return _live_result({"success": False, "instance": None, "data": None, "error": "invalid_instance"})
-        surface = str(args.get("surface") or kw.get("platform") or "local").strip() or "local"
+        requested_platform = kw.get("platform") or args.get("surface") or "local"
+        platform_label, surface = resolve_hermes_surface(requested_platform)
         text = str(args.get("text") or "").strip()
         target_id = str(args.get("id") or "latest").strip() or "latest"
+        state_dir = kw.get("state_dir")
 
         if action == "status":
             # Forward reference_id + surface so the conscious layer can pin
@@ -155,6 +159,7 @@ def register(ctx) -> None:
                     text=text,
                     kind=kind,
                     surface=surface,
+                    platform=platform_label,
                     intent=intent,
                     ingested=False,
                     skipped_reason=ingest_reason,
@@ -178,6 +183,7 @@ def register(ctx) -> None:
                 "strength_hint": strength,
                 "sensitivity": "private",
                 "allowed_surfaces": allowed_surfaces,
+                "platform": platform_label,
                 "correlation_keys": [
                     "active-session",
                     f"surface:{surface}",
@@ -195,6 +201,7 @@ def register(ctx) -> None:
                 text=text,
                 kind=kind,
                 surface=surface,
+                platform=platform_label,
                 intent=intent,
                 signal_id=signal_id,
                 ingested=bool(parsed.get("success")),
@@ -230,12 +237,48 @@ def register(ctx) -> None:
 
         if action == "update":
             keyword = str(args.get("keyword") or "mark_reviewed").strip().lower()
+            aperture_id = str(args.get("aperture_id") or "").strip()
+            consumer_id = str(args.get("consumer_id") or "").strip()
+            if target_id.startswith("cand_") or aperture_id or consumer_id:
+                settlement_decisions = {
+                    "mark_reviewed": "REVIEWED",
+                    "reviewed": "REVIEWED",
+                    "no_action": "REVIEWED",
+                    "settle": "SETTLED",
+                    "hold": "HELD",
+                }
+                store = SensoriumStore(instance=instance, state_dir=state_dir)
+                current_lease = any(
+                    row.get("id") == target_id
+                    and row.get("status") == "in_conscious_aperture"
+                    for row in store.read_jsonl("candidates")
+                )
+                if keyword in settlement_decisions and (
+                    aperture_id or consumer_id or current_lease
+                ):
+                    result = settle_conscious_aperture_item(
+                        store,
+                        candidate_id=target_id,
+                        aperture_id=aperture_id,
+                        consumer_id=consumer_id,
+                        decision=settlement_decisions[keyword],
+                        reason=text,
+                        return_at=args.get("return_at"),
+                        dry_run=False,
+                    )
+                    return _live_result({
+                        "success": bool(result.get("success")),
+                        "instance": instance,
+                        "data": result,
+                        "error": result.get("error"),
+                    })
             if target_id.startswith("cand_"):
                 return handle_sensorium_candidate_update(
                     candidate_id=target_id,
                     action=keyword,
                     reason=text,
                     instance=instance,
+                    state_dir=state_dir,
                 )
             return handle_sensorium_thread_update(
                 thread_id=target_id,
@@ -330,11 +373,26 @@ def register(ctx) -> None:
                     "description": "For ingest receipts only; defaults false and does not authorize outbound action.",
                 },
                 "id": {"type": "string", "description": "Thread id, or latest."},
+                "aperture_id": {
+                    "type": "string",
+                    "description": "Required exact Conscious aperture ownership id for foreground settlement.",
+                },
+                "consumer_id": {
+                    "type": "string",
+                    "description": "Required exact Conscious consumer ownership id for foreground settlement; never inferred.",
+                },
+                "return_at": {
+                    "type": "string",
+                    "description": "Future UTC-Z checkpoint required when holding an aperture item.",
+                },
                 "keyword": {
                     "type": "string",
-                    "description": "Update keyword: close, hold, resume, archive, mark_reviewed, pin, or unpin.",
+                    "description": "Update keyword: close, hold, settle, resume, archive, mark_reviewed, pin, or unpin.",
                 },
-                "surface": {"type": "string", "description": "local or discord; defaults local."},
+                "surface": {
+                    "type": "string",
+                    "description": "Sensorium policy surface; desktop, tui, and cli use the local domain.",
+                },
             },
         ),
         handler=_handle_live_sensorium,
@@ -353,6 +411,19 @@ def register(ctx) -> None:
         args_hint="status|threads|pointer|open|thread|dispatch|compact|help",
     )
 
+    # The executable Conscious doorway runs before the shallow pointer. Claimed
+    # candidates no longer qualify for candidate-pointer fallback in this turn.
+    ctx.register_hook(
+        "pre_llm_call",
+        lambda **kw: handle_conscious_doorway_pre_llm(
+            instance=_default_instance(),
+            platform=kw.get("platform") or "local",
+            session_id=kw.get("session_id") or "",
+            turn_id=kw.get("turn_id") or "",
+            state_dir=kw.get("state_dir"),
+        ),
+    )
+
     ctx.register_hook(
         "pre_llm_call",
         lambda **kw: handle_pointer_pre_llm(
@@ -360,8 +431,14 @@ def register(ctx) -> None:
             platform=kw.get("platform") or "local",
             session_id=kw.get("session_id") or "",
             state_dir=kw.get("state_dir"),
-            current_text=kw.get("current_text") or kw.get("text") or kw.get("user_text") or "",
-            messages=kw.get("messages"),
+            current_text=(
+                kw.get("user_message")
+                or kw.get("current_text")
+                or kw.get("text")
+                or kw.get("user_text")
+                or ""
+            ),
+            messages=kw.get("conversation_history") or kw.get("messages"),
         ),
     )
 

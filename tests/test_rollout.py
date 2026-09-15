@@ -29,6 +29,8 @@ def _make_fake_source(source_root: Path) -> None:
     (source_root / "dashboard" / "plugin_api.py").write_text("# dashboard\n")
     (source_root / "scripts").mkdir()
     (source_root / "scripts" / "sensorium_tick.py").write_text("# tick\n")
+    (source_root / "scripts" / "sensorium_native_clock.py").write_text("# native clock\n")
+    (source_root / "scripts" / "sensorium_native_conscious.py").write_text("# native conscious\n")
     (source_root / "skills").mkdir()
     (source_root / "skills" / "example.yaml").write_text("name: example\n")
     (source_root / "plugin.yaml").write_text("name: agent-sensorium\n")
@@ -229,6 +231,30 @@ def test_all_live_scripts_sync_to_runtime_scripts_target(tmp_path):
     rollout.do_sync(items, dry_run=False)
     assert (scripts_target / "project_update_sensor.py").read_text() == "# project update sensor\n"
     assert (scripts_target / "sensorium_kanban_sensor_tick.py").read_text() == "# kanban sensor tick\n"
+
+
+def test_native_session_entrypoints_sync_to_runtime_scripts_target(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    _make_fake_source(source_root)
+
+    target_root = tmp_path / "hermes" / "plugins" / "agent-sensorium"
+    scripts_target = tmp_path / "hermes" / "scripts"
+    items = rollout.get_managed_items(source_root, target_root, scripts_target)
+
+    runtime_items = {
+        src.name: dst
+        for src, dst in items
+        if src.parent == source_root / "scripts" and dst.parent == scripts_target
+    }
+    assert runtime_items == {
+        "sensorium_native_clock.py": scripts_target / "sensorium_native_clock.py",
+        "sensorium_native_conscious.py": scripts_target / "sensorium_native_conscious.py",
+    }
+
+    rollout.do_sync(items, dry_run=False)
+    assert (scripts_target / "sensorium_native_clock.py").read_text() == "# native clock\n"
+    assert (scripts_target / "sensorium_native_conscious.py").read_text() == "# native conscious\n"
 
 
 # ---------------------------------------------------------------------------
