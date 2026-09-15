@@ -426,11 +426,13 @@ def test_runner_does_not_consume_preexisting_ownerless_aperture(tmp_path):
     assert store.read_jsonl("decisions") == []
 
 
-def test_runner_preserves_source_when_binding_is_missing_after_open(tmp_path):
+def test_runner_preserves_source_when_binding_is_missing_before_open(tmp_path):
     module = _load_runner()
     store = _store(tmp_path)
     candidate = _advisory(fingerprint="")
     store.append_jsonl("candidates", candidate)
+    before = store.paths["candidates"].read_bytes()
+    before_stat = store.paths["candidates"].stat()
 
     result = module.run_once(
         _args(tmp_path), run_command=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -440,9 +442,12 @@ def test_runner_preserves_source_when_binding_is_missing_after_open(tmp_path):
 
     assert result["success"] is False
     assert result["action"] == "source_binding_missing"
-    assert result["opened_by_this_run"] is True
-    assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
-    _assert_opening_without_semantic_settlement(store)
+    assert result["opened_by_this_run"] is False
+    assert store.paths["candidates"].read_bytes() == before
+    after_stat = store.paths["candidates"].stat()
+    assert (after_stat.st_ino, after_stat.st_mtime_ns) == (before_stat.st_ino, before_stat.st_mtime_ns)
+    assert store.read_jsonl("candidates")[0]["status"] == "candidate"
+    assert store.read_jsonl("decisions") == []
 
 
 def test_runner_preserves_source_when_deterministic_application_fails(tmp_path, monkeypatch):

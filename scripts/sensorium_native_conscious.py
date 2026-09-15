@@ -459,74 +459,79 @@ def run_once(
                 _json_write(receipt_path, result)
                 return result
             _json_write(state_path, prior)
-        inspection = open_conscious_aperture(
-            store,
-            aperture_size=1,
-            max_active_sessions=1,
-            stale_after_minutes=args.stale_after_minutes,
-            dry_run=True,
-            now=timestamp,
-            candidate_kind=CONSCIOUS_ADVISORY_KIND,
-            consumer_id="conscious-session",
-        )
-        aperture = inspection.get("aperture")
-        if not inspection.get("success"):
-            result = {**_base_result(args, now=timestamp), **inspection}
-            _json_write(receipt_path, result)
-            return result
-        if not isinstance(aperture, list) or len(aperture) != 1:
-            result = {**_base_result(args, now=timestamp), "action": "no_current_advisory"}
-            _json_write(receipt_path, result)
-            return result
-
-        # A dry inspection is not the application. Commit either the selected
-        # claim or the previewed same-owner renewal before model invocation, then
-        # rebuild the packet from canonical ownership.
-        if inspection.get("action") in {"would_open_aperture", "resumed_aperture"}:
-            inspection_action = inspection.get("action")
-            opened = open_conscious_aperture(
+        # Retry denial must not rewrite ownership: repeated no-op renewals reset
+        # bounded Desktop catch-up forever. Hold the candidate transaction from
+        # dry selection through eligibility and claim so all three name the same
+        # revision. Release it before inference.
+        with store.candidate_transaction():
+            inspection = open_conscious_aperture(
                 store,
                 aperture_size=1,
                 max_active_sessions=1,
                 stale_after_minutes=args.stale_after_minutes,
-                dry_run=False,
+                dry_run=True,
                 now=timestamp,
                 candidate_kind=CONSCIOUS_ADVISORY_KIND,
                 consumer_id="conscious-session",
             )
-            if not opened.get("success") or not isinstance(opened.get("aperture"), list) or len(opened["aperture"]) != 1:
-                result = {**_base_result(args, now=timestamp), **opened}
+            aperture = inspection.get("aperture")
+            if not inspection.get("success"):
+                result = {**_base_result(args, now=timestamp), **inspection}
                 _json_write(receipt_path, result)
                 return result
-            opened_by_this_run = inspection_action == "would_open_aperture"
-            inspection = opened
-        packet = build_conscious_source_packet(inspection)
-        if not packet.get("source_candidate_fingerprint"):
-            result = _failure_result(
-                store,
-                args,
-                now=timestamp,
-                packet=packet,
-                action="source_binding_missing",
-                reason="source_binding_missing",
-                opened_by_this_run=opened_by_this_run,
+            if not isinstance(aperture, list) or len(aperture) != 1:
+                result = {**_base_result(args, now=timestamp), "action": "no_current_advisory"}
+                _json_write(receipt_path, result)
+                return result
+
+            packet = build_conscious_source_packet(inspection)
+            if not packet.get("source_candidate_fingerprint"):
+                result = _failure_result(
+                    store,
+                    args,
+                    now=timestamp,
+                    packet=packet,
+                    action="source_binding_missing",
+                    reason="source_binding_missing",
+                    opened_by_this_run=opened_by_this_run,
+                )
+                _json_write(receipt_path, result)
+                return result
+            revision = source_revision_key(
+                candidate_id=packet["candidate_id"],
+                source_candidate_ids=packet.get("source_candidate_ids"),
+                source_candidate_fingerprint=packet.get("source_candidate_fingerprint", ""),
             )
-            _json_write(receipt_path, result)
-            return result
-        revision = source_revision_key(
-            candidate_id=packet["candidate_id"],
-            source_candidate_ids=packet.get("source_candidate_ids"),
-            source_candidate_fingerprint=packet.get("source_candidate_fingerprint", ""),
-        )
-        allowed, gate_reason, ordinal = retry_gate(prior, revision, now=timestamp)
-        if not allowed:
-            result = {
-                **_base_result(args, now=timestamp, packet=packet),
-                "action": f"skipped_{gate_reason}",
-                "reason": prior.get("last_failure_reason", ""),
-            }
-            _json_write(receipt_path, result)
-            return result
+            allowed, gate_reason, ordinal = retry_gate(prior, revision, now=timestamp)
+            if not allowed:
+                result = {
+                    **_base_result(args, now=timestamp, packet=packet),
+                    "action": f"skipped_{gate_reason}",
+                    "reason": prior.get("last_failure_reason", ""),
+                }
+                _json_write(receipt_path, result)
+                return result
+
+            # An allowed dry inspection still is not the application. Persist
+            # claim/resume before model execution, then use canonical ownership.
+            if inspection.get("action") in {"would_open_aperture", "resumed_aperture"}:
+                inspection_action = inspection.get("action")
+                opened = open_conscious_aperture(
+                    store,
+                    aperture_size=1,
+                    max_active_sessions=1,
+                    stale_after_minutes=args.stale_after_minutes,
+                    dry_run=False,
+                    now=timestamp,
+                    candidate_kind=CONSCIOUS_ADVISORY_KIND,
+                    consumer_id="conscious-session",
+                )
+                if not opened.get("success") or not isinstance(opened.get("aperture"), list) or len(opened["aperture"]) != 1:
+                    result = {**_base_result(args, now=timestamp), **opened}
+                    _json_write(receipt_path, result)
+                    return result
+                opened_by_this_run = inspection_action == "would_open_aperture"
+                packet = build_conscious_source_packet(opened)
 
         total_timeout_seconds = getattr(args, "total_timeout_seconds", 270)
         cleanup_reserve_seconds = getattr(args, "cleanup_reserve_seconds", 30)
