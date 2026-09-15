@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 try:
     import fcntl
@@ -54,7 +54,6 @@ from agent_sensorium.store import SensoriumStore  # noqa: E402
 from agent_sensorium.subconscious import (  # noqa: E402
     ADVISORY_SOURCE_EXCLUDED_KINDS,
     DIRECT_CONSCIOUS_KINDS,
-    is_advisory_source_kind,
 )
 from agent_sensorium.tools import handle_sensorium_subconscious_advisory  # noqa: E402
 
@@ -110,8 +109,15 @@ def _candidate_priority_key(candidate: dict) -> tuple:
     return (-pressure, str(candidate.get("created_at") or ""), str(candidate.get("id") or ""))
 
 
-def _source_material(store: SensoriumStore, *, event_limit: int, candidate_limit: int) -> dict:
-    plan = build_admission_plan(store, candidate_limit=candidate_limit)
+def _source_material(
+    store: SensoriumStore, *, event_limit: int, candidate_limit: int,
+    admission_scan_bytes: int = 4 * 1024 * 1024,
+) -> dict:
+    prepared = store.prepare_admission_index(scan_bytes=admission_scan_bytes)
+    plan = build_admission_plan(
+        store, candidate_limit=candidate_limit,
+        admission_scan_bytes=admission_scan_bytes,
+    )
     binding = plan["selection"]
     bound = (
         context_for_binding(store, binding, source_decisions=plan["source_decisions"])
@@ -126,6 +132,17 @@ def _source_material(store: SensoriumStore, *, event_limit: int, candidate_limit
         "eligible_count": plan["eligible_count"],
         "suppressed_counts": plan["suppressed_counts"],
         "source_decisions": plan["source_decisions"],
+        "admission_state": plan.get("state", "ready"),
+        "admission_reason": plan.get("reason"),
+        "admission_progress": plan.get("progress", {}),
+        "admission_work": {
+            "source_byte_limit": admission_scan_bytes,
+            "source_bytes": prepared.bytes_consumed,
+            "source_records": prepared.records_consumed,
+            "query_rows": plan.get("query_rows", 0),
+            "materialized_rows": plan.get("materialized_rows", 0),
+            "candidate_limit": candidate_limit,
+        },
         "events": [
             {
                 "id": event.get("id"),
@@ -149,7 +166,16 @@ def _source_material(store: SensoriumStore, *, event_limit: int, candidate_limit
 
 
 def _signature(material: dict) -> str:
-    payload = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        {
+            key: value for key, value in material.items()
+            if key not in {
+                "admission_state", "admission_reason", "admission_progress", "admission_work",
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -357,6 +383,7 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
             store,
             event_limit=args.event_limit,
             candidate_limit=args.candidate_limit,
+            admission_scan_bytes=getattr(args, "admission_scan_bytes", 4 * 1024 * 1024),
         )
         binding = material.get("selection")
         signature = str((binding or {}).get("admission_key") or "")
@@ -376,10 +403,20 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
                 "events": len(material["events"]),
                 "candidates": len(material["candidates"]),
             },
+            "admission_index": {
+                "state": material.get("admission_state", "ready"),
+                "reason": material.get("admission_reason"),
+                "progress": material.get("admission_progress", {}),
+                "work": material.get("admission_work", {}),
+            },
             "sensors": sensor_result,
         }
         if binding is None:
-            action = "skipped_empty" if not store.read_jsonl("candidates") else "skipped_no_eligible_source"
+            admission_state = material.get("admission_state", "ready")
+            if admission_state != "ready":
+                action = f"skipped_admission_index_{admission_state}"
+            else:
+                action = "skipped_empty" if not store.read_jsonl("candidates") else "skipped_no_eligible_source"
             result = {**base, "action": action}
             terminalize_attempt(prior, success=True)
             _json_write(state_path, prior)
@@ -475,6 +512,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--plugin-root", default=str(PLUGIN_ROOT))
     parser.add_argument("--event-limit", type=int, default=50)
     parser.add_argument("--candidate-limit", type=int, default=50)
+    parser.add_argument("--admission-scan-bytes", type=int, default=4 * 1024 * 1024)
     parser.add_argument("--failure-cooldown-seconds", type=int, default=1800)
     # The deterministic sensor pass also runs the due-gated Hindsight memory
     # reflection probe.  The probe's own cadence keeps calls sparse, but an

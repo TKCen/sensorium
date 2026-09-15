@@ -411,6 +411,63 @@ class SensoriumStore:
             results = results[-limit:]
         return results
 
+    def prepare_admission_index(self, *, scan_bytes: int = 4 * 1024 * 1024):
+        """Advance the disposable admission cache within one aggregate byte budget."""
+        from .admission import _base_binding_from_snapshot, _claim_for_signal
+        from .admission_index import AdmissionIndex
+        from .gate import candidate_fingerprint
+
+        return AdmissionIndex(self).prepare(
+            scan_bytes=scan_bytes,
+            claim_parser=_claim_for_signal,
+            fingerprint=candidate_fingerprint,
+            binding_builder=_base_binding_from_snapshot,
+        )
+
+    def read_admission_plan(self, *, candidate_limit: int = 50):
+        """Read bounded materialized eligibility when the index exists."""
+        from .admission_index import AdmissionIndex
+
+        index = AdmissionIndex(self)
+        return index.read_plan(candidate_limit=candidate_limit) if index.path.exists() else None
+
+    def read_admission_binding(self, candidate_id: str):
+        """Read one exact current binding from the ready index when present."""
+        from .admission_index import AdmissionIndex
+
+        index = AdmissionIndex(self)
+        return index.read_binding(candidate_id) if index.path.exists() else None
+
+    def read_admission_dispositions(self, binding: dict):
+        """Read bounded disposition evidence for one exact binding."""
+        from .admission_index import AdmissionIndex
+
+        index = AdmissionIndex(self)
+        return index.read_dispositions(binding) if index.path.exists() else None
+
+    def read_admission_context(self, candidate_id: str):
+        """Read one candidate and its directly joined events from the ready index."""
+        from .admission_index import AdmissionIndex
+
+        index = AdmissionIndex(self)
+        return index.read_context(candidate_id) if index.path.exists() else None
+
+    def read_admission_snapshot(self, *, scan_bytes: int = 4 * 1024 * 1024):
+        """Read a budget-fitting cache-less exact snapshot for compatibility paths."""
+        from .admission import _claim_for_signal
+        from .admission_index import AdmissionIndex, bounded_cacheless_snapshot
+        from .gate import candidate_fingerprint
+
+        index = AdmissionIndex(self)
+        if index.path.exists():
+            return index.read_snapshot()
+        return bounded_cacheless_snapshot(
+            self,
+            scan_bytes=scan_bytes,
+            claim_parser=_claim_for_signal,
+            fingerprint=candidate_fingerprint,
+        )
+
     def write_state(self, obj: dict) -> None:
         self.ensure_dirs()
         atomic_write_json(self._root / "state.latest.json", obj)

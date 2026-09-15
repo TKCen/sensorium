@@ -31,7 +31,8 @@ def _component(value: Any) -> tuple[str | None, bool]:
 def source_candidate_fingerprint(candidate: dict) -> str:
     """Return the inherited exact representation binding."""
     payload = {
-        "candidate_fingerprint": candidate_fingerprint(candidate),
+        "candidate_fingerprint": candidate.get("_admission_candidate_fingerprint")
+        or candidate_fingerprint(candidate),
         "event_ids": sorted(str(value) for value in candidate.get("event_ids") or []),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -39,6 +40,13 @@ def source_candidate_fingerprint(candidate: dict) -> str:
 
 
 def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | None]:
+    if "_admission_claim" in signal or "_admission_error" in signal:
+        claim = signal.get("_admission_claim")
+        error = signal.get("_admission_error")
+        return (
+            claim if isinstance(claim, dict) else None,
+            error if isinstance(error, str) else None,
+        )
     sensor, sensor_ok = _component(signal.get("sensor"))
     source, source_ok = _component(signal.get("source"))
     if not sensor_ok or not source_ok:
@@ -142,13 +150,11 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
     return None, None
 
 
-def _snapshot(store) -> dict[str, list[dict]]:
-    return {
-        "signals": store.read_jsonl("signals"),
-        "events": store.read_jsonl("events"),
-        "candidates": store.read_jsonl("candidates"),
-        "decisions": store.read_jsonl("decisions"),
-    }
+def _snapshot(store, *, scan_bytes: int = 4 * 1024 * 1024) -> dict[str, list[dict]]:
+    view = store.read_admission_snapshot(scan_bytes=scan_bytes)
+    if not view.complete or view.snapshot is None:
+        raise ValueError(view.reason or "admission_index_catching_up")
+    return view.snapshot
 
 
 def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
@@ -156,8 +162,14 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
     if not candidate_ok:
         return None, "malformed_candidate_id"
     assert candidate_id is not None
-    event_index = {row.get("id"): row for row in snap["events"] if isinstance(row, dict)}
-    signal_index = {row.get("id"): row for row in snap["signals"] if isinstance(row, dict)}
+    cached_events = snap.get("_event_index")
+    event_index = cached_events if isinstance(cached_events, dict) else {
+        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
+    }
+    cached_signals = snap.get("_signal_index")
+    signal_index = cached_signals if isinstance(cached_signals, dict) else {
+        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
+    }
     joined_signal_ids: set[str] = set()
     dangling = False
     for event_id in candidate.get("event_ids") or []:
@@ -241,6 +253,14 @@ def _binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) 
     return binding, None
 
 def binding_for_candidate(store, candidate_id: str) -> tuple[dict | None, str | None]:
+    indexed = store.read_admission_binding(candidate_id)
+    if indexed is not None:
+        if not indexed.complete:
+            return None, indexed.reason or "admission_index_catching_up"
+        return (
+            dict(indexed.value) if isinstance(indexed.value, dict) else None,
+            indexed.reason,
+        )
     snap = _snapshot(store)
     candidate = next((row for row in snap["candidates"] if row.get("id") == candidate_id), None)
     if not isinstance(candidate, dict) or candidate.get("status", "candidate") != "candidate":
@@ -468,6 +488,13 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
 
 def prior_dispositions_for_binding(store, binding: dict) -> tuple[list[dict], bool, str | None]:
     """Read complete equality disposition state for one semantic binding."""
+    indexed = store.read_admission_dispositions(binding)
+    if indexed is not None:
+        if not indexed.complete or not isinstance(indexed.value, dict):
+            return [], False, indexed.reason or "admission_index_catching_up"
+        rows = list(indexed.value.get("rows") or [])
+        reason = indexed.value.get("reason")
+        return rows, bool(reason), reason
     return _prior_for_binding(store, binding, _snapshot(store))
 
 
@@ -482,26 +509,104 @@ def _priority(candidate: dict) -> tuple[float, str, str]:
 def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> bool:
     """Identify the automatic producer without changing legacy binding shape."""
     event_ids = set(candidate.get("event_ids") or [])
+    event_rows = snap.get("_event_index")
+    events = (
+        [event_rows[event_id] for event_id in event_ids if event_id in event_rows]
+        if isinstance(event_rows, dict) else snap["events"]
+    )
     signal_ids = {
         signal_id
-        for event in snap["events"]
+        for event in events
         if isinstance(event, dict) and event.get("id") in event_ids
         for signal_id in (event.get("source_signal_ids") or [])
     }
+    signal_rows = snap.get("_signal_index")
+    signals = (
+        [signal_rows[signal_id] for signal_id in signal_ids if signal_id in signal_rows]
+        if isinstance(signal_rows, dict) else snap["signals"]
+    )
     return any(
         isinstance(signal, dict)
         and signal.get("id") in signal_ids
         and signal.get("sensor") == "sensorium.memory_reflection"
         and signal.get("source") == "memory"
-        for signal in snap["signals"]
+        for signal in signals
     )
 
 
-def build_admission_plan(store, *, candidate_limit: int = 50) -> dict:
-    """Select at most one source after complete source-bound disposition lookup."""
-    del candidate_limit  # Selection is bounded to one only after complete filtering.
-    snap = _snapshot(store)
-    eligible: list[tuple[dict, dict, list[dict]]] = []
+def build_admission_plan(
+    store, *, candidate_limit: int = 50, admission_scan_bytes: int = 4 * 1024 * 1024,
+) -> dict:
+    """Select at most one source from bounded current-attention state."""
+    candidate_limit = max(1, int(candidate_limit))
+    indexed = store.read_admission_plan(candidate_limit=candidate_limit)
+    if indexed is not None:
+        if not indexed.complete or not isinstance(indexed.value, dict):
+            return {
+                "policy_version": POLICY_VERSION,
+                "state": indexed.state,
+                "reason": indexed.reason or "admission_index_catching_up",
+                "selection": None,
+                "eligible_count": None,
+                "suppressed_counts": None,
+                "source_decisions": [],
+                "attribution_gap_count": 0,
+                "progress": indexed.progress,
+                "bytes_consumed": indexed.bytes_consumed,
+                "records_consumed": indexed.records_consumed,
+                "query_rows": indexed.query_rows,
+                "materialized_rows": indexed.materialized_rows,
+                "projected_candidate_count": 0,
+            }
+        indexed_projected: list[dict] = list(indexed.value.get("projected") or [])
+        indexed_selected: dict | None = indexed_projected[0] if indexed_projected else None
+        return {
+            "policy_version": POLICY_VERSION,
+            "state": "ready",
+            "reason": None,
+            "selection": indexed_selected["binding"] if indexed_selected else None,
+            "eligible_count": int(indexed.value.get("eligible_count") or 0),
+            "suppressed_counts": dict(indexed.value.get("suppressed_counts") or {}),
+            "source_decisions": indexed_selected["source_decisions"] if indexed_selected else [],
+            "attribution_gap_count": indexed_selected["attribution_gap_count"] if indexed_selected else 0,
+            "progress": indexed.progress,
+            "bytes_consumed": indexed.bytes_consumed,
+            "records_consumed": indexed.records_consumed,
+            "query_rows": indexed.query_rows,
+            "materialized_rows": indexed.materialized_rows,
+            "projected_candidate_count": len(indexed_projected),
+        }
+
+    # Small stores retain the exact domain-write-free compatibility path. Once
+    # they exceed the aggregate source budget, selection is explicitly incomplete
+    # until the native clock advances the persistent index.
+    view = store.read_admission_snapshot(scan_bytes=admission_scan_bytes)
+    if not view.complete or view.snapshot is None:
+        return {
+            "policy_version": POLICY_VERSION,
+            "state": view.state,
+            "reason": view.reason or "admission_index_catching_up",
+            "selection": None,
+            "eligible_count": None,
+            "suppressed_counts": None,
+            "source_decisions": [],
+            "attribution_gap_count": 0,
+            "progress": view.progress,
+            "bytes_consumed": view.bytes_consumed,
+            "records_consumed": view.records_consumed,
+            "query_rows": view.query_rows,
+            "materialized_rows": view.materialized_rows,
+            "projected_candidate_count": 0,
+        }
+    snap = view.snapshot
+    snap["_event_index"] = {
+        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
+    }
+    snap["_signal_index"] = {
+        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
+    }
+    projected: list[tuple[dict, dict, list[dict]]] = []
+    eligible_count = 0
     suppressed: dict[str, int] = {}
     for candidate in snap["candidates"]:
         if candidate.get("status", "candidate") != "candidate":
@@ -524,19 +629,29 @@ def build_admission_plan(store, *, candidate_limit: int = 50) -> dict:
             key = reason or "prior_disposition"
             suppressed[key] = suppressed.get(key, 0) + 1
             continue
-        eligible.append((candidate, binding, prior))
-    eligible.sort(key=lambda item: _priority(item[0]))
-    selected = eligible[0] if eligible else None
+        eligible_count += 1
+        projected.append((candidate, binding, prior))
+        projected.sort(key=lambda item: _priority(item[0]))
+        del projected[candidate_limit:]
+    selected = projected[0] if projected else None
     return {
         "policy_version": POLICY_VERSION,
+        "state": "ready",
+        "reason": None,
         "selection": selected[1] if selected else None,
-        "eligible_count": len(eligible),
+        "eligible_count": eligible_count,
         "suppressed_counts": dict(sorted(suppressed.items())),
         "source_decisions": selected[2] if selected else [],
         "attribution_gap_count": (
             _memory_prior_rows(store, selected[1], snap)[2]
             if selected and "member_keys" in selected[1] else 0
         ),
+        "progress": view.progress,
+        "bytes_consumed": view.bytes_consumed,
+        "records_consumed": view.records_consumed,
+        "query_rows": view.query_rows,
+        "materialized_rows": view.materialized_rows,
+        "projected_candidate_count": len(projected),
     }
 
 
@@ -545,6 +660,20 @@ def context_for_binding(store, binding: dict, *, source_decisions: list[dict] | 
     valid, reason = validate_admission_binding(store, binding)
     if not valid:
         raise ValueError(reason)
+    indexed = store.read_admission_context(binding["source_candidate_id"])
+    if indexed is not None:
+        if not indexed.complete or not isinstance(indexed.value, dict):
+            raise ValueError(indexed.reason or "admission_index_catching_up")
+        return {
+            "policy_version": POLICY_VERSION,
+            "selection": dict(binding),
+            "candidate": dict(indexed.value["candidate"]),
+            "events": list(indexed.value["events"]),
+            "source_decisions": list(
+                indexed.value["source_decisions"]
+                if source_decisions is None else source_decisions
+            ),
+        }
     snap = _snapshot(store)
     candidate = next(row for row in snap["candidates"] if row.get("id") == binding["source_candidate_id"])
     wanted_events = set(candidate.get("event_ids") or [])
