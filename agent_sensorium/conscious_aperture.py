@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Callable
 
 from .config import load_instance_config, visible_on_surface
 from .prospective_evidence import attention_snapshot_evidence, observe_after_success
@@ -62,6 +63,15 @@ def _parse_iso(ts: str | None) -> datetime | None:
 
 def _format_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def validate_hold_return_at(return_at: object, *, now: str) -> tuple[str, datetime] | None:
+    """Apply the canonical exact UTC-Z and future checkpoint rule."""
+    checkpoint = parse_utc_z_checkpoint(return_at)
+    now_dt = _parse_iso(now)
+    if checkpoint is None or now_dt is None or checkpoint[1] <= now_dt:
+        return None
+    return checkpoint
 
 
 def valid_authority_token(value: object) -> bool:
@@ -395,6 +405,7 @@ def open_conscious_aperture(
     dry_run: bool = True,
     now: str | None = None,
     _locked: bool = False,
+    _aperture_id: str | None = None,
 ) -> dict:
     """Claim a bounded packet without globally blocking on stale ownership.
 
@@ -419,6 +430,7 @@ def open_conscious_aperture(
                 dry_run=False,
                 now=now,
                 _locked=True,
+                _aperture_id=_aperture_id,
             )
         attention_evidence = packet.pop("_observer_attention_snapshot", None)
         _observe_open_after_commit(store, packet, attention_evidence)
@@ -679,7 +691,9 @@ def open_conscious_aperture(
                     "aperture": [],
                 }
 
-        aperture_id = new_id("cap")
+        aperture_id = str(_aperture_id or new_id("cap"))
+        if not valid_authority_token(aperture_id):
+            return {"success": False, "error": "invalid_aperture_id"}
         lease_expires_at = _format_iso(now_dt + timedelta(minutes=lease_duration))
         reclaimed_ids = sorted(
             str(candidate.get("id") or "") for candidate in selected if candidate in stale_active
@@ -847,6 +861,162 @@ def open_conscious_aperture(
                 },
             )
         return packet
+
+
+def claim_conscious_aperture_for_presentation(
+    store: SensoriumStore,
+    *,
+    consumer_id: str,
+    turn_id: str,
+    surface: str,
+    platform: str,
+    render_context: Callable[[dict], str],
+    aperture_size: int = DEFAULT_APERTURE_SIZE,
+    max_active_items: int = DEFAULT_MAX_ACTIVE_ITEMS,
+    lease_minutes: int = DEFAULT_LEASE_MINUTES,
+    stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES,
+    instance_config: dict | None = None,
+    candidate_kind: str | None = None,
+    now: str | None = None,
+) -> dict:
+    """Preflight presentation, then claim/resume and reserve in one owner lock."""
+    now_iso = now or utc_now_iso()
+    owner = str(consumer_id or "").strip()
+    normalized_turn_id = str(turn_id or "")
+    if not valid_authority_token(owner):
+        return {"success": False, "error": "invalid_consumer_id"}
+    attention_evidence = None
+    with store.candidate_transaction():
+        proposed_aperture_id = new_id("cap")
+        preview = open_conscious_aperture(
+            store,
+            aperture_size=aperture_size,
+            max_active_items=max_active_items,
+            lease_minutes=lease_minutes,
+            stale_after_minutes=stale_after_minutes,
+            consumer_id=owner,
+            surface=surface,
+            instance_config=instance_config,
+            candidate_kind=candidate_kind,
+            dry_run=True,
+            now=now_iso,
+            _locked=True,
+            _aperture_id=proposed_aperture_id,
+        )
+        aperture = preview.get("aperture")
+        if not preview.get("success") or not isinstance(aperture, list) or not aperture:
+            return preview
+        candidates = store.read_jsonl("candidates")
+        try:
+            aperture_state = store.read_conscious_aperture_state()
+        except MissingApertureStateError:
+            if _active_aperture_ids(
+                candidates,
+                now=_parse_iso(now_iso) or datetime.now(UTC),
+                stale_after_minutes=stale_after_minutes,
+            ):
+                return {"success": False, "error": "missing_aperture_state"}
+            aperture_state = store.new_conscious_aperture_state()
+        except CorruptApertureStateError:
+            return {"success": False, "error": "corrupt_aperture_state"}
+        aperture_state = _prune_presentation_attempts(
+            aperture_state,
+            active_aperture_ids=_active_aperture_ids(
+                candidates,
+                now=_parse_iso(now_iso) or datetime.now(UTC),
+                stale_after_minutes=stale_after_minutes,
+            ),
+        )
+        identity_items = [
+            {
+                "candidate_id": str(item.get("candidate_id") or ""),
+                "aperture_id": str(item.get("aperture_id") or ""),
+                "source_binding": dict(item.get("source_binding") or {}),
+            }
+            for item in aperture
+        ]
+        aperture_ids = sorted({item["aperture_id"] for item in identity_items})
+        items_digest = _presentation_items_digest(identity_items)
+        same_turn = [
+            attempt
+            for attempt in aperture_state["presentation_attempts"]
+            if attempt["turn_id"] == normalized_turn_id
+            and attempt["consumer_id"] == owner
+        ]
+        existing = next(
+            (
+                attempt
+                for attempt in same_turn
+                if attempt["items_digest"] == items_digest
+                and attempt["aperture_ids"] == aperture_ids
+            ),
+            None,
+        )
+        if same_turn and existing is None:
+            return {"success": False, "error": "presentation_turn_conflict"}
+        if existing is None and len(aperture_state["presentation_attempts"]) >= MAX_PRESENTATION_INDEX_RECORDS:
+            return {"success": False, "error": "presentation_retention_window_exhausted"}
+        if existing is not None:
+            current = {str(row.get("id") or ""): row for row in candidates}
+            replay_packet = dict(preview)
+            replay_packet["aperture"] = [
+                _aperture_item(current[str(item.get("candidate_id") or "")])
+                for item in aperture
+            ]
+            try:
+                context = render_context(replay_packet)
+            except Exception:  # noqa: BLE001 - presentation must remain failure-isolated.
+                return {"success": False, "error": "presentation_render_failed"}
+            return {
+                **replay_packet,
+                "presentation": {
+                    "success": True,
+                    "action": "presentation_already_attempted",
+                    "receipt": _presentation_receipt(existing, identity_items),
+                },
+                "context": context,
+            }
+        try:
+            context = render_context(preview)
+        except Exception:  # noqa: BLE001 - presentation must remain failure-isolated.
+            return {"success": False, "error": "presentation_render_failed"}
+        committed = open_conscious_aperture(
+            store,
+            aperture_size=aperture_size,
+            max_active_items=max_active_items,
+            lease_minutes=lease_minutes,
+            stale_after_minutes=stale_after_minutes,
+            consumer_id=owner,
+            surface=surface,
+            instance_config=instance_config,
+            candidate_kind=candidate_kind,
+            dry_run=False,
+            now=now_iso,
+            _locked=True,
+            _aperture_id=proposed_aperture_id,
+        )
+        if (
+            not committed.get("success")
+            or committed.get("candidate_ids") != preview.get("candidate_ids")
+            or [item.get("aperture_id") for item in committed.get("aperture") or []]
+            != [item.get("aperture_id") for item in aperture]
+        ):
+            return {"success": False, "error": "presentation_claim_changed"}
+        attention_evidence = committed.pop("_observer_attention_snapshot", None)
+        presentation = record_conscious_aperture_presentation_attempt(
+            store,
+            aperture=committed["aperture"],
+            consumer_id=owner,
+            turn_id=normalized_turn_id,
+            surface=surface,
+            platform=platform,
+            now=now_iso,
+        )
+        if not presentation.get("success"):
+            return presentation
+        result = {**committed, "presentation": presentation, "context": context}
+    _observe_open_after_commit(store, result, attention_evidence)
+    return result
 
 
 def _observe_open_after_commit(
@@ -1245,9 +1415,13 @@ def settle_conscious_aperture_item(
         return {"success": False, "error": "return_at_required_for_hold"}
     now_iso = now or utc_now_iso()
     now_dt = _parse_iso(now_iso) or datetime.now(UTC)
-    checkpoint = parse_utc_z_checkpoint(return_at) if return_at is not None else None
+    checkpoint = (
+        validate_hold_return_at(return_at, now=now_iso)
+        if normalized_decision == "HELD" and return_at is not None
+        else None
+    )
     if return_at is not None and (
-        normalized_decision != "HELD" or checkpoint is None or checkpoint[1] <= now_dt
+        normalized_decision != "HELD" or checkpoint is None
     ):
         return {"success": False, "error": "invalid_return_at"}
     normalized_external_work: dict | None = None

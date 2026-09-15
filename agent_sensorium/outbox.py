@@ -14,6 +14,7 @@ Safety defaults:
 
 import hashlib
 import json
+import sqlite3
 from copy import deepcopy
 
 from .schemas import new_id, truncate_text, utc_now_iso
@@ -29,6 +30,8 @@ VALID_DELIVERY_MODES = {
 }
 DIRECT_DELIVERY_MODES = {"discord_channel_thread", "discord_dm_bound_session"}
 OPENABLE_THREAD_STATUSES = {"dormant", "held"}
+OUTBOX_INDEX_CATCHUP_BYTES = 1024 * 1024
+_OUTBOX_INDEX_VERSION = 1
 
 OUTBOX_DEFAULTS: dict = {
     "enabled": True,
@@ -104,6 +107,96 @@ def _find_existing_outbox_request(
     return None
 
 
+def _indexed_outbox_request(
+    store: SensoriumStore,
+    idempotency_key: str,
+    *,
+    scan_bytes: int = OUTBOX_INDEX_CATCHUP_BYTES,
+) -> tuple[dict | None, str | None]:
+    """Return one exact row through a bounded disposable JSONL index.
+
+    Canonical JSONL remains authoritative. Missing or stale indexes catch up
+    under the profile outbox lock within one fixed byte budget and fail closed
+    until ready. Malformed source and duplicate keys never authorize an append.
+    """
+    canonical = store.paths["outbox"]
+    index_path = store.root / "inner_life" / "outbox_index.sqlite3"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(index_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS metadata "
+                "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
+                "device INTEGER NOT NULL, inode INTEGER NOT NULL, offset INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS entries "
+                "(idempotency_key TEXT PRIMARY KEY, row_json TEXT NOT NULL)"
+            )
+            stat = canonical.stat() if canonical.exists() else None
+            identity = (int(stat.st_dev), int(stat.st_ino)) if stat is not None else (0, 0)
+            size = int(stat.st_size) if stat is not None else 0
+            meta = conn.execute(
+                "SELECT version, device, inode, offset FROM metadata WHERE singleton=1"
+            ).fetchone()
+            if (
+                meta is None
+                or tuple(meta[:3]) != (_OUTBOX_INDEX_VERSION, *identity)
+                or int(meta[3]) > size
+            ):
+                conn.execute("DELETE FROM entries")
+                offset = 0
+            else:
+                offset = int(meta[3])
+
+            consumed = 0
+            if offset < size:
+                with open(canonical, "rb") as source:
+                    source.seek(offset)
+                    while source.tell() < size and (consumed < scan_bytes or consumed == 0):
+                        line = source.readline()
+                        if not line:
+                            break
+                        consumed += len(line)
+                        try:
+                            row = json.loads(line)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            conn.rollback()
+                            return None, "outbox_index_source_corrupt"
+                        if not isinstance(row, dict):
+                            conn.rollback()
+                            return None, "outbox_index_source_corrupt"
+                        key = row.get("idempotency_key")
+                        if isinstance(key, str) and key:
+                            encoded = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                            previous = conn.execute(
+                                "SELECT row_json FROM entries WHERE idempotency_key=?", (key,)
+                            ).fetchone()
+                            if previous is not None and previous[0] != encoded:
+                                conn.rollback()
+                                return None, "outbox_duplicate_idempotency_key"
+                            conn.execute(
+                                "INSERT OR REPLACE INTO entries(idempotency_key,row_json) VALUES(?,?)",
+                                (key, encoded),
+                            )
+                    offset = source.tell()
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(singleton,version,device,inode,offset) "
+                "VALUES(1,?,?,?,?)",
+                (_OUTBOX_INDEX_VERSION, identity[0], identity[1], offset),
+            )
+            conn.commit()
+            current_size = canonical.stat().st_size if canonical.exists() else 0
+            if offset < current_size:
+                return None, "outbox_index_catching_up"
+            found = conn.execute(
+                "SELECT row_json FROM entries WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
+            return (json.loads(found[0]) if found is not None else None), None
+    except (OSError, sqlite3.DatabaseError):
+        return None, "outbox_index_unavailable"
+
+
 def _rewrite_jsonl(store: SensoriumStore, name: str, items: list[dict]) -> None:
     store.rewrite_jsonl(name, items)
 
@@ -133,6 +226,7 @@ def prepare_local_outbox_request(
     source_candidate_ids: list[str] | None = None,
     source_candidate_fingerprint: str = "",
     dry_run: bool = False,
+    _locked: bool = False,
 ) -> dict:
     """Prepare a local outbox record without creating a thread.
 
@@ -141,6 +235,25 @@ def prepare_local_outbox_request(
     originating candidate as provenance. It never creates threads, workers, or
     delivery requests.
     """
+    if not dry_run and not _locked:
+        with store.outbox_transaction():
+            return prepare_local_outbox_request(
+                store,
+                origin_candidate_id=origin_candidate_id,
+                request_type=request_type,
+                surface=surface,
+                delivery_mode=delivery_mode,
+                target=target,
+                title=title,
+                message_preview=message_preview,
+                content_hash=content_hash,
+                sensitivity=sensitivity,
+                allowed_surfaces=allowed_surfaces,
+                source_candidate_ids=source_candidate_ids,
+                source_candidate_fingerprint=source_candidate_fingerprint,
+                dry_run=False,
+                _locked=True,
+            )
     candidate_id = str(origin_candidate_id or "").strip()
     if not candidate_id:
         return _denied("origin_candidate_required", "A source candidate is required.")
@@ -178,8 +291,13 @@ def prepare_local_outbox_request(
         target={},
         content_hash=f"{revision_key}:{request_type}:{effective_content_hash}",
     )
-    existing_requests = store.read_jsonl("outbox")
-    existing = _find_existing_outbox_request(existing_requests, idempotency_key)
+    if dry_run:
+        existing = _find_existing_outbox_request(store.read_jsonl("outbox"), idempotency_key)
+        index_error = None
+    else:
+        existing, index_error = _indexed_outbox_request(store, idempotency_key)
+    if index_error:
+        return _denied(index_error, "The bounded outbox index is not ready for a safe append.")
     if existing is not None:
         if (
             existing.get("origin_candidate_id") != candidate_id
@@ -259,7 +377,26 @@ def prepare_outbox_request(
     origin_candidate_id: str = "",
     config: dict | None = None,
     dry_run: bool = False,
+    _locked: bool = False,
 ) -> dict:
+    if not dry_run and not _locked:
+        with store.outbox_transaction():
+            return prepare_outbox_request(
+                store,
+                thread_id=thread_id,
+                request_type=request_type,
+                surface=surface,
+                delivery_mode=delivery_mode,
+                target=target,
+                title=title,
+                message_preview=message_preview,
+                media_refs=media_refs,
+                content_hash=content_hash,
+                origin_candidate_id=origin_candidate_id,
+                config=config,
+                dry_run=False,
+                _locked=True,
+            )
     cfg = _merged_outbox_config(config)
     now = utc_now_iso()
 
@@ -361,8 +498,17 @@ def prepare_outbox_request(
         content_hash=effective_content_hash,
     )
 
-    existing_requests = store.read_jsonl("outbox")
-    existing = _find_existing_outbox_request(existing_requests, idempotency_key)
+    if dry_run:
+        existing = _find_existing_outbox_request(store.read_jsonl("outbox"), idempotency_key)
+        index_error = None
+    else:
+        existing, index_error = _indexed_outbox_request(store, idempotency_key)
+    if index_error:
+        return _denied(
+            index_error,
+            "The bounded outbox index is not ready for a safe append.",
+            thread_id=thread_id,
+        )
     if existing is not None:
         return {
             "success": True,
@@ -507,6 +653,7 @@ def dispatch_outbox_request(
     adapter: DiscordAdapter | None = None,
     config: dict | None = None,
     execute: bool = False,
+    _locked: bool = False,
 ) -> dict:
     """Dispatch a prepared outbox request via the appropriate adapter."""
     cfg = _merged_outbox_config(config)
@@ -518,6 +665,16 @@ def dispatch_outbox_request(
             "error": "execute_not_set",
             "detail": "Dispatch requires execute=True.",
         }
+    if not _locked:
+        with store.outbox_transaction():
+            return dispatch_outbox_request(
+                store,
+                outbox_id=outbox_id,
+                adapter=adapter,
+                config=config,
+                execute=True,
+                _locked=True,
+            )
 
     requests = store.read_jsonl("outbox")
     target_req = None

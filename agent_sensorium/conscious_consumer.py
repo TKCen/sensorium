@@ -19,6 +19,7 @@ from .conscious_aperture import (
     resolve_conscious_aperture,
     settle_conscious_aperture_item,
     valid_authority_token,
+    validate_hold_return_at,
 )
 from .conscious_reachout import (
     apply_conscious_reachout_decision,
@@ -49,6 +50,12 @@ _GENERIC_MESSAGE_TERMS = frozenset({
     "reminder",
 })
 _GENERIC_MESSAGE_RE = re.compile(r"\b(?:" + "|".join(_GENERIC_MESSAGE_TERMS) + r")\b", re.IGNORECASE)
+
+
+class ConsciousConsumerResult(dict[str, Any]):
+    """JSON-safe result carrying the current prepared row only in memory."""
+
+    prepared_outbox_row: dict[str, Any] | None = None
 
 
 def _message_hash(message: str) -> str:
@@ -217,7 +224,33 @@ def consume_conscious_advisory(
     expected_source_candidate_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Apply one bounded caller-supplied choice to one advisory candidate."""
-    parsed = parse_conscious_decision(decision)
+    effective_now, _ = _parse_now(now)
+    try:
+        parsed = parse_conscious_decision(decision)
+    except ValueError as exc:
+        if (
+            isinstance(decision, dict)
+            and str(decision.get("decision") or "").strip().upper() == "HOLD"
+            and "return_at" in str(exc)
+        ):
+            return {
+                "success": False,
+                "action": "invalid_return_at",
+                "error": "invalid_return_at",
+                "dry_run": dry_run,
+            }
+        raise
+    if parsed["decision"] == "HOLD":
+        checkpoint = validate_hold_return_at(parsed.get("return_at"), now=effective_now)
+        if checkpoint is None:
+            return {
+                "success": False,
+                "action": "invalid_return_at",
+                "error": "invalid_return_at",
+                "dry_run": dry_run,
+            }
+        parsed["return_at"] = checkpoint[0]
+    now = effective_now
     if config is None:
         config, _ = load_instance_config(state_dir=str(store.root))
 
@@ -424,10 +457,10 @@ def consume_conscious_advisory(
     receipt_value = prepared.get("receipt")
     if isinstance(receipt_value, dict):
         receipt = receipt_value
-    outbox_id = str(receipt.get("outbox_id") or "")
-    prepared_data = prepared.get("outbox") if isinstance(prepared.get("outbox"), dict) else None
-    if not outbox_id and prepared_data:
-        outbox_id = str(prepared_data.get("id") or "")
+    outbox_id = str(receipt.get("outbox_id") or prepared.get("outbox_id") or "")
+    outbox_row = getattr(prepared, "prepared_outbox_row", None)
+    if not outbox_id and isinstance(outbox_row, dict):
+        outbox_id = str(outbox_row.get("id") or "")
     if not outbox_id:
         held = _settle(
             store,
@@ -447,10 +480,6 @@ def consume_conscious_advisory(
         }
 
     message_hash = _message_hash(parsed["message"])
-    outbox_row = next(
-        (row for row in store.read_jsonl("outbox") if row.get("id") == outbox_id),
-        None,
-    )
     prepared_source_fingerprint = str((outbox_row or {}).get("source_candidate_fingerprint") or "")
     expected_source_ids = list(packet.get("source_candidate_ids") or [])
     expected_source_revision = source_revision_key(
@@ -508,16 +537,20 @@ def consume_conscious_advisory(
             "message_hash": message_hash,
             "error": "aperture_settlement_failed",
         }
-    return {
-        **base,
-        "success": True,
-        "action": "prepared_reach_out",
-        "outbox_id": outbox_id,
-        "message_hash": str(outbox_row.get("content_hash") or message_hash),
-        "message_chars": len(str(outbox_row.get("message_preview") or parsed["message"])),
-        "prepared": {"id": outbox_id, "status": "prepared", "openable": True},
-        "settlement": {
-            "action": settled.get("action"),
-            "new_status": settled.get("new_status"),
-        },
-    }
+    result = ConsciousConsumerResult(
+        {
+            **base,
+            "success": True,
+            "action": "prepared_reach_out",
+            "outbox_id": outbox_id,
+            "message_hash": str(outbox_row.get("content_hash") or message_hash),
+            "message_chars": len(str(outbox_row.get("message_preview") or parsed["message"])),
+            "prepared": {"id": outbox_id, "status": "prepared", "openable": True},
+            "settlement": {
+                "action": settled.get("action"),
+                "new_status": settled.get("new_status"),
+            },
+        }
+    )
+    result.prepared_outbox_row = outbox_row
+    return result

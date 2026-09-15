@@ -76,6 +76,12 @@ _BLOCKED_REASONS = frozenset({
 })
 
 
+class ConsciousReachoutResult(dict[str, Any]):
+    """JSON-safe public result with one process-local prepared-row handoff."""
+
+    prepared_outbox_row: dict[str, Any] | None = None
+
+
 def _merged_reachout_config(config: dict | None = None) -> dict[str, Any]:
     cfg = deepcopy(CONSCIOUS_REACHOUT_DEFAULTS)
     if not isinstance(config, dict):
@@ -487,7 +493,13 @@ def apply_conscious_reachout_decision(
         receipt["delivery_authorized"] = decision in _DIRECT_DECISIONS
         receipt["requires_separate_dispatch"] = decision in _DIRECT_DECISIONS
         store.append_jsonl("decisions", receipt)
-        return {"success": True, "receipt": receipt, "outbox": prepared_outbox}
+        result = ConsciousReachoutResult(
+            success=True,
+            receipt=receipt,
+            outbox_id=str((prepared_outbox or {}).get("id") or ""),
+        )
+        result.prepared_outbox_row = prepared_outbox
+        return result
 
     assert adapter is not None
     try:

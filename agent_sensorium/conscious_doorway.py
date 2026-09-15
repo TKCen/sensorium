@@ -11,8 +11,7 @@ from .conscious_aperture import (
     DEFAULT_LEASE_MINUTES,
     DEFAULT_MAX_ACTIVE_ITEMS,
     DEFAULT_STALE_AFTER_MINUTES,
-    open_conscious_aperture,
-    record_conscious_aperture_presentation_attempt,
+    claim_conscious_aperture_for_presentation,
     valid_authority_token,
 )
 from .schemas import new_id, truncate_text
@@ -215,34 +214,25 @@ def handle_conscious_doorway_pre_llm(
             return None
         store.ensure_dirs()
         owner = foreground_consumer_id(session_id=session_id, turn_id=turn_id)
-        packet = open_conscious_aperture(
+        receipt_turn_id = str(turn_id or new_id("turn"))
+        packet = claim_conscious_aperture_for_presentation(
             store,
             aperture_size=doorway_config["aperture_size"],
             max_active_items=doorway_config["max_active_items"],
             lease_minutes=doorway_config["lease_minutes"],
             stale_after_minutes=doorway_config["stale_after_minutes"],
             consumer_id=owner,
-            surface=surface,
-            instance_config=instance_config,
-            dry_run=False,
-        )
-        if not packet.get("aperture"):
-            return None
-        receipt_turn_id = str(turn_id or new_id("turn"))
-        context = conscious_doorway_context(
-            packet, agent_label=doorway_config["agent_label"]
-        )
-        attempted = record_conscious_aperture_presentation_attempt(
-            store,
-            aperture=packet["aperture"],
-            consumer_id=owner,
             turn_id=receipt_turn_id,
             surface=surface,
             platform=platform_label,
+            instance_config=instance_config,
+            render_context=lambda value: conscious_doorway_context(
+                value, agent_label=doorway_config["agent_label"]
+            ),
         )
-        if not attempted.get("success"):
+        if not packet.get("success") or not packet.get("context"):
             return None
-        return {"context": context}
+        return {"context": packet["context"]}
     except Exception:  # noqa: BLE001 - pre-LLM hooks must be failure-isolated.
         # Hook failure must not break the foreground user turn. Any acquired item
         # remains unresolved and becomes claimable again after its bounded lease.

@@ -614,8 +614,23 @@ def test_lock_skips_without_subprocess(tmp_path):
 
 def test_emit_mode_is_empty_for_non_reachout_and_body_only_for_prepared_message(tmp_path):
     module = _load_runner()
-    assert module.scheduler_output({"action": "settled_silence"}, []) == ""
-    assert module.scheduler_output({"action": "settled_hold"}, []) == ""
-    assert module.scheduler_output({"action": "prepared_reach_out", "outbox_id": "obx_1"}, [
-        {"id": "obx_1", "status": "prepared", "message_preview": "I thought of you."},
-    ]) == "I thought of you."
+    assert module.scheduler_output({"action": "settled_silence"}) == ""
+    assert module.scheduler_output({"action": "settled_hold"}) == ""
+    result = module.NativeConsciousResult({
+        "action": "prepared_reach_out",
+        "candidate_id": "candidate_1",
+        "source_candidate_fingerprint": "revision_1",
+        "outbox_id": "obx_1",
+        "body_hash": "body_hash",
+        "body_chars": len("I thought of you."),
+    })
+    result.prepared_outbox_row = {
+        "id": "obx_1",
+        "status": "prepared",
+        "origin_candidate_id": "candidate_1",
+        "source_candidate_fingerprint": "revision_1",
+        "content_hash": "body_hash",
+        "content_length": len("I thought of you."),
+        "message_preview": "I thought of you.",
+    }
+    assert module.scheduler_output(result) == "I thought of you."

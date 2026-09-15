@@ -31,6 +31,9 @@ _DEFAULT_BASE = os.path.expanduser("~/.hermes/agent-sensorium")
 _CANDIDATE_LOCKS_GUARD = threading.Lock()
 _CANDIDATE_LOCKS: dict[str, threading.RLock] = {}
 _HELD_CANDIDATE_LOCKS = threading.local()
+_OUTBOX_LOCKS_GUARD = threading.Lock()
+_OUTBOX_LOCKS: dict[str, threading.RLock] = {}
+_HELD_OUTBOX_LOCKS = threading.local()
 _CONSCIOUS_APERTURE_STATE_VERSION = 1
 APERTURE_PRESENTATION_INDEX_LIMIT = 128
 
@@ -46,6 +49,11 @@ class MissingApertureStateError(FileNotFoundError):
 def _candidate_process_lock(key: str) -> threading.RLock:
     with _CANDIDATE_LOCKS_GUARD:
         return _CANDIDATE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _outbox_process_lock(key: str) -> threading.RLock:
+    with _OUTBOX_LOCKS_GUARD:
+        return _OUTBOX_LOCKS.setdefault(key, threading.RLock())
 
 
 def _fsync_parent(path: Path) -> None:
@@ -370,9 +378,57 @@ class SensoriumStore:
             finally:
                 lock_file.close()
 
+    @contextlib.contextmanager
+    def outbox_transaction(self) -> Iterator[None]:
+        """Serialize one profile's complete outbox lookup/validate/mutate cycle.
+
+        The outbox lock is independent from candidate ownership. Callers must
+        finish candidate work before entering it; no code may nest transactions
+        across profile roots. Same-root nesting is reentrant so all legacy
+        ``append_jsonl``/``rewrite_jsonl`` outbox writers share this owner.
+        """
+        self.ensure_dirs()
+        path = self._root / "locks" / "outbox.lock"
+        key = str(path.resolve(strict=False))
+        held_candidates = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
+        if held_candidates:
+            raise RuntimeError("outbox transactions cannot nest inside candidate transactions")
+        held = getattr(_HELD_OUTBOX_LOCKS, "locks", None)
+        if held and key not in held:
+            raise RuntimeError("outbox transactions cannot nest across profile roots")
+        process_lock = _outbox_process_lock(key)
+        with process_lock:
+            if held is None:
+                held = {}
+                _HELD_OUTBOX_LOCKS.locks = held
+            if key in held:
+                held[key]["depth"] += 1
+                try:
+                    yield
+                finally:
+                    held[key]["depth"] -= 1
+                return
+            lock_file = open(path, "a+", encoding="utf-8")
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                held[key] = {"depth": 1, "file": lock_file}
+                try:
+                    yield
+                finally:
+                    held.pop(key, None)
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+
     def append_jsonl(self, name: str, obj: dict) -> None:
         if name == "candidates":
             with self.candidate_transaction():
+                self._append_jsonl_unlocked(name, obj)
+            return
+        if name == "outbox":
+            with self.outbox_transaction():
                 self._append_jsonl_unlocked(name, obj)
             return
         self._append_jsonl_unlocked(name, obj)
@@ -389,6 +445,10 @@ class SensoriumStore:
     def rewrite_jsonl(self, name: str, rows: list[dict]) -> None:
         if name == "candidates":
             with self.candidate_transaction():
+                atomic_rewrite_jsonl(self._resolve(name), rows)
+            return
+        if name == "outbox":
+            with self.outbox_transaction():
                 atomic_rewrite_jsonl(self._resolve(name), rows)
             return
         atomic_rewrite_jsonl(self._resolve(name), rows)

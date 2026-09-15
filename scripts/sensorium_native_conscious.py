@@ -34,7 +34,7 @@ from agent_sensorium.attempts import (  # noqa: E402
 )
 from agent_sensorium.conscious_aperture import (  # noqa: E402
     open_conscious_aperture,
-    settle_conscious_aperture_item,
+    settle_conscious_aperture_item,  # noqa: F401 - retained fault-injection seam
 )
 from agent_sensorium.conscious_consumer import (  # noqa: E402
     CONSCIOUS_ADVISORY_KIND,
@@ -50,6 +50,12 @@ DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_MODEL = "gpt-5.6-sol"
 POLICY_VERSION = "2026-08-31.native-conscious-v2"
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+class NativeConsciousResult(dict[str, Any]):
+    """JSON-safe clock result with one process-local prepared-row handoff."""
+
+    prepared_outbox_row: dict[str, Any] | None = None
 
 
 def _json_write(path: Path, value: dict) -> None:
@@ -386,13 +392,21 @@ def _canonical_disposition_ref(store: SensoriumStore, revision: str) -> str | No
     return None
 
 
-def scheduler_output(result: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> str:
-    """Return only an explicitly opted-in prepared body; all other choices are silent."""
+def scheduler_output(result: dict[str, Any]) -> str:
+    """Return only the current process-local exact prepared body."""
     if result.get("action") != "prepared_reach_out":
         return ""
-    outbox_id = result.get("outbox_id")
-    row = next((row for row in outbox_rows if row.get("id") == outbox_id), None)
-    if not isinstance(row, dict) or row.get("status") != "prepared":
+    row = getattr(result, "prepared_outbox_row", None)
+    if (
+        not isinstance(row, dict)
+        or row.get("id") != result.get("outbox_id")
+        or row.get("status") != "prepared"
+        or row.get("origin_candidate_id") != result.get("candidate_id")
+        or row.get("source_candidate_fingerprint")
+        != result.get("source_candidate_fingerprint")
+        or str(row.get("content_hash") or "") != str(result.get("body_hash") or "")
+        or row.get("content_length") != result.get("body_chars")
+    ):
         return ""
     return str(row.get("message_preview") or "")
 
@@ -402,12 +416,14 @@ def run_once(
     *,
     run_command: CommandRunner = subprocess.run,
     now: str | None = None,
+    clock: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
     store.ensure_dirs()
     receipt_path = store.root / "last_conscious_clock.json"
     state_path = store.root / "conscious_clock_state.json"
-    timestamp = _now_value(now)
+    live_clock = clock or utc_now_iso
+    timestamp = _now_value(now) if now is not None else live_clock()
     opened_by_this_run = False
     lock_file = acquire_lock(store.root / "locks" / "conscious_clock.lock")
     if lock_file is None:
@@ -463,10 +479,11 @@ def run_once(
             _json_write(receipt_path, result)
             return result
 
-        # A dry inspection is not the application. If there is no active item,
-        # open exactly the inspected candidate and then rebuild the packet from
-        # the committed aperture so the model sees the actual current id.
-        if inspection.get("action") == "would_open_aperture":
+        # A dry inspection is not the application. Commit either the selected
+        # claim or the previewed same-owner renewal before model invocation, then
+        # rebuild the packet from canonical ownership.
+        if inspection.get("action") in {"would_open_aperture", "resumed_aperture"}:
+            inspection_action = inspection.get("action")
             opened = open_conscious_aperture(
                 store,
                 aperture_size=1,
@@ -481,7 +498,7 @@ def run_once(
                 result = {**_base_result(args, now=timestamp), **opened}
                 _json_write(receipt_path, result)
                 return result
-            opened_by_this_run = True
+            opened_by_this_run = inspection_action == "would_open_aperture"
             inspection = opened
         packet = build_conscious_source_packet(inspection)
         if not packet.get("source_candidate_fingerprint"):
@@ -529,14 +546,17 @@ def run_once(
                     internal_deadline - time.monotonic() - cleanup_reserve_seconds))),
                 run_command=run_command,
             )
-            choice = parse_model_decision(raw, packet, now=timestamp)
+            application_timestamp = (
+                live_clock() if clock is not None or now is None else timestamp
+            )
+            choice = parse_model_decision(raw, packet, now=application_timestamp)
             advance_attempt(prior, "applying")
             _json_write(state_path, prior)
             applied = consume_conscious_advisory(
                 store,
                 decision=choice,
                 dry_run=False,
-                now=timestamp,
+                now=application_timestamp,
                 stale_after_minutes=args.stale_after_minutes,
                 expected_candidate_id=packet["candidate_id"],
                 expected_aperture_id=packet.get("aperture_id"),
@@ -545,19 +565,21 @@ def run_once(
             )
             if not applied.get("success"):
                 raise RuntimeError(applied.get("error") or "deterministic Conscious application failed")
-            result = {
+            result = NativeConsciousResult({
                 **_base_result(args, now=timestamp, packet=packet),
                 "action": applied.get("action"),
                 "decision": choice["decision"],
                 "session": session,
+                "applied_at": application_timestamp,
                 "body_hash": applied.get("message_hash", ""),
                 "body_chars": applied.get("message_chars", 0),
                 "outbox_id": applied.get("outbox_id", ""),
-            }
+            })
+            result.prepared_outbox_row = getattr(applied, "prepared_outbox_row", None)
             next_state = {
                 **prior,
                 "last_processed_revision": revision,
-                "last_processed_at": timestamp,
+                "last_processed_at": application_timestamp,
                 "last_failed_revision": None,
                 "last_failed_epoch": None,
                 "last_failure_reason": "",
@@ -620,8 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         result = {"success": False, "action": "conscious_clock_failed", "reason": str(exc)[:800]}
     if args.emit_reachout:
-        store = SensoriumStore(instance=args.instance, state_dir=args.state_dir)
-        print(scheduler_output(result, store.read_jsonl("outbox")), end="")
+        print(scheduler_output(result), end="")
     elif args.print_json:
         print(json.dumps(result, indent=2, sort_keys=True))
     elif not result.get("success"):
