@@ -611,6 +611,7 @@ def run_once(
         _json_write(receipt_path, result)
         return result
     finally:
+        store.prepare_desktop_projection_index()
         release_lock(lock_file)
 
 

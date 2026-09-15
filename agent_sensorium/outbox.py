@@ -14,6 +14,7 @@ Safety defaults:
 
 import hashlib
 import json
+import os
 import sqlite3
 from copy import deepcopy
 
@@ -31,7 +32,9 @@ VALID_DELIVERY_MODES = {
 DIRECT_DELIVERY_MODES = {"discord_channel_thread", "discord_dm_bound_session"}
 OPENABLE_THREAD_STATUSES = {"dormant", "held"}
 OUTBOX_INDEX_CATCHUP_BYTES = 1024 * 1024
-_OUTBOX_INDEX_VERSION = 1
+OUTBOX_INDEX_CATCHUP_RECORDS = 2000
+OUTBOX_INDEX_MAX_RECORD_BYTES = 1024 * 1024
+_OUTBOX_INDEX_VERSION = 2
 
 OUTBOX_DEFAULTS: dict = {
     "enabled": True,
@@ -112,6 +115,7 @@ def _indexed_outbox_request(
     idempotency_key: str,
     *,
     scan_bytes: int = OUTBOX_INDEX_CATCHUP_BYTES,
+    metrics: dict[str, int] | None = None,
 ) -> tuple[dict | None, str | None]:
     """Return one exact row through a bounded disposable JSONL index.
 
@@ -122,76 +126,174 @@ def _indexed_outbox_request(
     canonical = store.paths["outbox"]
     index_path = store.root / "inner_life" / "outbox_index.sqlite3"
     index_path.parent.mkdir(parents=True, exist_ok=True)
+    source_bytes = records_consumed = sqlite_vm_steps = 0
     try:
         with sqlite3.connect(index_path) as conn:
+            def count_vm_step() -> int:
+                nonlocal sqlite_vm_steps
+                sqlite_vm_steps += 1
+                return 0
+
+            conn.set_progress_handler(count_vm_step, 1)
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS metadata "
                 "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, "
                 "device INTEGER NOT NULL, inode INTEGER NOT NULL, offset INTEGER NOT NULL)"
             )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS entries "
-                "(idempotency_key TEXT PRIMARY KEY, row_json TEXT NOT NULL)"
-            )
-            stat = canonical.stat() if canonical.exists() else None
-            identity = (int(stat.st_dev), int(stat.st_ino)) if stat is not None else (0, 0)
-            size = int(stat.st_size) if stat is not None else 0
-            meta = conn.execute(
-                "SELECT version, device, inode, offset FROM metadata WHERE singleton=1"
-            ).fetchone()
-            if (
-                meta is None
-                or tuple(meta[:3]) != (_OUTBOX_INDEX_VERSION, *identity)
-                or int(meta[3]) > size
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(metadata)")}
+            for name, declaration in (
+                ("eof_size", "INTEGER NOT NULL DEFAULT 0"),
+                ("mtime_ns", "INTEGER NOT NULL DEFAULT 0"),
+                ("generation", "INTEGER NOT NULL DEFAULT 0"),
+                ("partial", "BLOB NOT NULL DEFAULT X''"),
+                ("error", "TEXT"),
             ):
-                conn.execute("DELETE FROM entries")
-                offset = 0
-            else:
-                offset = int(meta[3])
-
-            consumed = 0
-            if offset < size:
-                with open(canonical, "rb") as source:
-                    source.seek(offset)
-                    while source.tell() < size and (consumed < scan_bytes or consumed == 0):
-                        line = source.readline()
-                        if not line:
-                            break
-                        consumed += len(line)
-                        try:
-                            row = json.loads(line)
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            conn.rollback()
-                            return None, "outbox_index_source_corrupt"
-                        if not isinstance(row, dict):
-                            conn.rollback()
-                            return None, "outbox_index_source_corrupt"
-                        key = row.get("idempotency_key")
-                        if isinstance(key, str) and key:
-                            encoded = json.dumps(row, sort_keys=True, separators=(",", ":"))
-                            previous = conn.execute(
-                                "SELECT row_json FROM entries WHERE idempotency_key=?", (key,)
-                            ).fetchone()
-                            if previous is not None and previous[0] != encoded:
-                                conn.rollback()
-                                return None, "outbox_duplicate_idempotency_key"
-                            conn.execute(
-                                "INSERT OR REPLACE INTO entries(idempotency_key,row_json) VALUES(?,?)",
-                                (key, encoded),
-                            )
-                    offset = source.tell()
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE metadata ADD COLUMN {name} {declaration}")
             conn.execute(
-                "INSERT OR REPLACE INTO metadata(singleton,version,device,inode,offset) "
-                "VALUES(1,?,?,?,?)",
-                (_OUTBOX_INDEX_VERSION, identity[0], identity[1], offset),
+                "CREATE TABLE IF NOT EXISTS entries_v2 "
+                "(generation INTEGER NOT NULL, idempotency_key TEXT NOT NULL, "
+                "row_json TEXT NOT NULL, PRIMARY KEY(generation,idempotency_key))"
             )
-            conn.commit()
-            current_size = canonical.stat().st_size if canonical.exists() else 0
-            if offset < current_size:
+            source_stat = canonical.stat() if canonical.exists() else None
+            identity = (
+                (int(source_stat.st_dev), int(source_stat.st_ino))
+                if source_stat is not None else (0, 0)
+            )
+            size = int(source_stat.st_size) if source_stat is not None else 0
+            mtime_ns = int(source_stat.st_mtime_ns) if source_stat is not None else 0
+            meta = conn.execute(
+                "SELECT version,device,inode,offset,eof_size,mtime_ns,generation,partial,error "
+                "FROM metadata WHERE singleton=1"
+            ).fetchone()
+            reset = meta is None
+            if meta is not None:
+                created_from_empty = (
+                    (int(meta[1]), int(meta[2])) == (0, 0)
+                    and int(meta[3]) == 0 and source_stat is not None
+                )
+                reset = (
+                    int(meta[0]) != _OUTBOX_INDEX_VERSION
+                    or (not created_from_empty and (int(meta[1]), int(meta[2])) != identity)
+                    or int(meta[3]) > size
+                    or (
+                        int(meta[4]) == size and int(meta[5]) != mtime_ns
+                    )
+                )
+            generation = (int(meta[6]) if meta is not None else 0) + int(reset)
+            if generation <= 0:
+                generation = 1
+            if not reset:
+                assert meta is not None
+            offset = 0 if reset else int(meta[3])
+            partial = b"" if reset else bytes(meta[7])
+            prior_error = None if reset else meta[8]
+
+            def save(error: str | None) -> None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO metadata"
+                    "(singleton,version,device,inode,offset,eof_size,mtime_ns,generation,partial,error) "
+                    "VALUES(1,?,?,?,?,?,?,?,?,?)",
+                    (_OUTBOX_INDEX_VERSION, identity[0], identity[1], offset, size,
+                     mtime_ns, generation, partial, error),
+                )
+                conn.commit()
+                if metrics is not None:
+                    metrics.update(
+                        source_bytes=source_bytes,
+                        records_consumed=records_consumed,
+                        sqlite_vm_steps=sqlite_vm_steps,
+                        generation=generation,
+                    )
+
+            if prior_error:
+                return None, str(prior_error)
+            opening = identity + (size, mtime_ns)
+            if offset < size:
+                fd = os.open(canonical, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    chunk = os.pread(fd, min(size - offset, max(1, int(scan_bytes))), offset)
+                finally:
+                    os.close(fd)
+                source_bytes += len(chunk)
+                combined = partial + chunk
+                record_start = offset - len(partial)
+                position = records = 0
+                while records < OUTBOX_INDEX_CATCHUP_RECORDS:
+                    newline = combined.find(b"\n", position)
+                    if newline < 0:
+                        break
+                    raw = combined[position:newline]
+                    if len(raw) > OUTBOX_INDEX_MAX_RECORD_BYTES:
+                        offset += len(chunk)
+                        partial = combined[position:]
+                        save("outbox_index_record_too_large")
+                        return None, "outbox_index_record_too_large"
+                    position = newline + 1
+                    if not raw.strip():
+                        continue
+                    try:
+                        row = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        offset += len(chunk)
+                        partial = combined[position:]
+                        save("outbox_index_source_corrupt")
+                        return None, "outbox_index_source_corrupt"
+                    if not isinstance(row, dict):
+                        offset += len(chunk)
+                        partial = combined[position:]
+                        save("outbox_index_source_corrupt")
+                        return None, "outbox_index_source_corrupt"
+                    key = row.get("idempotency_key")
+                    if isinstance(key, str) and key:
+                        encoded = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        previous = conn.execute(
+                            "SELECT row_json FROM entries_v2 "
+                            "WHERE generation=? AND idempotency_key=?",
+                            (generation, key),
+                        ).fetchone()
+                        if previous is not None and previous[0] != encoded:
+                            offset += len(chunk)
+                            partial = combined[position:]
+                            save("outbox_duplicate_idempotency_key")
+                            return None, "outbox_duplicate_idempotency_key"
+                        conn.execute(
+                            "INSERT OR REPLACE INTO entries_v2 VALUES(?,?,?)",
+                            (generation, key, encoded),
+                        )
+                    records += 1
+                    records_consumed += 1
+                if records >= OUTBOX_INDEX_CATCHUP_RECORDS and position < len(combined):
+                    offset = record_start + position
+                    partial = b""
+                else:
+                    offset += len(chunk)
+                    partial = combined[position:]
+                if len(partial) > OUTBOX_INDEX_MAX_RECORD_BYTES or (
+                    len(partial) == OUTBOX_INDEX_MAX_RECORD_BYTES and offset < size
+                ):
+                    save("outbox_index_record_too_large")
+                    return None, "outbox_index_record_too_large"
+            if offset == size and partial:
+                save("outbox_index_source_corrupt")
+                return None, "outbox_index_source_corrupt"
+            closing_stat = canonical.stat() if canonical.exists() else None
+            closing = (
+                int(closing_stat.st_dev) if closing_stat else 0,
+                int(closing_stat.st_ino) if closing_stat else 0,
+                int(closing_stat.st_size) if closing_stat else 0,
+                int(closing_stat.st_mtime_ns) if closing_stat else 0,
+            )
+            save(None)
+            if closing != opening or offset < size:
                 return None, "outbox_index_catching_up"
             found = conn.execute(
-                "SELECT row_json FROM entries WHERE idempotency_key=?", (idempotency_key,)
+                "SELECT row_json FROM entries_v2 "
+                "WHERE generation=? AND idempotency_key=?",
+                (generation, idempotency_key),
             ).fetchone()
+            if metrics is not None:
+                metrics["sqlite_vm_steps"] = sqlite_vm_steps
             return (json.loads(found[0]) if found is not None else None), None
     except (OSError, sqlite3.DatabaseError):
         return None, "outbox_index_unavailable"

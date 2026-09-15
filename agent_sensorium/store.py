@@ -484,6 +484,23 @@ class SensoriumStore:
             binding_builder=_base_binding_from_snapshot,
         )
 
+    def prepare_desktop_projection_index(
+        self, *, scan_bytes: int = 1024 * 1024, scan_records: int = 2000
+    ):
+        """Advance the disposable Desktop current-state projection within fixed budgets."""
+        from .desktop_projection_index import DesktopProjectionIndex
+
+        return DesktopProjectionIndex(self).prepare(
+            scan_bytes=scan_bytes, scan_records=scan_records
+        )
+
+    def read_desktop_projection(self):
+        """Read a ready exact Desktop projection without creating or advancing it."""
+        from .desktop_projection_index import DesktopProjectionIndex
+
+        index = DesktopProjectionIndex(self)
+        return index.read() if index.path.exists() else None
+
     def read_admission_plan(self, *, candidate_limit: int = 50):
         """Read bounded materialized eligibility when the index exists."""
         from .admission_index import AdmissionIndex

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .conscious_aperture import DEFAULT_STALE_AFTER_MINUTES, _lease_expiry
+
 SCHEMA_VERSION = 1
 _POSTURES = frozenset(
     {"quiet", "sensing", "awaiting_review", "held", "prepared", "blocked", "settled", "unavailable"}
@@ -378,10 +380,44 @@ def _read_state(
     result: dict[str, list[dict[str, Any]]] = {}
     mtimes_ns: list[int] = []
     valid = True
+    current_paths = {name: paths[name] for name in ("candidates", "outbox")}
+    current_too_large = False
+    try:
+        current_too_large = any(
+            path.stat(follow_symlinks=False).st_size > specs[name][0]
+            for name, path in current_paths.items()
+            if path.exists()
+        )
+    except OSError:
+        current_too_large = True
+    index_path = root / "inner_life" / "desktop_projection.sqlite3"
+    if current_too_large or index_path.exists():
+        from .store import SensoriumStore
+
+        indexed = SensoriumStore(instance="default", state_dir=str(root)).read_desktop_projection()
+        if indexed is None or not indexed.complete or indexed.rows is None:
+            return {name: [] for name in paths}, False, []
+        result.update(indexed.rows)
+        mtimes_ns.extend(indexed.mtimes_ns)
+        if metrics is not None:
+            metrics["desktop_projection_query_rows"] = sum(
+                len(indexed.rows[name]) for name in ("candidates", "outbox")
+            )
+            metrics["desktop_projection_sqlite_vm_steps"] = indexed.sqlite_vm_steps
+    else:
+        for name in ("candidates", "outbox"):
+            byte_cap, row_cap = specs[name]
+            result[name], current, mtime_ns = _read_jsonl(
+                paths[name], root=root, max_bytes=byte_cap, max_rows=row_cap, metrics=metrics
+            )
+            valid &= current
+            if mtime_ns is not None:
+                mtimes_ns.append(mtime_ns)
     for name, path in paths.items():
+        if name in {"candidates", "outbox"}:
+            continue
         byte_cap, row_cap = specs[name]
-        reader = _read_jsonl if name in {"candidates", "outbox"} else _read_tail_jsonl
-        result[name], current, mtime_ns = reader(
+        result[name], current, mtime_ns = _read_tail_jsonl(
             path, root=root, max_bytes=byte_cap, max_rows=row_cap, metrics=metrics
         )
         valid &= current
@@ -409,6 +445,9 @@ def _schema_is_known(rows: dict[str, list[dict[str, Any]]]) -> bool:
 
 
 def _content_length(row: dict[str, Any]) -> int | None:
+    materialized = row.get("_verified_content_length")
+    if isinstance(materialized, int) and materialized >= 0:
+        return materialized
     preview = row.get("message_preview")
     content_hash = str(row.get("content_hash") or "").lower()
     if not isinstance(preview, str) or not preview or len(content_hash) not in {16, 64}:
@@ -531,6 +570,12 @@ def project_desktop_presentation(
         if x.get("status") == "in_conscious_aperture"
         and isinstance(x.get("conscious_aperture"), dict)
         and x["conscious_aperture"].get("state", "open") == "open"
+        and (
+            (expiry := _lease_expiry(
+                x, stale_after_minutes=DEFAULT_STALE_AFTER_MINUTES
+            )) is None
+            or now_dt < expiry
+        )
     ]
     held = [
         x

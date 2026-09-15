@@ -645,6 +645,7 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
         _json_write(latest_path, result)
         return result
     finally:
+        store.prepare_desktop_projection_index()
         _release_lock(lock_file)
 
 
