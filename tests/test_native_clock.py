@@ -141,9 +141,9 @@ def test_change_signature_and_model_prompt_share_the_same_material(tmp_path):
     prompt = module._advisory_prompt(material)
     payload = json.loads(prompt.split("\n\n", 1)[1])
 
-    assert payload["context"] == material
+    assert payload["context"]["source_identity"]["admission_key"] == material["selection"]["admission_key"]
+    assert payload["context"]["candidates"][0]["id"] == material["candidates"][0]["id"]
     assert payload["authority"]["create_requires_exactly_one_source_candidate_id"] is True
-    assert module._signature(payload["context"]) == module._signature(material)
 
 
 def test_source_material_selects_highest_pressure_candidate_not_largest_id(tmp_path):
@@ -268,8 +268,7 @@ def test_deterministic_sensor_phase_never_invokes_kanban(tmp_path):
         assert "--all-sensors" in command
         assert "--codex-usage" in command
         assert "--memory-reflection" in command
-        sensor_index = command.index("--sensor")
-        assert command[sensor_index + 1] == "research_source_feeds"
+        assert "--sensor" not in command
         assert "kanban" not in command
         return module.subprocess.CompletedProcess(
             command,

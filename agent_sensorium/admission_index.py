@@ -596,7 +596,13 @@ class AdmissionIndex:
                 "INSERT OR REPLACE INTO signal_claim VALUES (?,?,?,?)",
                 (signal_id, generation, ordinal, _json(projection)),
             )
-            if previous is not None and previous[0] != _json(projection):
+            has_dependents = conn.execute(
+                "SELECT 1 FROM event_signal WHERE signal_id=? LIMIT 1", (signal_id,),
+            ).fetchone() is not None
+            if (
+                (previous is None and has_dependents)
+                or (previous is not None and previous[0] != _json(projection))
+            ):
                 conn.execute(
                     "INSERT OR REPLACE INTO dependency_refresh VALUES ('signal',?,'')",
                     (signal_id,),
@@ -618,7 +624,13 @@ class AdmissionIndex:
                 "INSERT OR IGNORE INTO event_signal VALUES (?,?)",
                 ((event_id, signal_id) for signal_id in set(projection["source_signal_ids"])),
             )
-            if previous is not None and previous[0] != _json(projection):
+            has_dependents = conn.execute(
+                "SELECT 1 FROM candidate_event WHERE event_id=? LIMIT 1", (event_id,),
+            ).fetchone() is not None
+            if (
+                (previous is None and has_dependents)
+                or (previous is not None and previous[0] != _json(projection))
+            ):
                 conn.execute(
                     "INSERT OR REPLACE INTO dependency_refresh VALUES ('event',?,'')",
                     (event_id,),

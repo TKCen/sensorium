@@ -91,6 +91,13 @@ def _set_retry_state(state: dict[str, Any], entry: dict[str, Any]) -> None:
     state["retry_state"] = dict(value)
 
 
+def _retire_succeeded_retry_state(state: dict[str, Any], source_revision: str) -> None:
+    """Drop one replay-suppressed success while retaining failed revision authority."""
+    states = _retry_states_for_update(state, source_revision)
+    states.pop(source_revision, None)
+    state["retry_states"] = states
+
+
 def recover_interrupted_attempt(state: dict[str, Any], *, now: str | None = None) -> str | None:
     """Terminalize only an expired attempt or one whose exact PID/start-token owner is dead."""
     active = state.get("active_attempt")
@@ -135,6 +142,7 @@ def reconcile_applied_attempt(
         "retry_not_before": None,
         "last_status": "succeeded",
     })
+    _retire_succeeded_retry_state(state, source_revision)
     return True
 
 
@@ -261,12 +269,17 @@ def terminalize_attempt(
     if disposition_ref:
         active["disposition_ref"] = disposition_ref
     if active.get("source_revision") is not None and ordinal > 0:
-        _set_retry_state(state, {
+        retry_entry = {
             "source_revision": active["source_revision"],
             "last_ordinal": ordinal,
             "retry_not_before": active["retry_not_before"],
             "last_status": active["status"],
-        })
+        }
+        _set_retry_state(state, retry_entry)
+        if success and disposition_ref:
+            # A successful apply is already replay-suppressed by its canonical
+            # disposition. Retry JSON must not retain a second lifetime ledger.
+            _retire_succeeded_retry_state(state, str(active["source_revision"]))
     _append_history(state, active)
     state["active_attempt"] = None
     return active

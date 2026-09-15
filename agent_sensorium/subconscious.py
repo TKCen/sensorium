@@ -475,16 +475,28 @@ def _candidate_from_advisory(
     return candidate
 
 
+def _advisory_binding(candidate: dict) -> dict | None:
+    """Read binding precedence without trusting advisory compatibility metadata."""
+    top_level = candidate.get("admission_binding")
+    if isinstance(top_level, dict):
+        return top_level
+    metadata = candidate.get("advisory_meta")
+    if not isinstance(metadata, dict):
+        return None
+    nested = metadata.get("admission_binding")
+    return nested if isinstance(nested, dict) else None
+
+
 def _find_existing_candidate(candidates: list[dict], candidate: dict) -> dict | None:
     """Return the lifecycle-authoritative advisory for one semantic item."""
-    incoming_binding = candidate.get("admission_binding")
+    incoming_binding = _advisory_binding(candidate)
     source_ids = list(candidate.get("source_candidate_ids") or [])
     matches = []
     for existing in candidates:
         if existing.get("kind") != "subconscious_advisory":
             continue
-        existing_binding = existing.get("admission_binding") or (existing.get("advisory_meta") or {}).get("admission_binding")
-        if isinstance(incoming_binding, dict) and isinstance(existing_binding, dict):
+        existing_binding = _advisory_binding(existing)
+        if incoming_binding is not None and existing_binding is not None:
             if existing_binding.get("item_key") == incoming_binding.get("item_key"):
                 matches.append(existing)
         elif len(source_ids) == 1 and list(existing.get("source_candidate_ids") or []) == source_ids:
@@ -537,8 +549,8 @@ def _refresh_existing_advisory(
     """Refresh one advisory in place when its source materially changes."""
     old_source_fp = str(existing.get("source_candidate_fingerprint") or "")
     new_source_fp = str(incoming.get("source_candidate_fingerprint") or "")
-    old_binding = existing.get("admission_binding") or (existing.get("advisory_meta") or {}).get("admission_binding")
-    new_binding = incoming.get("admission_binding")
+    old_binding = _advisory_binding(existing)
+    new_binding = _advisory_binding(incoming)
     if (
         isinstance(old_binding, dict)
         and isinstance(new_binding, dict)

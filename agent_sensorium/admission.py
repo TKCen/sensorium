@@ -536,6 +536,7 @@ def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> 
 
 def build_admission_plan(
     store, *, candidate_limit: int = 50, admission_scan_bytes: int = 4 * 1024 * 1024,
+    selection_index: int = 0,
 ) -> dict:
     """Select at most one source from bounded current-attention state."""
     candidate_limit = max(1, int(candidate_limit))
@@ -561,7 +562,11 @@ def build_admission_plan(
                 "projected_candidate_count": 0,
             }
         indexed_projected: list[dict] = list(indexed.value.get("projected") or [])
-        indexed_selected: dict | None = indexed_projected[0] if indexed_projected else None
+        selected_index = max(0, int(selection_index))
+        indexed_selected: dict | None = (
+            indexed_projected[selected_index]
+            if selected_index < len(indexed_projected) else None
+        )
         return {
             "policy_version": POLICY_VERSION,
             "state": "ready",
@@ -639,7 +644,8 @@ def build_admission_plan(
         projected.append((candidate, binding, prior))
         projected.sort(key=lambda item: _priority(item[0]))
         del projected[candidate_limit:]
-    selected = projected[0] if projected else None
+    selected_index = max(0, int(selection_index))
+    selected = projected[selected_index] if selected_index < len(projected) else None
     return {
         "policy_version": POLICY_VERSION,
         "state": "ready",

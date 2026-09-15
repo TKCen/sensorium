@@ -50,6 +50,7 @@ from agent_sensorium.attempts import (  # noqa: E402
     retry_gate, run_bounded_command, start_attempt, terminalize_attempt,
 )
 from agent_sensorium.schemas import truncate_text, utc_now_iso  # noqa: E402
+from agent_sensorium.runner import list_sensors  # noqa: E402
 from agent_sensorium.store import SensoriumStore  # noqa: E402
 from agent_sensorium.subconscious import (  # noqa: E402
     ADVISORY_SOURCE_EXCLUDED_KINDS,
@@ -58,6 +59,10 @@ from agent_sensorium.subconscious import (  # noqa: E402
 from agent_sensorium.tools import handle_sensorium_subconscious_advisory  # noqa: E402
 
 POLICY_VERSION = "2026-08-31.native-clock-v3"
+MAX_PROMPT_BYTES = 48 * 1024
+MAX_PROMPT_CONTEXT_BYTES = 40 * 1024
+MAX_PROMPT_LIST_ITEMS = 8
+MAX_PROMPT_STRING_BYTES = 512
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -112,12 +117,14 @@ def _candidate_priority_key(candidate: dict) -> tuple:
 def _source_material(
     store: SensoriumStore, *, event_limit: int, candidate_limit: int,
     admission_scan_bytes: int = 4 * 1024 * 1024,
+    selection_index: int = 0,
 ) -> dict:
     prepared = store.prepare_admission_index(scan_bytes=admission_scan_bytes)
     if prepared.complete:
         plan = build_admission_plan(
             store, candidate_limit=candidate_limit,
             admission_scan_bytes=admission_scan_bytes,
+            selection_index=selection_index,
         )
     else:
         # The write-owning preparation result is authoritative for this tick.
@@ -168,6 +175,7 @@ def _source_material(
         "candidate_source_count": (
             (plan.get("source_record_counts") or {}).get("candidates")
         ),
+        "projected_candidate_count": plan.get("projected_candidate_count", 0),
         "events": [
             {
                 "id": event.get("id"),
@@ -225,6 +233,84 @@ def _extract_json_object(text: str) -> dict:
     raise ValueError("bounded Hermes Subconscious session returned no JSON object")
 
 
+def _utf8_display(value: object, limit: int = MAX_PROMPT_STRING_BYTES) -> str:
+    text = str(value or "")
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    marker = "…"
+    prefix = encoded[: limit - len(marker.encode("utf-8"))].decode("utf-8", errors="ignore")
+    return prefix + marker
+
+
+def _bounded_display(value: object, *, depth: int = 0) -> object:
+    if depth >= 4:
+        return _utf8_display(value)
+    if isinstance(value, dict):
+        return {
+            _utf8_display(key, 120): _bounded_display(item, depth=depth + 1)
+            for key, item in list(value.items())[:16]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_display(item, depth=depth + 1)
+            for item in list(value)[:MAX_PROMPT_LIST_ITEMS]
+        ]
+    if isinstance(value, str):
+        return _utf8_display(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _utf8_display(value)
+
+
+def _prompt_context(context: dict) -> dict:
+    """Create a display-only prompt projection; lifecycle identity stays in context."""
+    raw_selection = context.get("selection")
+    selection: dict = raw_selection if isinstance(raw_selection, dict) else {}
+    candidate = next(
+        (row for row in context.get("candidates") or [] if isinstance(row, dict)),
+        {},
+    )
+    source_candidate_id = str(selection.get("source_candidate_id") or candidate.get("id") or "")
+    display = {
+        "policy_version": _utf8_display(context.get("policy_version"), 120),
+        "candidate_order": _utf8_display(context.get("candidate_order"), 120),
+        "eligible_count": context.get("eligible_count"),
+        "suppressed_counts": _bounded_display(context.get("suppressed_counts") or {}),
+        "selection": _bounded_display(selection),
+        "source_identity": {
+            "admission_key": _utf8_display(selection.get("admission_key"), 128),
+            "revision_key": _utf8_display(selection.get("revision_key"), 128),
+            "item_key": _utf8_display(selection.get("item_key"), 128),
+            "source_candidate_id": _utf8_display(source_candidate_id),
+            "source_candidate_id_sha256": hashlib.sha256(
+                source_candidate_id.encode("utf-8")
+            ).hexdigest(),
+            "source_candidate_fingerprint": _utf8_display(
+                selection.get("source_candidate_fingerprint") or candidate.get("fingerprint"), 128
+            ),
+        },
+        "source_decisions": _bounded_display(context.get("source_decisions") or []),
+        "admission_state": _utf8_display(context.get("admission_state"), 80),
+        "admission_reason": _utf8_display(context.get("admission_reason"), 240),
+        "admission_work": _bounded_display(context.get("admission_work") or {}),
+        "events": _bounded_display(list(context.get("events") or [])[:16]),
+        "candidates": _bounded_display(list(context.get("candidates") or [])[:1]),
+    }
+    while len(json.dumps(display, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_PROMPT_CONTEXT_BYTES:
+        decisions = display.get("source_decisions")
+        events = display.get("events")
+        if isinstance(decisions, list) and decisions:
+            decisions.pop()
+        elif isinstance(events, list) and len(events) > 1:
+            events.pop(0)
+        else:
+            display["source_decisions"] = []
+            display["events"] = events[-1:] if isinstance(events, list) else []
+            break
+    return display
+
+
 def _advisory_prompt(context: dict) -> str:
     payload = {
         "role": "sensorium_subconscious_native_clock",
@@ -246,7 +332,7 @@ def _advisory_prompt(context: dict) -> str:
         },
         "direct_pressure_kinds_excluded": sorted(DIRECT_CONSCIOUS_KINDS),
         "advisory_source_kinds_excluded": sorted(ADVISORY_SOURCE_EXCLUDED_KINDS),
-        "context": context,
+        "context": _prompt_context(context),
         "required_schema": {
             "action": "DROP | SAVE | CREATE_CONSCIOUS_TASK",
             "rationale": "short reason",
@@ -261,7 +347,7 @@ def _advisory_prompt(context: dict) -> str:
             },
         },
     }
-    return (
+    prompt = (
         "Act as a bounded Subconscious pass. Decide whether the compact private Sensorium material "
         "contains one unresolved pattern that deserves later Conscious attention. Prefer DROP when it is "
         "noise, stale, duplicate, already settled, or merely high pressure without meaning. SAVE means "
@@ -272,8 +358,11 @@ def _advisory_prompt(context: dict) -> str:
         "in one parallel retrieval round whenever memory could deepen, connect, complicate, or change "
         "the meaning of the present material. Do not require immediate actionability before consulting "
         "memory. Never call built-in memory mutation or hindsight_retain. Return exactly "
-        "one JSON object.\n\n" + json.dumps(payload, separators=(",", ":"))
+        "one JSON object.\n\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        raise ValueError("bounded Subconscious prompt exceeds native argv budget")
+    return prompt
 
 
 def _python_executable(plugin_root: Path) -> str:
@@ -292,11 +381,20 @@ def _run_sensors(
         "--all-sensors",
         "--codex-usage",
         "--memory-reflection",
-        "--sensor", "research_source_feeds",
         "--json",
     ]
     if state_dir:
         command.extend(["--state-dir", state_dir])
+    registry_store = SensoriumStore(instance=instance, state_dir=state_dir)
+    optional = next(
+        (
+            sensor for sensor in list_sensors(registry_store)["script"]
+            if sensor.get("name") == "research_source_feeds"
+        ),
+        None,
+    )
+    if optional is not None and optional.get("enabled", True):
+        command.extend(["--sensor", "research_source_feeds"])
     started = time.monotonic()
     completed = run_bounded_command(
         command, cwd=str(plugin_root), text=True, capture_output=True,
@@ -412,6 +510,24 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
         )
         binding = material.get("selection")
         signature = str((binding or {}).get("admission_key") or "")
+        allowed, gate_reason, ordinal = True, "ready", 1
+        selection_index = 0
+        while binding is not None:
+            allowed, gate_reason, ordinal = retry_gate(prior, signature)
+            if allowed or gate_reason != "retry_exhausted":
+                break
+            selection_index += 1
+            if selection_index >= int(material.get("projected_candidate_count") or 0):
+                break
+            material = _source_material(
+                store,
+                event_limit=args.event_limit,
+                candidate_limit=args.candidate_limit,
+                admission_scan_bytes=getattr(args, "admission_scan_bytes", 4 * 1024 * 1024),
+                selection_index=selection_index,
+            )
+            binding = material.get("selection")
+            signature = str((binding or {}).get("admission_key") or "")
         prompt_sha256 = (
             hashlib.sha256(_advisory_prompt(material).encode("utf-8")).hexdigest()
             if binding is not None else None
@@ -450,7 +566,6 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
             _json_write(state_path, prior)
             _json_write(latest_path, result)
             return result
-        allowed, gate_reason, ordinal = retry_gate(prior, signature)
         if not allowed:
             result = {
                 **base,
