@@ -556,6 +556,8 @@ def build_admission_plan(
                 "records_consumed": indexed.records_consumed,
                 "query_rows": indexed.query_rows,
                 "materialized_rows": indexed.materialized_rows,
+                "sqlite_vm_steps": indexed.sqlite_vm_steps,
+                "source_record_counts": None,
                 "projected_candidate_count": 0,
             }
         indexed_projected: list[dict] = list(indexed.value.get("projected") or [])
@@ -574,6 +576,8 @@ def build_admission_plan(
             "records_consumed": indexed.records_consumed,
             "query_rows": indexed.query_rows,
             "materialized_rows": indexed.materialized_rows,
+            "sqlite_vm_steps": indexed.sqlite_vm_steps,
+            "source_record_counts": dict(indexed.value.get("source_record_counts") or {}),
             "projected_candidate_count": len(indexed_projected),
         }
 
@@ -596,6 +600,8 @@ def build_admission_plan(
             "records_consumed": view.records_consumed,
             "query_rows": view.query_rows,
             "materialized_rows": view.materialized_rows,
+            "sqlite_vm_steps": view.sqlite_vm_steps,
+            "source_record_counts": None,
             "projected_candidate_count": 0,
         }
     snap = view.snapshot
@@ -651,6 +657,8 @@ def build_admission_plan(
         "records_consumed": view.records_consumed,
         "query_rows": view.query_rows,
         "materialized_rows": view.materialized_rows,
+        "sqlite_vm_steps": view.sqlite_vm_steps,
+        "source_record_counts": {stream: len(snap[stream]) for stream in ("signals", "events", "decisions", "candidates")},
         "projected_candidate_count": len(projected),
     }
 

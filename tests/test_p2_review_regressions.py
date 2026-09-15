@@ -196,6 +196,16 @@ def test_received_signal_order_not_membership_order_controls_native_quietness(tm
     store.rewrite_jsonl("events", events)
     store.rewrite_jsonl("candidates", candidates)
 
+    catching_up = build_admission_plan(store)
+    assert catching_up["state"] == "catching_up"
+    assert catching_up["selection"] is None
+    for _ in range(100):
+        advanced = store.prepare_admission_index(scan_bytes=4 * 1024 * 1024)
+        if advanced.complete:
+            break
+    else:
+        raise AssertionError("admission owner did not finish rewritten sources")
+
     rebound, error = binding_for_candidate(store, candidate_id)
     assert error is None and rebound is not None
     assert rebound["admission_key"] == binding_b["admission_key"]

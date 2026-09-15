@@ -14,8 +14,15 @@ private, disposable SQLite index under the selected instance root.
   `catching_up`, `rebuilding`, or `invalid`; eligibility and exact counts are not
   claimed.
 - Ready selection reads an incrementally maintained current candidate projection,
-  an exact eligible counter, and at most `candidate_limit` globally ordered rows.
-  Receipts expose query and materialized-row work.
+  an exact eligible counter, exact per-stream record counts, and at most
+  `candidate_limit` globally ordered rows. Persisted next ordinals avoid history
+  `MAX` scans; normalized item and reverse-dependency indexes avoid JSON extraction
+  scans. Receipts expose returned/materialized rows plus actual SQLite VM steps for
+  preparation and selection.
+- Signal/event winner changes enqueue affected candidates through normalized
+  reverse relationships. One pass handles at most 64 dependency-expansion or
+  candidate-refresh work items; remaining work keeps admission explicitly
+  `catching_up` and selection unavailable until every projection is accurate.
 - Archived and settled evidence remains indexed for exact identity and replay
   checks but is absent from the ready current-attention query. Growing archived
   history therefore does not grow steady-state selection work.

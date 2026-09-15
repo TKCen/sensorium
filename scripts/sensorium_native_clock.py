@@ -114,10 +114,29 @@ def _source_material(
     admission_scan_bytes: int = 4 * 1024 * 1024,
 ) -> dict:
     prepared = store.prepare_admission_index(scan_bytes=admission_scan_bytes)
-    plan = build_admission_plan(
-        store, candidate_limit=candidate_limit,
-        admission_scan_bytes=admission_scan_bytes,
-    )
+    if prepared.complete:
+        plan = build_admission_plan(
+            store, candidate_limit=candidate_limit,
+            admission_scan_bytes=admission_scan_bytes,
+        )
+    else:
+        # The write-owning preparation result is authoritative for this tick.
+        # Never erase a detected corrupt/incomplete state by falling through to
+        # the cacheless compatibility reader after the cache was quarantined.
+        plan = {
+            "policy_version": "source-admission-v2",
+            "selection": None,
+            "eligible_count": None,
+            "suppressed_counts": None,
+            "source_decisions": [],
+            "state": prepared.state,
+            "reason": prepared.reason or "admission_index_catching_up",
+            "progress": prepared.progress,
+            "query_rows": 0,
+            "materialized_rows": 0,
+            "sqlite_vm_steps": 0,
+            "source_record_counts": None,
+        }
     binding = plan["selection"]
     bound = (
         context_for_binding(store, binding, source_decisions=plan["source_decisions"])
@@ -141,8 +160,14 @@ def _source_material(
             "source_records": prepared.records_consumed,
             "query_rows": plan.get("query_rows", 0),
             "materialized_rows": plan.get("materialized_rows", 0),
+            "prepare_sqlite_vm_steps": prepared.sqlite_vm_steps,
+            "selection_sqlite_vm_steps": plan.get("sqlite_vm_steps", 0),
+            "dependent_refreshes": prepared.dependent_refreshes,
             "candidate_limit": candidate_limit,
         },
+        "candidate_source_count": (
+            (plan.get("source_record_counts") or {}).get("candidates")
+        ),
         "events": [
             {
                 "id": event.get("id"),
@@ -416,7 +441,10 @@ def run_once(args: argparse.Namespace, *, run_command: CommandRunner = subproces
             if admission_state != "ready":
                 action = f"skipped_admission_index_{admission_state}"
             else:
-                action = "skipped_empty" if not store.read_jsonl("candidates") else "skipped_no_eligible_source"
+                action = (
+                    "skipped_empty" if material.get("candidate_source_count") == 0
+                    else "skipped_no_eligible_source"
+                )
             result = {**base, "action": action}
             terminalize_attempt(prior, success=True)
             _json_write(state_path, prior)

@@ -19,6 +19,8 @@ DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
+SCHEMA_VERSION = 3
+MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
 
@@ -33,6 +35,8 @@ class AdmissionIndexResult:
     records_consumed: int = 0
     query_rows: int = 0
     materialized_rows: int = 0
+    sqlite_vm_steps: int = 0
+    dependent_refreshes: int = 0
     value: object | None = None
 
 
@@ -169,6 +173,29 @@ class AdmissionIndex:
 
     @staticmethod
     def _schema(conn: sqlite3.Connection) -> None:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        cursor_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_cursor'"
+        ).fetchone() is not None
+        legacy_zero = version == 0 and cursor_exists and "next_ordinal" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(source_cursor)")
+        }
+        if version not in {0, SCHEMA_VERSION} or legacy_zero:
+            # The index is disposable. Rebuild instead of running an unbounded
+            # data migration over stale derived state.
+            conn.executescript("""
+            DROP TABLE IF EXISTS dependency_refresh;
+            DROP TABLE IF EXISTS event_signal;
+            DROP TABLE IF EXISTS candidate_event;
+            DROP TABLE IF EXISTS admission_summary;
+            DROP TABLE IF EXISTS candidate_state;
+            DROP TABLE IF EXISTS candidate_member;
+            DROP TABLE IF EXISTS disposition_evidence;
+            DROP TABLE IF EXISTS candidate_projection;
+            DROP TABLE IF EXISTS event_join;
+            DROP TABLE IF EXISTS signal_claim;
+            DROP TABLE IF EXISTS source_cursor;
+            """)
         conn.executescript("""
         PRAGMA journal_mode=DELETE;
         PRAGMA synchronous=FULL;
@@ -177,7 +204,8 @@ class AdmissionIndex:
           dev INTEGER NOT NULL, ino INTEGER NOT NULL, offset INTEGER NOT NULL,
           eof_size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
           boundary_sha256 TEXT NOT NULL, generation INTEGER NOT NULL,
-          complete INTEGER NOT NULL CHECK(complete IN (0,1))
+          complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+          next_ordinal INTEGER NOT NULL, record_count INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS signal_claim (
           signal_id TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -209,21 +237,52 @@ class AdmissionIndex:
         CREATE INDEX IF NOT EXISTS ix_disposition_admission ON disposition_evidence(admission_key);
         CREATE INDEX IF NOT EXISTS ix_disposition_member ON disposition_evidence(member_key);
         CREATE INDEX IF NOT EXISTS ix_disposition_source ON disposition_evidence(source_candidate_id);
+        CREATE INDEX IF NOT EXISTS ix_disposition_item_ordinal
+          ON disposition_evidence(item_key, source_ordinal DESC);
+        CREATE INDEX IF NOT EXISTS ix_disposition_member_ordinal
+          ON disposition_evidence(member_key, source_ordinal DESC);
+        CREATE INDEX IF NOT EXISTS ix_signal_generation_ordinal
+          ON signal_claim(generation, source_ordinal);
+        CREATE INDEX IF NOT EXISTS ix_event_generation_ordinal
+          ON event_join(generation, source_ordinal);
+        CREATE INDEX IF NOT EXISTS ix_candidate_generation_ordinal
+          ON candidate_projection(generation, source_ordinal);
         CREATE TABLE IF NOT EXISTS candidate_member (
           candidate_id TEXT NOT NULL, member_key TEXT NOT NULL,
           PRIMARY KEY(candidate_id, member_key)
         );
-        CREATE INDEX IF NOT EXISTS ix_candidate_member_key ON candidate_member(member_key);
+        CREATE INDEX IF NOT EXISTS ix_candidate_member_key
+          ON candidate_member(member_key, candidate_id);
         CREATE TABLE IF NOT EXISTS candidate_state (
           candidate_id TEXT PRIMARY KEY, pressure REAL NOT NULL, created_at TEXT NOT NULL,
           binding_json TEXT, source_decisions_json TEXT NOT NULL,
-          attribution_gap_count INTEGER NOT NULL, suppression_reason TEXT
+          attribution_gap_count INTEGER NOT NULL, suppression_reason TEXT, item_key TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_candidate_ready
           ON candidate_state(suppression_reason, pressure DESC, created_at, candidate_id);
+        CREATE INDEX IF NOT EXISTS ix_candidate_state_item
+          ON candidate_state(item_key, candidate_id);
+        CREATE TABLE IF NOT EXISTS candidate_event (
+          candidate_id TEXT NOT NULL, event_id TEXT NOT NULL,
+          PRIMARY KEY(candidate_id, event_id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_candidate_event_event
+          ON candidate_event(event_id, candidate_id);
+        CREATE TABLE IF NOT EXISTS event_signal (
+          event_id TEXT NOT NULL, signal_id TEXT NOT NULL,
+          PRIMARY KEY(event_id, signal_id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_event_signal_signal
+          ON event_signal(signal_id, event_id);
+        CREATE TABLE IF NOT EXISTS dependency_refresh (
+          kind TEXT NOT NULL CHECK(kind IN ('signal','event','item','member')),
+          dependency_id TEXT NOT NULL, after_candidate_id TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY(kind, dependency_id)
+        );
         CREATE TABLE IF NOT EXISTS admission_summary (
           key TEXT PRIMARY KEY, value INTEGER NOT NULL
         );
+        PRAGMA user_version=3;
         """)
 
     def _source_stat(self, stream: str) -> os.stat_result | None:
@@ -277,13 +336,16 @@ class AdmissionIndex:
             conn.execute("DELETE FROM source_cursor WHERE stream='candidates'")
         elif stream == "events":
             conn.execute("DELETE FROM event_join")
+            conn.execute("DELETE FROM event_signal")
             conn.execute("DELETE FROM source_cursor WHERE stream='candidates'")
         elif stream == "candidates":
             conn.execute("DELETE FROM candidate_projection")
             conn.execute("DELETE FROM disposition_evidence WHERE source_stream='candidates'")
             conn.execute("DELETE FROM candidate_member")
+            conn.execute("DELETE FROM candidate_event")
             conn.execute("DELETE FROM candidate_state")
             conn.execute("DELETE FROM admission_summary")
+            conn.execute("DELETE FROM dependency_refresh")
         else:
             conn.execute("DELETE FROM disposition_evidence WHERE source_stream='decisions'")
             # Rebuild candidate state after a rewritten decision authority stream.
@@ -292,28 +354,28 @@ class AdmissionIndex:
     def _joined_snapshot(self, conn: sqlite3.Connection, candidate: dict) -> dict[str, list[dict]]:
         event_generation = self._current_generation(conn, "events")
         signal_generation = self._current_generation(conn, "signals")
-        events: list[dict] = []
-        signals: list[dict] = []
-        seen_signals: set[str] = set()
-        for event_id in candidate.get("event_ids") or []:
-            row = conn.execute(
-                "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
-                (event_id, event_generation),
-            ).fetchone()
-            if row is None:
-                continue
-            event = json.loads(row[0])
-            events.append(event)
-            for signal_id in event.get("source_signal_ids") or []:
-                if signal_id in seen_signals:
-                    continue
-                seen_signals.add(signal_id)
-                signal_row = conn.execute(
-                    "SELECT projection_json FROM signal_claim WHERE signal_id=? AND generation=?",
-                    (signal_id, signal_generation),
-                ).fetchone()
-                if signal_row is not None:
-                    signals.append(json.loads(signal_row[0]))
+        candidate_id = str(candidate.get("id") or "")
+        event_rows = conn.execute(
+            "SELECT e.projection_json,e.source_ordinal FROM candidate_event ce "
+            "CROSS JOIN event_join e ON e.event_id=ce.event_id "
+            "WHERE ce.candidate_id=? AND e.generation=?",
+            (candidate_id, event_generation),
+        ).fetchall()
+        events = [json.loads(row[0]) for row in sorted(event_rows, key=lambda item: item[1])]
+        # Membership order and duplicate references are non-canonical. Joining
+        # through normalized relationships and sorting the bounded joined set by
+        # signal receipt ordinal preserves authoritative latest-revision order
+        # without inviting SQLite to scan a whole generation for ORDER BY.
+        signal_rows = conn.execute(
+            "SELECT DISTINCT s.projection_json,s.source_ordinal "
+            "FROM candidate_event ce "
+            "CROSS JOIN event_join e ON e.event_id=ce.event_id AND e.generation=? "
+            "CROSS JOIN event_signal es ON es.event_id=e.event_id "
+            "CROSS JOIN signal_claim s ON s.signal_id=es.signal_id AND s.generation=? "
+            "WHERE ce.candidate_id=?",
+            (event_generation, signal_generation, candidate_id),
+        ).fetchall()
+        signals = [json.loads(row[0]) for row in sorted(signal_rows, key=lambda item: item[1])]
         return {"signals": signals, "events": events, "candidates": [candidate], "decisions": []}
 
     @staticmethod
@@ -351,22 +413,18 @@ class AdmissionIndex:
                     _json(projection),
                 ),
             )
-        affected = {
-            row[0] for row in conn.execute(
-                "SELECT candidate_id FROM candidate_state WHERE binding_json IS NOT NULL "
-                "AND json_extract(binding_json,'$.item_key')=?",
-                (binding.get("item_key"),),
+        item_key = binding.get("item_key")
+        if isinstance(item_key, str):
+            conn.execute(
+                "INSERT OR REPLACE INTO dependency_refresh VALUES ('item',?,'')",
+                (item_key,),
             )
-        }
         if members:
-            marks = ",".join("?" for _ in members)
-            affected.update(
-                row[0] for row in conn.execute(
-                    f"SELECT DISTINCT candidate_id FROM candidate_member WHERE member_key IN ({marks})",
-                    tuple(members),
-                )
+            conn.executemany(
+                "INSERT OR REPLACE INTO dependency_refresh VALUES ('member',?,'')",
+                ((member,) for member in set(members)),
             )
-        return affected
+        return set()
 
     def _resolve_v1_evidence(
         self, conn: sqlite3.Connection, candidate_id: str, binding: dict,
@@ -396,12 +454,9 @@ class AdmissionIndex:
                         row["applied"], row["terminal_item_closure"], row["projection_json"],
                     ),
                 )
-            marks = ",".join("?" for _ in members)
-            affected.update(
-                item[0] for item in conn.execute(
-                    f"SELECT DISTINCT candidate_id FROM candidate_member WHERE member_key IN ({marks})",
-                    tuple(members),
-                )
+            conn.executemany(
+                "INSERT OR REPLACE INTO dependency_refresh VALUES ('member',?,'')",
+                ((member,) for member in set(members)),
             )
         return affected
 
@@ -472,12 +527,11 @@ class AdmissionIndex:
             projections.append(projection)
         return projections[-20:], reason, gaps
 
-    def _refresh_candidate(self, conn: sqlite3.Connection, candidate_id: str, binding_builder) -> None:
-        generation_row = conn.execute(
-            "SELECT MAX(generation) FROM candidate_projection WHERE candidate_id=?",
-            (candidate_id,),
-        ).fetchone()
-        generation = int(generation_row[0]) if generation_row and generation_row[0] is not None else -1
+    def _refresh_candidate(
+        self, conn: sqlite3.Connection, candidate_id: str, binding_builder,
+        *, generation: int | None = None,
+    ) -> None:
+        generation = generation or self._current_generation(conn, "candidates")
         row = conn.execute(
             "SELECT * FROM candidate_projection WHERE candidate_id=? AND generation=?",
             (candidate_id, generation),
@@ -517,11 +571,12 @@ class AdmissionIndex:
                     )
                 source_decisions, suppression, gaps = self._prior_rows(conn, binding)
         conn.execute(
-            "INSERT INTO candidate_state VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO candidate_state VALUES (?,?,?,?,?,?,?,?)",
             (
                 candidate_id, row["pressure"], row["created_at"],
                 _json(binding) if binding is not None else None,
                 _json(source_decisions), gaps, suppression,
+                binding.get("item_key") if isinstance(binding, dict) else None,
             ),
         )
         self._summary_delta(conn, suppression or "eligible", 1)
@@ -532,17 +587,42 @@ class AdmissionIndex:
     ) -> None:
         if stream == "signals":
             projection = _signal_projection(row, self.store.instance, claim_parser)
+            signal_id = str(row.get("id") or f"ordinal:{ordinal}")
+            previous = conn.execute(
+                "SELECT projection_json FROM signal_claim WHERE signal_id=? AND generation=?",
+                (signal_id, generation),
+            ).fetchone()
             conn.execute(
                 "INSERT OR REPLACE INTO signal_claim VALUES (?,?,?,?)",
-                (str(row.get("id") or f"ordinal:{ordinal}"), generation, ordinal, _json(projection)),
+                (signal_id, generation, ordinal, _json(projection)),
             )
+            if previous is not None and previous[0] != _json(projection):
+                conn.execute(
+                    "INSERT OR REPLACE INTO dependency_refresh VALUES ('signal',?,'')",
+                    (signal_id,),
+                )
             return
         if stream == "events":
             projection = _event_projection(row)
+            event_id = str(row.get("id") or f"ordinal:{ordinal}")
+            previous = conn.execute(
+                "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
+                (event_id, generation),
+            ).fetchone()
             conn.execute(
                 "INSERT OR REPLACE INTO event_join VALUES (?,?,?,?)",
-                (str(row.get("id") or f"ordinal:{ordinal}"), generation, ordinal, _json(projection)),
+                (event_id, generation, ordinal, _json(projection)),
             )
+            conn.execute("DELETE FROM event_signal WHERE event_id=?", (event_id,))
+            conn.executemany(
+                "INSERT OR IGNORE INTO event_signal VALUES (?,?)",
+                ((event_id, signal_id) for signal_id in set(projection["source_signal_ids"])),
+            )
+            if previous is not None and previous[0] != _json(projection):
+                conn.execute(
+                    "INSERT OR REPLACE INTO dependency_refresh VALUES ('event',?,'')",
+                    (event_id,),
+                )
             return
         if stream == "candidates":
             projection = _candidate_projection(row, fingerprint)
@@ -556,6 +636,13 @@ class AdmissionIndex:
                     projection.get("pressure", 0.0), projection.get("created_at", ""),
                     _json(projection),
                 ),
+            )
+            conn.execute(
+                "DELETE FROM candidate_event WHERE candidate_id=?", (candidate_id,),
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO candidate_event VALUES (?,?)",
+                ((candidate_id, event_id) for event_id in set(projection["event_ids"])),
             )
             affected: set[str] = set()
             binding = projection.get("admission_binding")
@@ -578,13 +665,17 @@ class AdmissionIndex:
                         ),
                     )
                     affected.add(legacy_id)
-            self._refresh_candidate(conn, candidate_id, binding_builder)
+            self._refresh_candidate(
+                conn, candidate_id, binding_builder, generation=generation,
+            )
             if projection.get("kind") != "subconscious_advisory":
                 base, error = binding_builder(self.store, projection, self._joined_snapshot(conn, projection))
                 if not error and base:
                     affected.update(self._resolve_v1_evidence(conn, candidate_id, base))
             for affected_id in affected:
-                self._refresh_candidate(conn, affected_id, binding_builder)
+                self._refresh_candidate(
+                    conn, affected_id, binding_builder, generation=generation,
+                )
             return
         projection = _decision_projection(row)
         binding = projection.get("admission_binding")
@@ -595,18 +686,107 @@ class AdmissionIndex:
             for candidate_id in affected:
                 self._refresh_candidate(conn, candidate_id, binding_builder)
 
+    def _drain_dependency_refresh(self, conn: sqlite3.Connection, binding_builder) -> tuple[int, bool]:
+        """Refresh reverse dependents in a fixed-size, restartable work slice."""
+        refreshed = 0
+        while refreshed < MAX_DEPENDENT_REFRESHES_PER_PASS:
+            dependency = conn.execute(
+                "SELECT kind,dependency_id,after_candidate_id FROM dependency_refresh "
+                "ORDER BY kind,dependency_id LIMIT 1"
+            ).fetchone()
+            if dependency is None:
+                return refreshed, False
+            remaining = MAX_DEPENDENT_REFRESHES_PER_PASS - refreshed
+            if dependency["kind"] == "signal":
+                rows = conn.execute(
+                    "SELECT event_id FROM event_signal "
+                    "WHERE signal_id=? AND event_id>? ORDER BY event_id LIMIT ?",
+                    (
+                        dependency["dependency_id"],
+                        dependency["after_candidate_id"],
+                        remaining + 1,
+                    ),
+                ).fetchall()
+                selected = rows[:remaining]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO dependency_refresh VALUES ('event',?,'')",
+                    ((row["event_id"],) for row in selected),
+                )
+                refreshed += len(selected)
+                if len(rows) <= remaining:
+                    conn.execute(
+                        "DELETE FROM dependency_refresh WHERE kind='signal' AND dependency_id=?",
+                        (dependency["dependency_id"],),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE dependency_refresh SET after_candidate_id=? "
+                        "WHERE kind='signal' AND dependency_id=?",
+                        (selected[-1]["event_id"], dependency["dependency_id"]),
+                    )
+                    return refreshed, True
+                continue
+            if dependency["kind"] == "item":
+                sql = (
+                    "SELECT candidate_id FROM candidate_state "
+                    "WHERE item_key=? AND candidate_id>? ORDER BY candidate_id LIMIT ?"
+                )
+            elif dependency["kind"] == "member":
+                sql = (
+                    "SELECT candidate_id FROM candidate_member "
+                    "WHERE member_key=? AND candidate_id>? ORDER BY candidate_id LIMIT ?"
+                )
+            else:
+                sql = (
+                    "SELECT candidate_id FROM candidate_event "
+                    "WHERE event_id=? AND candidate_id>? ORDER BY candidate_id LIMIT ?"
+                )
+            rows = conn.execute(
+                sql,
+                (
+                    dependency["dependency_id"],
+                    dependency["after_candidate_id"],
+                    remaining + 1,
+                ),
+            ).fetchall()
+            selected = rows[:remaining]
+            for row in selected:
+                self._refresh_candidate(conn, row["candidate_id"], binding_builder)
+                refreshed += 1
+            if len(rows) <= remaining:
+                conn.execute(
+                    "DELETE FROM dependency_refresh WHERE kind=? AND dependency_id=?",
+                    (dependency["kind"], dependency["dependency_id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE dependency_refresh SET after_candidate_id=? "
+                    "WHERE kind=? AND dependency_id=?",
+                    (selected[-1]["candidate_id"], dependency["kind"], dependency["dependency_id"]),
+                )
+                return refreshed, True
+        pending = conn.execute("SELECT 1 FROM dependency_refresh LIMIT 1").fetchone() is not None
+        return refreshed, pending
+
     def prepare(
         self, *, scan_bytes: int, claim_parser, fingerprint, binding_builder,
     ) -> AdmissionIndexResult:
         budget = max(1, int(scan_bytes))
         consumed = 0
         records = 0
+        sqlite_vm_steps = 0
+        dependent_refreshes = 0
         pending_reason: str | None = None
         rebuild = not self.path.exists()
         conn: sqlite3.Connection | None = None
         try:
             conn = self._connect(create=True)
             self._schema(conn)
+            def count_vm_step() -> int:
+                nonlocal sqlite_vm_steps
+                sqlite_vm_steps += 1
+                return 0
+            conn.set_progress_handler(count_vm_step, 1)
             conn.execute("BEGIN IMMEDIATE")
             opening = {stream: self._source_stat(stream) for stream in STREAMS}
             for stream in STREAMS:
@@ -621,7 +801,14 @@ class AdmissionIndex:
                 try:
                     dev, ino = (stat.st_dev, stat.st_ino) if stat else (0, 0)
                     if cursor is not None:
-                        if dev != cursor["dev"] or ino != cursor["ino"] or size < cursor["offset"]:
+                        created_from_empty = (
+                            cursor["dev"] == 0 and cursor["ino"] == 0
+                            and cursor["offset"] == 0 and stat is not None
+                        )
+                        if (
+                            not created_from_empty
+                            and (dev != cursor["dev"] or ino != cursor["ino"] or size < cursor["offset"])
+                        ):
                             reset = True
                         elif size == cursor["offset"] and stat and stat.st_mtime_ns != cursor["mtime_ns"]:
                             reset = True
@@ -635,18 +822,12 @@ class AdmissionIndex:
                         rebuild = True
                         generation += int(cursor is not None)
                         self._delete_stream(conn, stream)
-                        offset = ordinal = 0
+                        offset = ordinal = record_count = 0
                     else:
+                        assert cursor is not None
                         offset = int(cursor["offset"])
-                        table = {
-                            "signals": "signal_claim", "events": "event_join",
-                            "candidates": "candidate_projection", "decisions": "disposition_evidence",
-                        }[stream]
-                        where = " AND source_stream='decisions'" if stream == "decisions" else ""
-                        ordinal = int(conn.execute(
-                            f"SELECT COALESCE(MAX(source_ordinal),-1)+1 FROM {table} "
-                            f"WHERE generation=?{where}", (generation,),
-                        ).fetchone()[0])
+                        ordinal = int(cursor["next_ordinal"])
+                        record_count = int(cursor["record_count"])
                     complete = offset == size
                     if not complete and budget > BOUNDARY_BYTES and fd is not None:
                         available = size - offset
@@ -677,6 +858,7 @@ class AdmissionIndex:
                                     claim_parser, fingerprint, binding_builder,
                                 )
                                 ordinal += 1
+                                record_count += 1
                                 records += 1
                             offset += len(parsed)
                             complete = offset == size
@@ -687,15 +869,20 @@ class AdmissionIndex:
                         consumed += charged
                         budget -= charged
                     conn.execute(
-                        "INSERT OR REPLACE INTO source_cursor VALUES (?,?,?,?,?,?,?,?,?)",
+                        "INSERT OR REPLACE INTO source_cursor VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             stream, dev, ino, offset, size, stat.st_mtime_ns if stat else 0,
-                            boundary, generation, int(complete),
+                            boundary, generation, int(complete), ordinal, record_count,
                         ),
                     )
                 finally:
                     if fd is not None:
                         os.close(fd)
+            dependent_refreshes, refresh_pending = self._drain_dependency_refresh(
+                conn, binding_builder,
+            )
+            if refresh_pending:
+                pending_reason = "dependent_refresh_pending"
             closing = {stream: self._source_stat(stream) for stream in STREAMS}
             stable = all(
                 (a is None and b is None) or (
@@ -706,15 +893,18 @@ class AdmissionIndex:
             )
             conn.commit()
             progress = self._progress(conn)
-            complete = stable and set(progress) == set(STREAMS) and all(
+            complete = not refresh_pending and stable and set(progress) == set(STREAMS) and all(
                 value["complete"] for value in progress.values()
             )
+            conn.set_progress_handler(None, 0)
             conn.close()
             return AdmissionIndexResult(
                 complete, "ready" if complete else ("rebuilding" if rebuild else "catching_up"),
                 None, progress, consumed,
                 (pending_reason if stable else "source_snapshot_changed"),
                 records_consumed=records,
+                sqlite_vm_steps=sqlite_vm_steps,
+                dependent_refreshes=dependent_refreshes,
             )
         except (OSError, sqlite3.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             try:
@@ -733,7 +923,11 @@ class AdmissionIndex:
                         self.path.unlink()
                 except OSError:
                     pass
-            return AdmissionIndexResult(False, "invalid", None, {}, consumed, str(exc), records)
+            return AdmissionIndexResult(
+                False, "invalid", None, {}, consumed, str(exc), records,
+                sqlite_vm_steps=sqlite_vm_steps,
+                dependent_refreshes=dependent_refreshes,
+            )
 
     @staticmethod
     def _progress(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -741,6 +935,7 @@ class AdmissionIndex:
             row["stream"]: {
                 "offset": row["offset"], "eof_size": row["eof_size"],
                 "complete": bool(row["complete"]), "generation": row["generation"],
+                "record_count": row["record_count"], "next_ordinal": row["next_ordinal"],
             }
             for row in conn.execute("SELECT * FROM source_cursor ORDER BY stream")
         }
@@ -753,6 +948,11 @@ class AdmissionIndex:
                 conn.close()
                 return None, AdmissionIndexResult(
                     False, "catching_up", None, progress, 0, "admission_index_catching_up",
+                )
+            if conn.execute("SELECT 1 FROM dependency_refresh LIMIT 1").fetchone() is not None:
+                conn.close()
+                return None, AdmissionIndexResult(
+                    False, "catching_up", None, progress, 0, "dependent_refresh_pending",
                 )
             for row in conn.execute("SELECT * FROM source_cursor"):
                 stat = self._source_stat(row["stream"])
@@ -791,12 +991,19 @@ class AdmissionIndex:
             return error
         assert conn is not None
         limit = max(1, int(candidate_limit))
+        sqlite_vm_steps = 0
+        def count_vm_step() -> int:
+            nonlocal sqlite_vm_steps
+            sqlite_vm_steps += 1
+            return 0
+        conn.set_progress_handler(count_vm_step, 1)
         try:
             summary = {row[0]: int(row[1]) for row in conn.execute(
                 "SELECT key,value FROM admission_summary ORDER BY key",
             )}
             rows = conn.execute(
-                "SELECT * FROM candidate_state WHERE suppression_reason IS NULL "
+                "SELECT candidate_id,binding_json,source_decisions_json,attribution_gap_count "
+                "FROM candidate_state WHERE suppression_reason IS NULL "
                 "ORDER BY pressure DESC, created_at, candidate_id LIMIT ?", (limit,),
             ).fetchall()
             projected = [
@@ -809,19 +1016,29 @@ class AdmissionIndex:
                 for row in rows
             ]
             progress = self._progress(conn)
+            conn.set_progress_handler(None, 0)
             conn.close()
             value = {
                 "eligible_count": summary.pop("eligible", 0),
                 "suppressed_counts": summary,
                 "projected": projected,
+                "source_record_counts": {
+                    stream: int(state.get("record_count", 0))
+                    for stream, state in progress.items()
+                },
             }
             return AdmissionIndexResult(
                 True, "ready", None, progress, 0, records_consumed=0,
-                query_rows=len(summary) + len(rows), materialized_rows=len(rows), value=value,
+                query_rows=len(summary) + len(rows), materialized_rows=len(rows),
+                sqlite_vm_steps=sqlite_vm_steps, value=value,
             )
         except (sqlite3.Error, json.JSONDecodeError) as exc:
+            conn.set_progress_handler(None, 0)
             conn.close()
-            return AdmissionIndexResult(False, "invalid", None, {}, 0, str(exc))
+            return AdmissionIndexResult(
+                False, "invalid", None, {}, 0, str(exc),
+                sqlite_vm_steps=sqlite_vm_steps,
+            )
 
     def read_binding(self, candidate_id: str) -> AdmissionIndexResult:
         conn, error = self._ready_connection()
