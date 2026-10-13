@@ -143,6 +143,28 @@ def _legacy_state_latest_info(store: SensoriumStore, state: dict) -> dict:
         "excluded_from_freshness": True,
     }
 
+def _status_record_visible(
+    record: dict, *, candidates: list[dict], threads: list[dict],
+    surface: str, instance_config: dict,
+) -> bool:
+    """Gate linked status prose against current subjects, not stale snapshots.
+
+    Unlinked operational diagnostics remain global. A linked subject must still
+    exist and be allowed; its status need not be active for a historical receipt.
+    """
+    from .config import visible_on_surface
+
+    for key, rows in (("candidate_id", candidates), ("origin_candidate_id", candidates),
+                      ("thread_id", threads)):
+        subject_id = record.get(key)
+        if not subject_id:
+            continue
+        subject = next((row for row in rows if row.get("id") == subject_id), None)
+        if subject is None or not visible_on_surface(subject, surface, instance_config):
+            return False
+    return True
+
+
 def handle_sensorium_status(
     *, instance: str = "default", state_dir: str | None = None,
     config_path: str | None = None,
@@ -155,12 +177,11 @@ def handle_sensorium_status(
     the response includes an ``exact_subject`` block naming that specific
     thread or candidate, rather than forcing the caller to guess which row
     of the rotating top-N corresponds to the pointer the agent just saw.
-    ``surface`` is honored for the exact-subject branch so a local-only
-    candidate is reported as not_found when requested from discord. When
-    ``reference_id`` is omitted, the legacy top-N shape is preserved
-    byte-for-byte for backwards compatibility.
+    ``surface`` (default local) gates top lists, exact subjects and linked
+    historical prose using current visibility. Filtering precedes top-N caps;
+    list shapes and ranking remain compatible. Coarse counts stay global.
     """
-    from .config import load_instance_config
+    from .config import load_instance_config, visible_on_surface
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
@@ -176,10 +197,14 @@ def handle_sensorium_status(
     artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
+    status_surface = surface or "local"
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
-    active_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
+    visible_candidates = [c for c in active_candidates
+                          if visible_on_surface(c, status_surface, instance_config)]
+    visible_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
 
-    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
+    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")
+                       and visible_on_surface(t, status_surface, instance_config)]
     visible_threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
     active_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
@@ -233,7 +258,7 @@ def handle_sensorium_status(
                 "pressure": c.get("pressure"),
                 "summary": truncate_text(c.get("summary", ""), 120),
             }
-            for c in active_candidates[:5]
+            for c in visible_candidates[:5]
         ],
         "top_threads": [
             {
@@ -250,7 +275,7 @@ def handle_sensorium_status(
         "legacy_state_latest": _legacy_state_latest_info(store, state),
         "volunteer_cards": build_volunteer_cards(
             store,
-            surface=surface or "local",
+            surface=status_surface,
             instance_config=instance_config,
             config_path=config_path,
             limit=3,
@@ -259,7 +284,10 @@ def handle_sensorium_status(
     }
 
     decisions = store.read_jsonl("decisions")
-    if decisions:
+    if decisions and _status_record_visible(
+        decisions[-1], candidates=candidates, threads=threads,
+        surface=status_surface, instance_config=instance_config,
+    ):
         latest = decisions[-1]
         data["latest_decision"] = {
             "ts": latest.get("ts"),
@@ -273,7 +301,10 @@ def handle_sensorium_status(
     if state:
         if "state_version" in state:
             data["state_version"] = state.get("state_version")
-        if "last_dispatch_result" in state:
+        if "last_dispatch_result" in state and _status_record_visible(
+            state.get("last_dispatch_result") or {}, candidates=candidates, threads=threads,
+            surface=status_surface, instance_config=instance_config,
+        ):
             legacy_result = dict(state.get("last_dispatch_result") or {})
             raw_legacy_action = legacy_result.get("action")
             if raw_legacy_action in {"would_promote", "promoted"}:
@@ -294,10 +325,9 @@ def handle_sensorium_status(
     # visibility. This lets the conscious layer recover "the subject the
     # prior pointer presented" without guessing across a rotating top-N.
     if reference_id:
-        exact_surface = surface or "local"
         data["exact_subject"] = _resolve_exact_subject(
             reference_id=reference_id,
-            surface=exact_surface,
+            surface=status_surface,
             threads=threads,
             candidates=candidates,
             instance_config=instance_config,
