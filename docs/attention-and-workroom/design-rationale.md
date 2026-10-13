@@ -4,7 +4,7 @@ The [architecture](architecture.md) separates implemented attention changes from
 
 ## Equality comes from the producer
 
-Correlation is a thematic relationship, not equality. Complete source-owned item/revision joins prevent a paraphrase, changed wrapper or fresh timestamp from reawakening the same material. Conflicting and partial joins refuse equality; missing revision stays unversioned. New material can coalesce within the same item without merging unrelated items. Exact replay must not decay pressure, append domain records or emit prospective observations.
+Correlation is a thematic relationship, not equality. Complete source-owned item/revision joins prevent a paraphrase, changed wrapper or fresh timestamp from reawakening the same material. Conflicting and partial joins refuse equality; missing revision stays unversioned. New material can coalesce within the same item without merging unrelated items. Exact replay with equivalent effective visibility must not decay pressure, append domain records or emit prospective observations. Stricter replay visibility narrows future disclosure without replaying those effects; wider metadata cannot undo a restriction.
 
 Multiple complete records per bounded index pass improve progress without replacing cursor/fingerprint/lock authority. A partial tail waits for completion. Neither newest-N snapshots nor time expiry preserve old unresolved material.
 

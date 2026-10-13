@@ -19,8 +19,8 @@ DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
-# Identity grammar and raw/projection trust changed; rebuild disposable state.
-SCHEMA_VERSION = 4
+# Per-event revision joins and disposition attribution changed; rebuild state.
+SCHEMA_VERSION = 5
 MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
@@ -495,27 +495,6 @@ class AdmissionIndex:
                 "SELECT 1 FROM disposition_evidence WHERE applied=1 AND admission_key=? LIMIT 1",
                 (binding.get("admission_key"),),
             ).fetchone()
-            if exact is None:
-                # Base-era accounting is attributable only to the unchanged
-                # source representation; fresh r2 cannot inherit settled r1.
-                from .admission import _legacy_research_admission_key
-
-                source = conn.execute(
-                    "SELECT prompt_projection_json FROM candidate_projection "
-                    "WHERE candidate_id=? AND generation=?",
-                    (binding.get("source_candidate_id"), self._current_generation(conn, "candidates")),
-                ).fetchone()
-                legacy_key = None if source is None else _legacy_research_admission_key(
-                    self.store, binding, self._joined_snapshot(conn, json.loads(source[0])),
-                )
-                if legacy_key is not None:
-                    exact = conn.execute(
-                        "SELECT 1 FROM disposition_evidence WHERE applied=1 AND item_key=? "
-                        "AND admission_key=? AND source_candidate_id=? "
-                        "AND source_candidate_fingerprint=? LIMIT 1",
-                        (binding.get("item_key"), legacy_key, binding.get("source_candidate_id"),
-                         binding.get("source_candidate_fingerprint")),
-                    ).fetchone()
             terminal = conn.execute(
                 "SELECT 1 FROM disposition_evidence WHERE terminal_item_closure=1 "
                 "AND item_key=? LIMIT 1", (binding.get("item_key"),),
@@ -612,6 +591,10 @@ class AdmissionIndex:
                 "SELECT projection_json FROM signal_claim WHERE signal_id=? AND generation=?",
                 (signal_id, generation),
             ).fetchone()
+            if previous is not None:
+                # A duplicate canonical ID is ambiguous, not last-writer proof.
+                projection["_admission_claim"] = None
+                projection["_admission_error"] = "ambiguous_signal_id"
             conn.execute(
                 "INSERT OR REPLACE INTO signal_claim VALUES (?,?,?,?)",
                 (signal_id, generation, ordinal, _json(projection)),
@@ -903,9 +886,13 @@ class AdmissionIndex:
                                 records += 1
                             offset += len(parsed)
                             complete = offset == size
-                    boundary = hashlib.sha256(b"").hexdigest()
+                    boundary_unchanged = not reset and offset == cursor["offset"]
+                    boundary = (
+                        cursor["boundary_sha256"] if boundary_unchanged
+                        else hashlib.sha256(b"").hexdigest()
+                    )
                     charge = min(offset, BOUNDARY_BYTES)
-                    if fd is not None and budget >= charge:
+                    if not boundary_unchanged and fd is not None and budget >= charge:
                         boundary, charged = self._boundary(fd, offset)
                         consumed += charged
                         budget -= charged

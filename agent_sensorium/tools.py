@@ -494,6 +494,69 @@ def _promoted_signal_existing_result(signal: dict, events: list[dict], candidate
     return result
 
 
+@_candidate_transactional
+def _narrow_replay_visibility(
+    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(),
+) -> None:
+    """Restrict retained lineage for future disclosure, never replay its effects.
+
+    Delivered history is not revoked. Equal/wider metadata produces no writes;
+    the existing sensitivity/surface merge owners only permit narrowing.
+    """
+    signals = store.read_jsonl("signals")
+    events = store.read_jsonl("events")
+    candidates = store.read_jsonl("candidates")
+    signal_ids, event_ids = set(signal_ids), set(event_ids)
+
+    def narrow(row):
+        sensitivity = merge_sensitivity([
+            row.get("sensitivity", "private"), incoming.get("sensitivity", "private"),
+        ])
+        surfaces = intersect_allowed_surfaces([
+            row.get("allowed_surfaces") or [], incoming.get("allowed_surfaces") or [],
+        ])
+        if sensitivity == "local_only":
+            surfaces = [surface for surface in surfaces if surface == "local"]
+        if sensitivity == row.get("sensitivity") and surfaces == sorted(row.get("allowed_surfaces") or []):
+            return False
+        row["sensitivity"], row["allowed_surfaces"] = sensitivity, surfaces
+        return True
+
+    changed_signals = False
+    for row in signals:
+        if row.get("id") in signal_ids:
+            changed_signals = narrow(row) or changed_signals
+    changed_events = False
+    for row in events:
+        if row.get("id") in event_ids or signal_ids.intersection(row.get("source_signal_ids") or []):
+            event_ids.add(row.get("id"))
+            changed_events = narrow(row) or changed_events
+    affected = {row.get("id") for row in candidates if event_ids.intersection(row.get("event_ids") or [])}
+    # Advisory descendants can retain source IDs without retaining event IDs.
+    while True:
+        descendants = {row.get("id") for row in candidates
+                       if affected.intersection(row.get("source_candidate_ids") or [])}
+        if descendants.issubset(affected):
+            break
+        affected.update(descendants)
+    changed_candidates = False
+    for row in candidates:
+        if row.get("id") in affected:
+            changed_candidates = narrow(row) or changed_candidates
+    threads = store.read_jsonl("threads")
+    changed_threads = False
+    for row in threads:
+        if row.get("origin_candidate_id") in affected:
+            changed_threads = narrow(row) or changed_threads
+    # Hide reachable disclosures before changing the upstream retained record.
+    for name, rows, changed in [
+        ("threads", threads, changed_threads), ("candidates", candidates, changed_candidates),
+        ("events", events, changed_events), ("signals", signals, changed_signals),
+    ]:
+        if changed:
+            _rewrite_jsonl(store, name, rows)
+
+
 def _coalesce_candidate_with_event(
     store: SensoriumStore,
     *,
@@ -554,16 +617,21 @@ def _append_event_and_create_or_update_candidate(
     candidates = store.read_jsonl("candidates")
 
     existing_event = _find_existing_event(events, event)
-    if existing_event:
-        return _event_to_existing_result(existing_event, candidates)
-
     from .admission import event_source_item_identity
 
-    incoming_identity = event_source_item_identity(store, event, signals=signals)
-    if incoming_identity is not None:
-        for prior_event in events:
-            if event_source_item_identity(store, prior_event, signals=signals) == incoming_identity:
-                return _event_to_existing_result(prior_event, candidates)
+    if existing_event is None:
+        incoming_identity = event_source_item_identity(store, event, signals=signals)
+        if incoming_identity is not None:
+            existing_event = next((row for row in events
+                                   if event_source_item_identity(store, row, signals=signals) == incoming_identity), None)
+    if existing_event:
+        retained_identity = event_source_item_identity(store, existing_event, signals=signals)
+        replay_ids = [existing_event["id"]]
+        if retained_identity is not None:
+            replay_ids = [row["id"] for row in events
+                          if event_source_item_identity(store, row, signals=signals) == retained_identity]
+        _narrow_replay_visibility(store, event, event_ids=replay_ids)
+        return _event_to_existing_result(existing_event, candidates)
 
     _apply_candidate_decay(store, candidates, config=config)
     store.append_jsonl("events", event)
@@ -773,6 +841,14 @@ def handle_sensorium_ingest_signal(
                 None,
             )
     if existing_signal:
+        from .admission import signal_source_item_identity
+
+        retained_identity = signal_source_item_identity(instance, existing_signal)
+        replay_ids = [existing_signal["id"]]
+        if retained_identity is not None:
+            replay_ids = [row["id"] for row in signals
+                          if signal_source_item_identity(instance, row) == retained_identity]
+        _narrow_replay_visibility(store, normalized, signal_ids=replay_ids)
         events = store.read_jsonl("events")
         candidates = store.read_jsonl("candidates")
         return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))

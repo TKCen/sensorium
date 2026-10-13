@@ -100,7 +100,7 @@ def test_raw_event_and_snapshot_identity_ignore_reserved_fields(tmp_path, produc
         assert indexed_error is None and indexed == binding
 
 @pytest.mark.parametrize("variant", ["r1", "missing", "malformed", "conflicting", "alias", "sha256", "matching_all"])
-@pytest.mark.parametrize("old_generation", [0, 3])
+@pytest.mark.parametrize("old_generation", [0, 3, 4])
 def test_public_base_schema3_cache_rebuild_matches_canonical(tmp_path, monkeypatch, variant, old_generation):
     store = store_at(tmp_path)
     created = ingest(store, signal())
@@ -172,10 +172,17 @@ def test_settled_base_unversioned_stays_settled_but_r2_is_fresh(tmp_path, monkey
         assert admission.build_admission_plan(store)["selection"] is None
     before = canonical(store)
     assert store.prepare_admission_index().complete
-    assert admission.build_admission_plan(store)["selection"] is None
+    if revision is None:
+        assert admission.build_admission_plan(store)["selection"] is None
+    else:
+        # Schema-3 recorded an unversioned key, not historical r1 proof.
+        assert admission.build_admission_plan(store)["selection"]["revision_key"] != old["revision_key"]
     assert canonical(store) == before
     AdmissionIndex(store).path.unlink()
-    assert admission.build_admission_plan(store)["selection"] is None
+    if revision is None:
+        assert admission.build_admission_plan(store)["selection"] is None
+    else:
+        assert admission.build_admission_plan(store)["selection"]["revision_key"] != old["revision_key"]
     assert ingest(store, signal("same-revision", revision))["duplicate"]
     assert canonical(store) == before
     updated = ingest(store, signal("fresh-r2", "r2"))

@@ -150,11 +150,6 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
             "revision_key": _opaque("revision", revision_values_for_key),
             "identity_mode": "source",
             "evidence_class": "source_owned",
-            # Disposable attribution only; base grammar ignored revision aliases.
-            "_pre_material_admission_key": _opaque("admission", [
-                _opaque("item", item_values),
-                _opaque("revision", [*item_values, "unversioned"]),
-            ]),
         }, None
 
     transition_fields = any(
@@ -199,22 +194,10 @@ def _snapshot_claim(instance: str, signal: dict, snap: dict) -> tuple[dict | Non
     return _claim_for_signal(instance, signal)
 
 
-def _legacy_research_admission_key(store, binding: dict, snap: dict) -> str | None:
-    """Attribute old unversioned disposition only to unchanged source lineage."""
-    keys = []
-    for signal in snap["signals"]:
-        claim, error = _snapshot_claim(store.instance, signal, snap)
-        if not error and claim and claim.get("item_key") == binding.get("item_key"):
-            keys.append(claim.get("_pre_material_admission_key"))
-    return keys[-1] if keys and isinstance(keys[-1], str) else None
-
-
-def _same_disposition(prior: dict, binding: dict, legacy_key: str | None) -> bool:
-    return prior.get("admission_key") == binding["admission_key"] or (
-        legacy_key is not None and prior.get("admission_key") == legacy_key
-        and prior.get("source_candidate_id") == binding["source_candidate_id"]
-        and prior.get("source_candidate_fingerprint") == binding["source_candidate_fingerprint"]
-    )
+def _same_disposition(prior: dict, binding: dict) -> bool:
+    # Representation/retained IDs cannot prove an old joined producer revision.
+    # Genuine unversioned settlements still match their exact admission key.
+    return prior.get("admission_key") == binding["admission_key"]
 
 
 def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
@@ -231,18 +214,42 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
         row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
     }
     joined_signal_ids: set[str] = set()
+    seen_signal_ids: set[str] = set()
+    duplicate_signal_ids: set[str] = set()
+    for row in snap["signals"]:
+        identifier = row.get("id") if isinstance(row, dict) else None
+        if isinstance(identifier, str):
+            if identifier in seen_signal_ids:
+                duplicate_signal_ids.add(identifier)
+            seen_signal_ids.add(identifier)
     dangling = False
     for event_id in candidate.get("event_ids") or []:
         event = event_index.get(event_id)
         if not isinstance(event, dict):
             dangling = True
             continue
-        for signal_id in event.get("source_signal_ids") or []:
+        signal_ids = event.get("source_signal_ids") or []
+        if not isinstance(signal_ids, list) or not signal_ids:
+            dangling = True
+            continue
+        event_claims = set()
+        for signal_id in signal_ids:
+            if not isinstance(signal_id, str) or signal_id in duplicate_signal_ids:
+                dangling = True
+                continue
             signal = signal_index.get(signal_id)
             if not isinstance(signal, dict):
                 dangling = True
                 continue
             joined_signal_ids.add(signal_id)
+            parsed, error = _snapshot_claim(store.instance, signal, snap)
+            if error:
+                return None, error
+            if parsed is not None:
+                event_claims.add((parsed["item_key"], parsed["revision_key"],
+                                  tuple(parsed.get("member_keys") or [])))
+        if len(event_claims) > 1:
+            dangling = True
 
     # Candidate/Event references are membership only. Select and validate joined
     # signals in the canonical retained receipt order supplied by read_jsonl.
@@ -506,14 +513,13 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
     relevant: list[dict] = []
     decided = False
     reason = None
-    legacy_key = _legacy_research_admission_key(store, binding, snap)
     for row in snap["decisions"]:
         prior = row.get("admission_binding")
         if not isinstance(prior, dict) or prior.get("item_key") != binding["item_key"]:
             continue
         relevant.append(_decision_projection(row))
         if (
-            _same_disposition(prior, binding, legacy_key)
+            _same_disposition(prior, binding)
             and _is_successful_applying_disposition(row)
         ):
             decided, reason = True, "prior_disposition"
@@ -530,7 +536,7 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
                 "status": row.get("status"),
                 "admission_key": prior.get("admission_key"),
             })
-            if _same_disposition(prior, binding, legacy_key):
+            if _same_disposition(prior, binding):
                 decided, reason = True, "prior_disposition"
             elif row.get("status") in _TERMINAL_STATUSES:
                 decided, reason = True, "explicit_item_closure"

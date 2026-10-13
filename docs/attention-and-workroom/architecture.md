@@ -31,7 +31,7 @@ A workroom adds no retention, delivery, terminal, general filesystem, delegation
 
 ## Implemented attention changes
 
-**Producer material identity.** Research/artifact admission uses source-owned item and material revision, not thematic correlation, wrapper prose or observation time. All referenced signals must join uniquely to the same item/revision. Conflicting revision aliases, mixed identities or incomplete joins cannot establish equality. A missing revision remains unversioned. Exact replay adds no domain records, decay, prospective observation or urgency; a changed revision of the same item can coalesce.
+**Producer material identity.** Research/artifact admission uses source-owned item and material revision, not thematic correlation, wrapper prose or observation time. Each event's referenced signals must join uniquely to the same item/revision; distinct events can retain successive revisions. Conflicting revision aliases, mixed identities or incomplete joins cannot establish equality. A missing revision remains unversioned. Exact replay with equivalent effective visibility adds no domain records, decay, prospective observation or urgency. Stricter replay metadata narrows retained signal/event/candidate visibility and reachable advisory descendants/threads for future disclosure; wider replay metadata cannot restore restrictions. Local-only replay excludes nonlocal surfaces. Already-delivered history is not undone. A changed revision of the same item can coalesce.
 
 Synthetic producer fragment (not a live-tool payload):
 
@@ -50,7 +50,7 @@ Changing only wrapper text does not create new material. A genuine `revision-b` 
 
 **Index progress.** The scanner advances through multiple complete JSONL records within the aggregate source-byte budget, stopping at an incomplete tail and retaining cursor/fingerprint/lock ownership. It retains record-size, SQLite timeout and dependent-refresh bounds. Measured VM steps are not a new hard execution ceiling; output limits are not permission to delete old unresolved material.
 
-**Disposable cache compatibility.** Code and persistent SQL schema use cache generation 4. Earlier ready caches cannot certify the new producer identity grammar and are rebuilt from canonical JSONL records. Rebuild preserves settled legacy/unversioned material and canonical history/accounting; a genuinely changed revision remains fresh. Cache readiness is not proof that its derived semantics are current.
+**Disposable cache compatibility.** Code and persistent SQL schema use cache generation 5. Earlier ready caches cannot certify per-event revision joins or disposition attribution and are rebuilt from canonical JSONL records. Rebuild preserves genuine unversioned settlement and canonical history/accounting. An old unversioned disposition does not prove settlement of an explicit revision, even with unchanged retained IDs/representation; see [migration](migration.md). Cache readiness is not proof that its derived semantics are current.
 
 **Optional latent context.** A direct read-only call can request held/dormant metadata:
 
