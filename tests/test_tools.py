@@ -252,6 +252,7 @@ class TestSensoriumIngestEvent:
     def test_related_event_updates_existing_candidate(self, state_dir):
         first_event = {
             "id": "evt_rel_1",
+            "source_signal_ids": ["sig-fictional-event-r1"],
             "ts": "2026-05-25T00:00:00Z",
             "type": "sensor.event.promoted",
             "kind": "task_result",
@@ -263,6 +264,7 @@ class TestSensoriumIngestEvent:
         }
         second_event = {
             "id": "evt_rel_2",
+            "source_signal_ids": ["sig-fictional-event-r2"],
             "ts": "2026-05-25T00:05:00Z",
             "type": "sensor.event.promoted",
             "kind": "task_result",
@@ -272,6 +274,16 @@ class TestSensoriumIngestEvent:
             "sensitivity": "private",
             "allowed_surfaces": ["local"],
         }
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        for revision in ("r1", "r2"):
+            store.append_jsonl("signals", {
+                "id": f"sig-fictional-event-{revision}",
+                "sensor": "fictional.glasshouse", "source": "artifact",
+                "kind": "task_result", "source_revision": revision,
+                "summary": f"Fictional glass-orchid material {revision}",
+                "artifact_meta": {"source_id": "fictional-catalog", "item_id": "glass-orchid-01"},
+            })
 
         first = json.loads(handle_sensorium_ingest_event(event=first_event, instance="test", state_dir=state_dir))
         second = json.loads(handle_sensorium_ingest_event(event=second_event, instance="test", state_dir=state_dir))

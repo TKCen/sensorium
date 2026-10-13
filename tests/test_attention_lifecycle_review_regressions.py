@@ -100,6 +100,8 @@ def _concurrent_candidate_writer_process(state_dir, mode, started, done, result_
                 "sensitivity": "private",
                 "allowed_surfaces": ["local"],
             }
+            if mode == "coalesce":
+                event["source_signal_ids"] = ["sig-fictional-concurrency-r2"]
             result = json.loads(handle_sensorium_ingest_event(
                 event=event,
                 instance="test",
@@ -890,6 +892,23 @@ def test_candidate_mutations_serialize_across_processes(writer_mode, tmp_path):
             "allowed_surfaces": ["local"],
             "created_at": "2026-06-07T10:00:00Z",
             "updated_at": "2026-06-07T10:00:00Z",
+        })
+    if writer_mode == "coalesce":
+        for revision in ("r1", "r2"):
+            store.append_jsonl("signals", {
+                "id": f"sig-fictional-concurrency-{revision}",
+                "sensor": "fictional.glasshouse", "source": "artifact",
+                "kind": "task_result", "source_revision": revision,
+                "summary": f"Fictional glass-orchid material {revision}",
+                "artifact_meta": {"source_id": "fictional-catalog", "item_id": "glass-orchid-lock"},
+            })
+        store.append_jsonl("events", {
+            "id": "evt-original", "ts": "2026-06-07T10:00:00Z",
+            "type": "sensor.event.promoted", "kind": "task_result",
+            "summary": "Fictional glass-orchid material r1", "strength": 0.6,
+            "source_signal_ids": ["sig-fictional-concurrency-r1"],
+            "correlation_keys": ["coalesce-target"],
+            "sensitivity": "private", "allowed_surfaces": ["local"],
         })
     store.rewrite_jsonl("candidates", rows)
 

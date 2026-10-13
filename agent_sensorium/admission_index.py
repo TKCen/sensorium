@@ -19,7 +19,8 @@ DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
-SCHEMA_VERSION = 3
+# Identity grammar and raw/projection trust changed; rebuild disposable state.
+SCHEMA_VERSION = 4
 MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
@@ -38,6 +39,10 @@ class AdmissionIndexResult:
     sqlite_vm_steps: int = 0
     dependent_refreshes: int = 0
     value: object | None = None
+
+
+class _AdmissionSnapshot(dict):
+    """Internal projection boundary; JSON producer payloads cannot preserve it."""
 
 
 def _json(value: object) -> str:
@@ -174,13 +179,7 @@ class AdmissionIndex:
     @staticmethod
     def _schema(conn: sqlite3.Connection) -> None:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        cursor_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_cursor'"
-        ).fetchone() is not None
-        legacy_zero = version == 0 and cursor_exists and "next_ordinal" not in {
-            row[1] for row in conn.execute("PRAGMA table_info(source_cursor)")
-        }
-        if version not in {0, SCHEMA_VERSION} or legacy_zero:
+        if version != SCHEMA_VERSION:
             # The index is disposable. Rebuild instead of running an unbounded
             # data migration over stale derived state.
             conn.executescript("""
@@ -282,8 +281,8 @@ class AdmissionIndex:
         CREATE TABLE IF NOT EXISTS admission_summary (
           key TEXT PRIMARY KEY, value INTEGER NOT NULL
         );
-        PRAGMA user_version=3;
         """)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def _source_stat(self, stream: str) -> os.stat_result | None:
         try:
@@ -376,7 +375,7 @@ class AdmissionIndex:
             (event_generation, signal_generation, candidate_id),
         ).fetchall()
         signals = [json.loads(row[0]) for row in sorted(signal_rows, key=lambda item: item[1])]
-        return {"signals": signals, "events": events, "candidates": [candidate], "decisions": []}
+        return _AdmissionSnapshot(signals=signals, events=events, candidates=[candidate], decisions=[])
 
     @staticmethod
     def _is_applying_decision(projection: dict) -> bool:
@@ -496,6 +495,27 @@ class AdmissionIndex:
                 "SELECT 1 FROM disposition_evidence WHERE applied=1 AND admission_key=? LIMIT 1",
                 (binding.get("admission_key"),),
             ).fetchone()
+            if exact is None:
+                # Base-era accounting is attributable only to the unchanged
+                # source representation; fresh r2 cannot inherit settled r1.
+                from .admission import _legacy_research_admission_key
+
+                source = conn.execute(
+                    "SELECT prompt_projection_json FROM candidate_projection "
+                    "WHERE candidate_id=? AND generation=?",
+                    (binding.get("source_candidate_id"), self._current_generation(conn, "candidates")),
+                ).fetchone()
+                legacy_key = None if source is None else _legacy_research_admission_key(
+                    self.store, binding, self._joined_snapshot(conn, json.loads(source[0])),
+                )
+                if legacy_key is not None:
+                    exact = conn.execute(
+                        "SELECT 1 FROM disposition_evidence WHERE applied=1 AND item_key=? "
+                        "AND admission_key=? AND source_candidate_id=? "
+                        "AND source_candidate_fingerprint=? LIMIT 1",
+                        (binding.get("item_key"), legacy_key, binding.get("source_candidate_id"),
+                         binding.get("source_candidate_fingerprint")),
+                    ).fetchone()
             terminal = conn.execute(
                 "SELECT 1 FROM disposition_evidence WHERE terminal_item_closure=1 "
                 "AND item_key=? LIMIT 1", (binding.get("item_key"),),
@@ -825,6 +845,9 @@ class AdmissionIndex:
                         elif size == cursor["offset"] and stat and stat.st_mtime_ns != cursor["mtime_ns"]:
                             reset = True
                         elif fd is not None:
+                            if budget < min(int(cursor["offset"]), BOUNDARY_BYTES):
+                                pending_reason = "boundary_validation_budget_exhausted"
+                                break
                             boundary, charged = self._boundary(fd, int(cursor["offset"]))
                             consumed += charged
                             budget -= charged
@@ -841,7 +864,7 @@ class AdmissionIndex:
                         ordinal = int(cursor["next_ordinal"])
                         record_count = int(cursor["record_count"])
                     complete = offset == size
-                    if not complete and budget > BOUNDARY_BYTES and fd is not None:
+                    while not complete and budget > BOUNDARY_BYTES and fd is not None:
                         available = size - offset
                         request = min(available, budget - BOUNDARY_BYTES, MAX_RECORD_BYTES + 1)
                         chunk = os.pread(fd, request, offset)
@@ -849,19 +872,25 @@ class AdmissionIndex:
                         budget -= len(chunk)
                         final_newline = chunk.rfind(b"\n")
                         if final_newline < 0:
-                            if available > MAX_RECORD_BYTES:
+                            if len(chunk) > MAX_RECORD_BYTES:
                                 raise ValueError(f"{stream}:record_too_large")
                             if len(chunk) == available:
-                                raise ValueError(f"{stream}:incomplete_record")
+                                if reset and cursor is not None:
+                                    raise ValueError(f"{stream}:incomplete_record")
+                                pending_reason = f"{stream}:incomplete_record"
+                                break
                             # The remaining aggregate budget may have been spent
                             # on earlier streams. Keep the complete-record cursor
                             # unchanged so the next pass can resume safely.
                             pending_reason = f"{stream}:record_waiting_for_larger_remaining_budget"
+                            break
                         else:
                             parsed = chunk[:final_newline + 1]
                             for raw in parsed.splitlines():
                                 if not raw.strip():
                                     continue
+                                if len(raw) > MAX_RECORD_BYTES:
+                                    raise ValueError(f"{stream}:record_too_large")
                                 value = json.loads(raw)
                                 if not isinstance(value, dict):
                                     raise ValueError(f"{stream}:non_object_record")
@@ -905,7 +934,7 @@ class AdmissionIndex:
             )
             conn.commit()
             progress = self._progress(conn)
-            complete = not refresh_pending and stable and set(progress) == set(STREAMS) and all(
+            complete = pending_reason is None and not refresh_pending and stable and set(progress) == set(STREAMS) and all(
                 value["complete"] for value in progress.values()
             )
             conn.set_progress_handler(None, 0)
@@ -955,6 +984,11 @@ class AdmissionIndex:
     def _ready_connection(self) -> tuple[sqlite3.Connection | None, AdmissionIndexResult | None]:
         try:
             conn = self._connect(create=False, readonly=True)
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                conn.close()
+                return None, AdmissionIndexResult(
+                    False, "rebuilding", None, {}, 0, "admission_claim_generation_changed",
+                )
             progress = self._progress(conn)
             if set(progress) != set(STREAMS) or not all(v["complete"] for v in progress.values()):
                 conn.close()
@@ -1143,7 +1177,7 @@ def bounded_cacheless_snapshot(
     """Read a small exact snapshot without creating cache state."""
     remaining = max(1, int(scan_bytes))
     consumed = records = 0
-    snapshot: dict[str, list[dict]] = {stream: [] for stream in STREAMS}
+    snapshot: dict[str, list[dict]] = _AdmissionSnapshot({stream: [] for stream in STREAMS})
     opening = {}
     try:
         for stream in STREAMS:

@@ -456,15 +456,31 @@ class TestFeedbackCoalescePath:
 
     def test_feedback_meta_set_on_coalesced_candidate(self, state_dir):
         normal_sig = {
-            "sensor": "test",
-            "source": "manual",
+            "sensor": "feedback_loop",
+            "source_revision": "r1",
+            "artifact_meta": {"source_id": "fictional-feedback-feed", "item_id": "glass-orchid-01"},
+            "source": "feedback",
             "kind": "task_result",
             "summary": "Original observation",
             "strength_hint": 0.9,
             "correlation_keys": ["project-alpha"],
         }
-        handle_sensorium_ingest_signal(
-            signal=normal_sig, instance="test", state_dir=state_dir
+        # Retain a source-owned r1 event without feedback metadata; r2 arrives
+        # through the feedback producer and supplies the causal metadata.
+        from agent_sensorium.tools import handle_sensorium_ingest_event
+        normal_sig["id"] = "sig-fictional-feedback-r1"
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        store.append_jsonl("signals", normal_sig)
+        handle_sensorium_ingest_event(
+            event={
+                "id": "evt-fictional-feedback-r1", "ts": "2001-02-03T10:00:00Z",
+                "type": "sensor.event.promoted", "kind": "task_result",
+                "summary": normal_sig["summary"], "strength": 0.9,
+                "source_signal_ids": [normal_sig["id"]],
+                "correlation_keys": normal_sig["correlation_keys"],
+                "sensitivity": "private", "allowed_surfaces": ["local"],
+            },
+            instance="test", state_dir=state_dir,
         )
         store = SensoriumStore(instance="test", state_dir=state_dir)
         candidates_before = store.read_jsonl("candidates")
@@ -472,8 +488,10 @@ class TestFeedbackCoalescePath:
         assert "feedback_meta" not in candidates_before[0]
 
         feedback_sig = _feedback_signal(
+            source_revision="r2",
+            artifact_meta={"source_id": "fictional-feedback-feed", "item_id": "glass-orchid-01"},
             kind="task_result",
-            summary="Feedback on same topic",
+            summary="Feedback on fictional glass-orchid revision r2",
             strength_hint=0.9,
             correlation_keys=["project-alpha"],
             caused_by={"thread_id": "sth_abc123"},

@@ -4,7 +4,9 @@ An environment-reactive attention substrate for Hermes agents. Agent Sensorium c
 
 **Authority boundary.** Agent Sensorium is an attention substrate, not an outbound automation switch. It does not send messages, create tasks, or reach out on any platform without explicit operator configuration and a conscious-tier receipt from the agent. Sensitivity tuning, surface gating, and action policies are recorded in operator-controlled configuration files so the runtime boundary stays auditable.
 
-**Repair posture (host-agent note).** Sensorium is local code, but a host agent repairing its own attention substrate from the foreground is a self-referential hazard: the very attention it is using to fix the substrate gets re-shaped mid-repair. Host agents and their leads must apply the delegate-vs-foreground gate from `lead-orchestrator-posture` before patching anything in this repo, the installed `~/.hermes/plugins/agent-sensorium/` tree, or the gateway/cron that drives it. The bundled `agent-sensorium` skill has the *Repair posture* section. Inline repair is reserved for ≤3 tool-call reversible judgment/synthesis slices.
+**Development and repair.** Work in an isolated checkout, preserve installed runtime and state, and validate a frozen snapshot before any separately authorized installation. Keep diagnosis, source edits and live adoption separate. For substantial repairs, use a bounded worker or worktree with explicit file ownership and independent review; no particular agent framework is required. See the [bundled skill](skills/agent-sensorium/SKILL.md#development-and-repair) and [developer instructions](AGENTS.md).
+
+**Implementation status.** Producer-owned material replay/coalescing, multi-record bounded index progress and optional read-only held/dormant metadata are implemented with synthetic regression coverage and independent source review. Native sessions, finite workrooms, persistent accounting and choice transport are **proposed**, not installed features. Gateway compatibility and Wiki security remain held. Exact-source test and package/privacy receipts, host integration, installation and publication are separate gates; this documentation is not a release or deployment receipt. See [architecture](docs/attention-and-workroom/architecture.md), [rationale](docs/attention-and-workroom/design-rationale.md), [migration](docs/attention-and-workroom/migration.md) and [complete change scope](docs/attention-and-workroom/change-scope.md).
 
 ---
 
@@ -46,7 +48,7 @@ Core pieces:
 
 - **Plugin registration (`agent_sensorium/plugin.py`)** — registers one live tool, the admin toolset, two `pre_llm_call` hooks, and the bundled skill.
 - **Profile state (`agent_sensorium/store.py`, `config.py`)** — stores signals, events, candidates, threads, decisions, artifacts, and per-profile config under `~/.hermes/agent-sensorium/<profile>/`.
-- **Gate and promotion pipeline (`gate.py`, `attention.py`, `threads.py`)** — normalizes salience, applies sensitivity/surface policy, and builds candidate/thread state.
+- **Gate and promotion pipeline (`gate.py`, `attention.py`, `tools.py`)** — normalizes salience, applies sensitivity/surface policy, and builds candidate/thread state.
 - **Memory Volunteering Protocol (`docs/memory-volunteering-protocol.md`)** — formalizes the evidence-cited capsule → transparent confidence proposal → Conscious authorization sequence for any Subconscious/Sensorium path that wants to volunteer memory, insight, or offer candidates.
 - **Pre-LLM hooks (`pointers.py`, `pre_llm_salience.py`)** — inject compact reminders/pointers before model calls without mutating state.
 - **Deterministic tick scripts (`scripts/sensorium_tick.py`)** — run heartbeat/pressure sensors, compaction, and thread service from cron or manual smoke tests.

@@ -40,13 +40,7 @@ def source_candidate_fingerprint(candidate: dict) -> str:
 
 
 def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | None]:
-    if "_admission_claim" in signal or "_admission_error" in signal:
-        claim = signal.get("_admission_claim")
-        error = signal.get("_admission_error")
-        return (
-            claim if isinstance(claim, dict) else None,
-            error if isinstance(error, str) else None,
-        )
+    """Parse canonical producer fields only, never serialized projection keys."""
     sensor, sensor_ok = _component(signal.get("sensor"))
     source, source_ok = _component(signal.get("source"))
     if not sensor_ok or not source_ok:
@@ -95,12 +89,23 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
         return None, "malformed_artifact_meta"
     meta = meta if isinstance(meta, dict) else {}
 
-    if "entry_id" in meta or "sha256" in meta:
+    has_research_identity = "source_id" in meta or "item_id" in meta
+    if "entry_id" in meta and has_research_identity:
+        return None, "ambiguous_source_identity"
+
+    if "entry_id" in meta or ("sha256" in meta and not has_research_identity):
         entry_id, entry_ok = _component(meta.get("entry_id"))
         revision, revision_ok = _component(meta.get("sha256"))
         if not entry_ok or not revision_ok:
             return None, "malformed_frontier_identity"
         assert entry_id is not None and revision is not None
+        aliases = [signal["source_revision"]] if "source_revision" in signal else []
+        if "revision_id" in meta:
+            aliases.append(meta["revision_id"])
+        if any(not _component(value)[1] for value in aliases):
+            return None, "malformed_frontier_revision"
+        if any(value != revision for value in aliases):
+            return None, "conflicting_frontier_revision"
         item_values = [instance, sensor, source, "frontier", entry_id]
         return {
             "item_key": _opaque("item", item_values),
@@ -109,18 +114,47 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
             "evidence_class": "source_owned",
         }, None
 
-    if "source_id" in meta or "item_id" in meta:
+    if has_research_identity:
         source_id, source_id_ok = _component(meta.get("source_id"))
         item_id, item_id_ok = _component(meta.get("item_id"))
         if not source_id_ok or not item_id_ok:
             return None, "malformed_research_identity"
         assert source_id is not None and item_id is not None
+        revision_claims = [
+            value for present, value in (
+                ("source_revision" in signal, signal.get("source_revision")),
+                ("revision_id" in meta, meta.get("revision_id")),
+                ("sha256" in meta, meta.get("sha256")),
+            ) if present
+        ]
+        if revision_claims:
+            revisions = [_component(value) for value in revision_claims]
+            if any(not valid for _, valid in revisions):
+                return None, "malformed_research_revision"
+            revision_values = {value for value, _ in revisions}
+            if len(revision_values) != 1:
+                return None, "conflicting_research_revision"
+            revision = next(iter(revision_values))
+        else:
+            # Missing producer revision means uncertain material freshness, not
+            # a new revision on each observation or view.
+            revision = "unversioned"
+        assert revision is not None
         item_values = [instance, sensor, source, "research_feed", source_id, item_id]
+        revision_values_for_key = (
+            [*item_values, "material_revision", revision]
+            if revision_claims else [*item_values, "unversioned"]
+        )
         return {
             "item_key": _opaque("item", item_values),
-            "revision_key": _opaque("revision", [*item_values, "unversioned"]),
+            "revision_key": _opaque("revision", revision_values_for_key),
             "identity_mode": "source",
             "evidence_class": "source_owned",
+            # Disposable attribution only; base grammar ignored revision aliases.
+            "_pre_material_admission_key": _opaque("admission", [
+                _opaque("item", item_values),
+                _opaque("revision", [*item_values, "unversioned"]),
+            ]),
         }, None
 
     transition_fields = any(
@@ -155,6 +189,32 @@ def _snapshot(store, *, scan_bytes: int = 4 * 1024 * 1024) -> dict[str, list[dic
     if not view.complete or view.snapshot is None:
         raise ValueError(view.reason or "admission_index_catching_up")
     return view.snapshot
+
+
+def _snapshot_claim(instance: str, signal: dict, snap: dict) -> tuple[dict | None, str | None]:
+    from .admission_index import _AdmissionSnapshot
+
+    if isinstance(snap, _AdmissionSnapshot):
+        return signal.get("_admission_claim"), signal.get("_admission_error")
+    return _claim_for_signal(instance, signal)
+
+
+def _legacy_research_admission_key(store, binding: dict, snap: dict) -> str | None:
+    """Attribute old unversioned disposition only to unchanged source lineage."""
+    keys = []
+    for signal in snap["signals"]:
+        claim, error = _snapshot_claim(store.instance, signal, snap)
+        if not error and claim and claim.get("item_key") == binding.get("item_key"):
+            keys.append(claim.get("_pre_material_admission_key"))
+    return keys[-1] if keys and isinstance(keys[-1], str) else None
+
+
+def _same_disposition(prior: dict, binding: dict, legacy_key: str | None) -> bool:
+    return prior.get("admission_key") == binding["admission_key"] or (
+        legacy_key is not None and prior.get("admission_key") == legacy_key
+        and prior.get("source_candidate_id") == binding["source_candidate_id"]
+        and prior.get("source_candidate_fingerprint") == binding["source_candidate_fingerprint"]
+    )
 
 
 def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
@@ -192,7 +252,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
     ]
     claims: list[dict] = []
     for signal in joined:
-        parsed_claim, error = _claim_for_signal(store.instance, signal)
+        parsed_claim, error = _snapshot_claim(store.instance, signal, snap)
         if error:
             return None, error
         if parsed_claim:
@@ -203,7 +263,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
         for claim in claims
     }
     claim: dict = {}
-    if claims and not dangling and len(claim_identities) == 1:
+    if claims and len(claims) == len(joined) and not dangling and len(claim_identities) == 1:
         claim = claims[-1]
         identity_mode = claim["identity_mode"]
         evidence_class = claim["evidence_class"]
@@ -446,13 +506,14 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
     relevant: list[dict] = []
     decided = False
     reason = None
+    legacy_key = _legacy_research_admission_key(store, binding, snap)
     for row in snap["decisions"]:
         prior = row.get("admission_binding")
         if not isinstance(prior, dict) or prior.get("item_key") != binding["item_key"]:
             continue
         relevant.append(_decision_projection(row))
         if (
-            prior.get("admission_key") == binding["admission_key"]
+            _same_disposition(prior, binding, legacy_key)
             and _is_successful_applying_disposition(row)
         ):
             decided, reason = True, "prior_disposition"
@@ -469,7 +530,7 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
                 "status": row.get("status"),
                 "admission_key": prior.get("admission_key"),
             })
-            if prior.get("admission_key") == binding["admission_key"]:
+            if _same_disposition(prior, binding, legacy_key):
                 decided, reason = True, "prior_disposition"
             elif row.get("status") in _TERMINAL_STATUSES:
                 decided, reason = True, "explicit_item_closure"
@@ -703,19 +764,57 @@ def context_for_binding(store, binding: dict, *, source_decisions: list[dict] | 
     }
 
 
-def event_source_item_key(store, event: dict, *, events: list[dict] | None = None, signals: list[dict] | None = None) -> str | None:
-    """Return a stable item key for ingest coalescing safeguards when available."""
-    del events
-    signal_index = {row.get("id"): row for row in (signals if signals is not None else store.read_jsonl("signals"))}
-    claims = []
-    for signal_id in event.get("source_signal_ids") or []:
+def signal_source_item_identity(instance: str, signal: dict) -> tuple[str, str] | None:
+    """Return producer-owned (item, material revision) identity when known."""
+    claim, error = _claim_for_signal(instance, signal)
+    if (error or not isinstance(claim, dict) or claim.get("identity_mode") != "source"
+            or claim.get("evidence_class") not in {"source_owned", "internal_interpretation"}):
+        return None
+    item_key = claim.get("item_key")
+    revision_key = claim.get("revision_key")
+    if not isinstance(item_key, str) or not isinstance(revision_key, str):
+        return None
+    return item_key, revision_key
+
+
+def event_source_item_identity(
+    store, event: dict, *, signals: list[dict] | None = None,
+) -> tuple[str, str] | None:
+    """Return one unambiguous item/revision claim joined through event signals."""
+    rows = signals if signals is not None else store.read_jsonl("signals")
+    signal_index = {
+        row.get("id"): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    }
+    ids = [row.get("id") for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
+    seen_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    for identifier in ids:
+        if identifier in seen_ids:
+            duplicate_ids.add(identifier)
+        seen_ids.add(identifier)
+    signal_ids = event.get("source_signal_ids") or []
+    if not isinstance(signal_ids, list) or not signal_ids or any(
+        not isinstance(identifier, str) or identifier in duplicate_ids for identifier in signal_ids
+    ):
+        return None
+    identities: set[tuple[str, str]] = set()
+    for signal_id in signal_ids:
         signal = signal_index.get(signal_id)
         if not isinstance(signal, dict):
-            continue
-        claim, error = _claim_for_signal(store.instance, signal)
-        if error:
             return None
-        if claim:
-            claims.append(claim)
-    keys = {claim["item_key"] for claim in claims}
-    return next(iter(keys)) if len(keys) == 1 else None
+        identity = signal_source_item_identity(store.instance, signal)
+        if identity is None:
+            return None
+        identities.add(identity)
+    return next(iter(identities)) if len(identities) == 1 else None
+
+
+def event_source_item_key(
+    store, event: dict, *, events: list[dict] | None = None, signals: list[dict] | None = None,
+) -> str | None:
+    """Compatibility projection of a uniquely identified event's item key."""
+    del events
+    identity = event_source_item_identity(store, event, signals=signals)
+    return identity[0] if identity is not None else None

@@ -391,50 +391,31 @@ def _find_related_candidate(
     events: list[dict],
     signals: list[dict],
 ) -> dict | None:
-    from .admission import event_source_item_key
+    from .admission import event_source_item_identity
 
-    incoming_keys = _specific_correlation_keys(event.get("correlation_keys") or [])
-    # Generic live-session keys such as `active-session`, `surface:discord`, or
-    # the event kind itself are not enough to merge separate corrections. False
-    # coalescing hides distinct salience and prevents later context pointers.
-    incoming_keys.discard(str(event.get("kind") or ""))
-    if not incoming_keys:
+    incoming_identity = event_source_item_identity(store, event, signals=signals)
+    # Correlation keys describe possible thematic relationships. Without an
+    # unambiguous producer-owned item, they cannot establish equality.
+    if incoming_identity is None:
         return None
-    incoming_item = event_source_item_key(store, event, signals=signals)
-    incoming_signal_rows = [
-        row for row in signals
-        if row.get("id") in set(event.get("source_signal_ids") or [])
-    ]
-    uncertain_candidate_scoped = any(
-        row.get("source") in {"memory", "hermes_session"}
-        or "reflection" in str(row.get("sensor") or "")
-        or "live_turn" in str(row.get("sensor") or "")
-        for row in incoming_signal_rows
-    )
+    incoming_item = incoming_identity[0]
     event_index = {row.get("id"): row for row in events}
     for candidate in candidates:
         if candidate.get("status", "candidate") != "candidate":
             continue
         if candidate.get("kind") != event.get("kind"):
             continue
-        candidate_keys = _specific_correlation_keys(candidate.get("correlation_keys") or [])
-        candidate_keys.discard(str(candidate.get("kind") or ""))
-        candidate_items = {
-            item_key
-            for event_id in candidate.get("event_ids") or []
-            if isinstance((prior_event := event_index.get(event_id)), dict)
-            if (item_key := event_source_item_key(store, prior_event, signals=signals))
-        }
-        # Shared topic/channel keys can correlate salience, but cannot merge
-        # distinct source items or mix source-owned and uncertain identities.
-        if incoming_item is not None:
-            if candidate_items != {incoming_item}:
-                continue
-        elif candidate_items or uncertain_candidate_scoped:
-            # Candidate-scoped reflection/foreground interpretation gets first
-            # consideration, never generic-topic coalescing or corroboration.
+        candidate_event_ids = list(candidate.get("event_ids") or [])
+        prior_events = [event_index.get(event_id) for event_id in candidate_event_ids]
+        if not prior_events or any(not isinstance(prior_event, dict) for prior_event in prior_events):
             continue
-        if incoming_keys & candidate_keys:
+        prior_identities = [
+            event_source_item_identity(store, prior_event, signals=signals)
+            for prior_event in prior_events
+        ]
+        if any(identity is None for identity in prior_identities):
+            continue
+        if {identity[0] for identity in prior_identities if identity is not None} == {incoming_item}:
             return candidate
     return None
 
@@ -571,12 +552,20 @@ def _append_event_and_create_or_update_candidate(
     events = store.read_jsonl("events")
     signals = store.read_jsonl("signals")
     candidates = store.read_jsonl("candidates")
-    _apply_candidate_decay(store, candidates, config=config)
 
     existing_event = _find_existing_event(events, event)
     if existing_event:
         return _event_to_existing_result(existing_event, candidates)
 
+    from .admission import event_source_item_identity
+
+    incoming_identity = event_source_item_identity(store, event, signals=signals)
+    if incoming_identity is not None:
+        for prior_event in events:
+            if event_source_item_identity(store, prior_event, signals=signals) == incoming_identity:
+                return _event_to_existing_result(prior_event, candidates)
+
+    _apply_candidate_decay(store, candidates, config=config)
     store.append_jsonl("events", event)
     candidate = event_to_candidate(event, config)
     related = _find_related_candidate(
@@ -769,15 +758,27 @@ def handle_sensorium_ingest_signal(
     normalized = normalize_signal(signal)
     normalized["fingerprint"] = signal_fingerprint(normalized)
 
-    policy = _read_pruned_sensor_policy(store, config=config)
-    inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
-
     signals = store.read_jsonl("signals")
     existing_signal = _find_existing_signal(signals, normalized)
+    if existing_signal is None:
+        from .admission import signal_source_item_identity
+
+        incoming_identity = signal_source_item_identity(instance, normalized)
+        if incoming_identity is not None:
+            existing_signal = next(
+                (
+                    prior for prior in signals
+                    if signal_source_item_identity(instance, prior) == incoming_identity
+                ),
+                None,
+            )
     if existing_signal:
         events = store.read_jsonl("events")
         candidates = store.read_jsonl("candidates")
         return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
+
+    policy = _read_pruned_sensor_policy(store, config=config)
+    inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
 
     store.append_jsonl("signals", normalized)
     # Closed structured projection only; raw feedback joins never reach the study.
@@ -879,10 +880,11 @@ def handle_sensorium_ingest_event(
         return _err(instance, str(e))
 
     result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
-    observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
-        "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),
-        "source_class": "unknown", "change_state": "update" if result.get("coalesced") else "new",
-    })
+    if not result.get("duplicate"):
+        observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
+            "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),
+            "source_class": "unknown", "change_state": "update" if result.get("coalesced") else "new",
+        })
     return _ok(instance, result)
 
 

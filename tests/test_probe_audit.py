@@ -153,10 +153,12 @@ class TestThresholdPromotion:
             strength_hint=0.9, correlation_keys=["shared_key"],
         )
         sig2 = operator_signal(
-            summary="Second correction same topic", kind="user_correction",
+            summary="Second correction to fictional glass-orchid revision r2", kind="user_correction",
             strength_hint=0.9, correlation_keys=["shared_key"],
         )
+        sig1.update(source_revision="r1", artifact_meta={"source_id": "fictional-operator-feed", "item_id": "glass-orchid-correlation"})
         handle_sensorium_ingest_signal(signal=sig1, instance="test", state_dir=state_dir)
+        sig2.update(source_revision="r2", artifact_meta={"source_id": "fictional-operator-feed", "item_id": "glass-orchid-correlation"})
         handle_sensorium_ingest_signal(signal=sig2, instance="test", state_dir=state_dir)
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
@@ -169,6 +171,7 @@ class TestThresholdPromotion:
             summary="Pressure test A", kind="user_correction",
             strength_hint=0.9, correlation_keys=["pressure_key"],
         )
+        sig1.update(source_revision="r1", artifact_meta={"source_id": "fictional-operator-feed", "item_id": "glass-orchid-pressure"})
         raw1 = handle_sensorium_ingest_signal(signal=sig1, instance="test", state_dir=state_dir)
         cand_id = json.loads(raw1)["data"]["candidate_id"]
 
@@ -179,6 +182,7 @@ class TestThresholdPromotion:
             summary="Pressure test B", kind="user_correction",
             strength_hint=0.9, correlation_keys=["pressure_key"],
         )
+        sig2.update(source_revision="r2", artifact_meta={"source_id": "fictional-operator-feed", "item_id": "glass-orchid-pressure"})
         handle_sensorium_ingest_signal(signal=sig2, instance="test", state_dir=state_dir)
 
         after = [c for c in store.read_jsonl("candidates") if c["id"] == cand_id][0]
