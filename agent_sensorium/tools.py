@@ -149,18 +149,42 @@ def _status_record_visible(
 ) -> bool:
     """Gate linked status prose against current subjects, not stale snapshots.
 
-    Unlinked operational diagnostics remain global. A linked subject must still
-    exist and be allowed; its status need not be active for a historical receipt.
+    All declared direct and admission source subjects must exist and be allowed,
+    even for historical receipts. Resolve visibility only, never live admission
+    or index readiness. Unresolved advisory choices carry source prose, not
+    global diagnostics; genuinely unlinked operational diagnostics remain global.
     """
     from .config import visible_on_surface
 
-    for key, rows in (("candidate_id", candidates), ("origin_candidate_id", candidates),
-                      ("thread_id", threads)):
-        subject_id = record.get(key)
-        if not subject_id:
+    subjects = [(record.get(key), rows) for key, rows in (
+        ("candidate_id", candidates), ("origin_candidate_id", candidates),
+        ("thread_id", threads),
+    )]
+    binding = record.get("admission_binding")
+    if binding is not None:
+        if not isinstance(binding, dict):
+            return False
+        source_id = binding.get("source_candidate_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            return False
+        subjects.append((source_id, candidates))
+
+    linked = False
+    for subject_id, rows in subjects:
+        if subject_id is None:
             continue
+        if not isinstance(subject_id, str) or not subject_id.strip():
+            return False
+        linked = True
         subject = next((row for row in rows if row.get("id") == subject_id), None)
         if subject is None or not visible_on_surface(subject, surface, instance_config):
+            return False
+    if not linked and record.get("type") == "subconscious.advisory":
+        if (record.get("output_action") in ("DROP", "SAVE", "CREATE_CONSCIOUS_TASK")
+                or record.get("action") in (
+                    "drop", "save", "would_create_conscious_task",
+                    "created_conscious_task_candidate", "updated_conscious_task_candidate",
+                )):
             return False
     return True
 

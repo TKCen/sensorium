@@ -185,3 +185,238 @@ def test_equal_or_wider_replay_and_status_preserve_canonical_state(tmp_path, mon
         if reference:
             assert not local['data']['exact_subject'].get('not_found')
     assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('action', ['DROP', 'SAVE', 'CREATE_CONSCIOUS_TASK'])
+@pytest.mark.parametrize('dry_run', [True, False])
+@pytest.mark.parametrize('restriction', ['surface', 'sensitivity'])
+def test_bound_advisory_reason_obeys_current_source(tmp_path, monkeypatch, action, dry_run, restriction):
+    store = store_at(tmp_path)
+    marker = 'Fictional source-bound advisory withheld marker'
+    first = signal()
+    first.update(summary=marker, sensitivity='public_safe', allowed_surfaces=['local', 'telegram'])
+    ingest(store, first)
+    candidate = store.read_jsonl('candidates')[0]
+    policy = {'allowed_surfaces': ['local', 'telegram'], 'max_sensitivity': 'public_safe'}
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: (policy, {}))
+    output = {'action': action, 'rationale': marker, 'candidate_ids': [candidate['id']],
+              'event_ids': candidate['event_ids']}
+    if action == 'CREATE_CONSCIOUS_TASK':
+        output['conscious_task'] = {'request_type': 'THINK', 'title': marker, 'why': marker,
+                                    'expected_decision': 'Hold or engage'}
+    produced = json.loads(tools.handle_sensorium_subconscious_advisory(
+        instance=store.instance, state_dir=str(store.root), enabled=True, dry_run=dry_run,
+        advisory_output=output, config={'model_enabled': False}, record_receipt=True))
+    assert produced['success'], produced
+    receipt = store.read_jsonl('decisions')[-1]
+    assert receipt['type'] == 'subconscious.advisory'
+    assert receipt['admission_binding']['source_candidate_id'] == candidate['id']
+    assert (receipt['candidate_id'] is None) == (dry_run or action != 'CREATE_CONSCIOUS_TASK')
+    kw = {'instance': store.instance, 'state_dir': str(store.root), 'surface': 'telegram'}
+    assert marker in json.dumps(json.loads(tools.handle_sensorium_status(**kw)))
+    incoming = dict(first)
+    if restriction == 'surface':
+        incoming['allowed_surfaces'] = ['local']
+    else:
+        incoming['sensitivity'] = 'local_only'
+    assert ingest(store, incoming)['duplicate']
+    before = _snapshot(store)
+    forbidden = json.loads(tools.handle_sensorium_status(reference_id=candidate['id'], **kw))
+    assert forbidden['data']['exact_subject']['not_found']
+    assert forbidden['data']['top_candidates'] == []
+    assert not json.loads(tools.handle_sensorium_candidate_open(candidate_id=candidate['id'], **kw))['success']
+    policy['max_sensitivity'] = 'local_only' if restriction == 'sensitivity' else 'public_safe'
+    local = json.loads(tools.handle_sensorium_status(**{**kw, 'surface': 'local'}))
+    assert marker in json.dumps(local)
+    assert _snapshot(store) == before
+    assert marker not in json.dumps(forbidden)
+
+
+@pytest.mark.parametrize('action', ['DROP', 'SAVE'])
+@pytest.mark.parametrize('dry_run', [True, False])
+@pytest.mark.parametrize('restriction', ['surface', 'sensitivity'])
+def test_unbound_multi_source_reason_is_not_global(tmp_path, monkeypatch, action, dry_run, restriction):
+    store = store_at(tmp_path)
+    marker = 'Fictional multi-source rationale marker'
+    sources = []
+    for item in ['a', 'b']:
+        row = signal(identifier=f'sig-{item}', item=item)
+        row.update(summary=marker, sensitivity='public_safe', allowed_surfaces=['local', 'telegram'])
+        ingest(store, row)
+        sources.append(row)
+    candidates = store.read_jsonl('candidates')
+    assert len(candidates) == 2
+    policy = {'allowed_surfaces': ['local', 'telegram'], 'max_sensitivity': 'public_safe'}
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: (policy, {}))
+    response = json.loads(tools.handle_sensorium_subconscious_advisory(
+        instance=store.instance, state_dir=str(store.root), enabled=True, dry_run=dry_run,
+        advisory_output={'action': action, 'rationale': marker,
+                         'candidate_ids': [c['id'] for c in candidates],
+                         'event_ids': [e for c in candidates for e in c['event_ids']]},
+        config={'model_enabled': False}, record_receipt=True))
+    assert response['success'], response
+    decision = store.read_jsonl('decisions')[-1]
+    assert decision['type'] == 'subconscious.advisory'
+    assert decision['admission_binding'] is None and decision['candidate_id'] is None
+    for row in sources:
+        incoming = dict(row)
+        if restriction == 'surface':
+            incoming['allowed_surfaces'] = ['local']
+        else:
+            incoming['sensitivity'] = 'local_only'
+        assert ingest(store, incoming)['duplicate']
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(
+        instance=store.instance, state_dir=str(store.root), surface='telegram'))
+    assert status['data']['top_candidates'] == [] and status['data']['top_threads'] == []
+    assert _snapshot(store) == before
+    assert marker not in json.dumps(status)
+    local = json.loads(tools.handle_sensorium_status(
+        instance=store.instance, state_dir=str(store.root), surface='local'))
+    assert 'latest_decision' not in local['data']
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('sibling', ['latest_decision', 'legacy_dispatch_result'])
+@pytest.mark.parametrize('binding', [{}, [], '', False, {'source_candidate_id': ''},
+                                    {'source_candidate_id': []}, {'source_candidate_id': 'missing'}])
+def test_explicit_invalid_or_missing_binding_fails_closed(tmp_path, monkeypatch, sibling, binding):
+    store = store_at(tmp_path)
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: ({}, {}))
+    record = {'type': 'subconscious.advisory', 'action': 'save', 'output_action': 'SAVE',
+              'reason': 'Fictional invalid subject marker', 'admission_binding': binding}
+    if sibling == 'latest_decision':
+        store.append_jsonl('decisions', record)
+    else:
+        store.write_state({'last_dispatch_result': record})
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(instance=store.instance, state_dir=str(store.root)))
+    assert sibling not in status['data']
+    assert 'Fictional invalid subject marker' not in json.dumps(status)
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('direct', ['candidate_id', 'origin_candidate_id', 'thread_id'])
+@pytest.mark.parametrize('hidden', ['direct', 'nested', 'neither'])
+def test_all_declared_status_subjects_gate_historical_prose(tmp_path, monkeypatch, direct, hidden):
+    store = store_at(tmp_path)
+    policy = {'allowed_surfaces': ['local', 'telegram'], 'max_sensitivity': 'public_safe'}
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: (policy, {}))
+    for name in ['direct', 'nested']:
+        row = {'id': f'cand-{name}', 'status': 'archived', 'sensitivity': 'public_safe',
+               'allowed_surfaces': ['local'] if hidden == name else ['local', 'telegram']}
+        store.append_jsonl('candidates', row)
+        if name == 'direct':
+            thread = candidate_to_thread(row)
+            thread.update(id='thread-direct', status='closed')
+            store.append_jsonl('threads', thread)
+    record = {'type': 'subconscious.advisory', 'action': 'save', 'output_action': 'SAVE',
+              direct: 'thread-direct' if direct == 'thread_id' else 'cand-direct',
+              'admission_binding': {'source_candidate_id': 'cand-nested', 'item_key': 'historical'},
+              'reason': 'Fictional historical subject marker'}
+    store.append_jsonl('decisions', record)
+    store.append_jsonl('artifacts', {'id': 'artifact-synthetic', 'content': 'Preserved artifact'})
+    store.write_state({'last_dispatch_result': record, 'budgets': {'synthetic': 1},
+                       'delivered_history': ['Preserved delivery']})
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(
+        instance=store.instance, state_dir=str(store.root), surface='telegram'))
+    for sibling in ['latest_decision', 'legacy_dispatch_result']:
+        assert (sibling in status['data']) == (hidden == 'neither')
+    assert ('Fictional historical subject marker' in json.dumps(status)) == (hidden == 'neither')
+    local = json.loads(tools.handle_sensorium_status(
+        instance=store.instance, state_dir=str(store.root), surface='local'))
+    assert 'Fictional historical subject marker' in json.dumps(local)
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('output_action', ['DROP', 'SAVE', 'CREATE_CONSCIOUS_TASK'])
+def test_unlinked_typed_advisory_choice_is_not_global(tmp_path, monkeypatch, output_action):
+    store = store_at(tmp_path)
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: ({}, {}))
+    store.append_jsonl('decisions', {'type': 'subconscious.advisory', 'output_action': output_action,
+                                    'reason': 'Fictional lost source marker'})
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(instance=store.instance, state_dir=str(store.root)))
+    assert 'latest_decision' not in status['data']
+    assert 'Fictional lost source marker' not in json.dumps(status)
+    assert _snapshot(store) == before
+
+
+def test_ordinary_unlinked_operational_diagnostics_remain_global(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: ({}, {}))
+    disabled = json.loads(tools.handle_sensorium_subconscious_advisory(
+        instance=store.instance, state_dir=str(store.root), enabled=False,
+        config={'model_enabled': False}, record_receipt=True))
+    assert disabled['success'] and disabled['data']['action'] == 'disabled'
+    receipt = store.read_jsonl('decisions')[-1]
+    assert receipt['admission_binding'] is None and receipt['output_action'] is None
+    dispatch = json.loads(tools.handle_sensorium_dispatch_once(
+        instance=store.instance, state_dir=str(store.root), dry_run=True, config={}))
+    assert dispatch['success'] and dispatch['data']['action'] == 'no_candidate'
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(instance=store.instance, state_dir=str(store.root)))
+    assert status['data']['latest_decision']['action'] == 'disabled'
+    assert status['data']['legacy_dispatch_result']['action'] == 'no_candidate'
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('sibling', ['latest_decision', 'legacy_dispatch_result'])
+@pytest.mark.parametrize('mode', ['missing', 'historical', 'global'])
+def test_missing_historical_and_global_status_controls(tmp_path, monkeypatch, sibling, mode):
+    store = store_at(tmp_path)
+    first = signal()
+    first.update(sensitivity='public_safe', allowed_surfaces=['local', 'telegram'])
+    ingest(store, first)
+    candidate = store.read_jsonl('candidates')[0]
+    policy = {'allowed_surfaces': ['local', 'telegram'], 'max_sensitivity': 'public_safe'}
+    monkeypatch.setattr(config, 'load_instance_config', lambda **kwargs: (policy, {}))
+    marker = 'Fictional historical operational receipt'
+    if sibling == 'latest_decision':
+        thread = candidate_to_thread(candidate)
+        store.append_jsonl('threads', thread)
+        result = json.loads(tools.handle_sensorium_thread_update(
+            thread_id=thread['id'], action='close', reason=marker,
+            instance=store.instance, state_dir=str(store.root)))
+        assert result['success']
+        if mode == 'missing':
+            store.paths['threads'].write_text('')
+        elif mode == 'global':
+            store.append_jsonl('decisions', {'type': 'synthetic.operational', 'reason': marker})
+    else:
+        dispatched = json.loads(tools.handle_sensorium_dispatch_once(
+            instance=store.instance, state_dir=str(store.root), dry_run=True, config={}))
+        assert dispatched['success']
+        if mode == 'missing':
+            store.paths['candidates'].write_text('')
+        elif mode == 'historical':
+            reviewed = json.loads(tools.handle_sensorium_candidate_update(
+                candidate_id=candidate['id'], action='mark_reviewed',
+                instance=store.instance, state_dir=str(store.root)))
+            assert reviewed['success']
+        else:
+            state = store.read_state()
+            state['last_dispatch_result'] = {'action': 'no_candidate',
+                                             'reason': 'No eligible candidate above threshold.'}
+            store.write_state(state)
+    before = _snapshot(store)
+    status = json.loads(tools.handle_sensorium_status(
+        instance=store.instance, state_dir=str(store.root), surface='telegram'))
+    assert (sibling in status['data']) == (mode != 'missing')
+    assert _snapshot(store) == before
+
+
+@pytest.mark.parametrize('action', ['drop', 'save', 'would_create_conscious_task'])
+def test_legacy_advisory_action_without_output_link_is_not_global(action):
+    assert not tools._status_record_visible(
+        {'type': 'subconscious.advisory', 'action': action, 'reason': 'Fictional source prose'},
+        candidates=[], threads=[], surface='local', instance_config={})
+
+
+@pytest.mark.parametrize('key', ['candidate_id', 'origin_candidate_id', 'thread_id'])
+@pytest.mark.parametrize('value', ['', [], False])
+def test_malformed_direct_subject_is_not_global(key, value):
+    assert not tools._status_record_visible(
+        {key: value, 'reason': 'Fictional subject prose'},
+        candidates=[], threads=[], surface='local', instance_config={})
