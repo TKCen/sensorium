@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
+from .canonical_records import lookup_record, record_index
 from .gate import candidate_fingerprint
 
 POLICY_VERSION = "source-admission-v2"
@@ -179,17 +181,74 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
     return None, None
 
 
+@dataclass(frozen=True)
+class SignalClaim:
+    """Canonical classification for replay owners; malformed is never legacy."""
+
+    kind: Literal["source", "legacy", "malformed"]
+    item_key: str | None = None
+    revision_key: str | None = None
+    member_keys: tuple[str, ...] = ()
+    evidence_class: str | None = None
+    error: str | None = None
+
+
+def classify_signal_claim(instance: str, signal: dict) -> SignalClaim:
+    claim, error = _claim_for_signal(instance, signal)
+    if error:
+        return SignalClaim("malformed", error=error)
+    if claim is None:
+        return SignalClaim("legacy")
+    return SignalClaim(
+        "source", claim["item_key"], claim["revision_key"],
+        tuple(claim.get("member_keys") or []), claim["evidence_class"],
+    )
+
+
+def equivalent_source_claims(left: SignalClaim, right: SignalClaim) -> bool:
+    """Prove producer material equality, not legacy wrapper equivalence."""
+    return left.kind == right.kind == "source" and left == right
+
+
+class _UniqueSnapshot(dict):
+    """Indexes owned by one immutable admission view, never serialized trust."""
+
+    def __init__(self, snap: dict):
+        from .admission_index import _AdmissionSnapshot
+
+        super().__init__(snap)
+        self.projected = isinstance(snap, _AdmissionSnapshot)
+        self.indexes = {
+            stream: record_index(snap[stream], projected=self.projected)
+            for stream in ("candidates", "events", "signals")
+        }
+
+
+def _unique_snapshot(snap: dict) -> _UniqueSnapshot:
+    return snap if isinstance(snap, _UniqueSnapshot) else _UniqueSnapshot(snap)
+
+
+def _record_index(snap: dict, stream: str) -> dict:
+    from .admission_index import _AdmissionSnapshot
+
+    if isinstance(snap, _UniqueSnapshot):
+        return snap.indexes[stream]
+    return record_index(snap[stream], projected=isinstance(snap, _AdmissionSnapshot))
+
+
 def _snapshot(store, *, scan_bytes: int = 4 * 1024 * 1024) -> dict[str, list[dict]]:
     view = store.read_admission_snapshot(scan_bytes=scan_bytes)
     if not view.complete or view.snapshot is None:
         raise ValueError(view.reason or "admission_index_catching_up")
-    return view.snapshot
+    return _unique_snapshot(view.snapshot)
 
 
 def _snapshot_claim(instance: str, signal: dict, snap: dict) -> tuple[dict | None, str | None]:
     from .admission_index import _AdmissionSnapshot
 
-    if isinstance(snap, _AdmissionSnapshot):
+    if isinstance(snap, _AdmissionSnapshot) or (
+        isinstance(snap, _UniqueSnapshot) and snap.projected
+    ):
         return signal.get("_admission_claim"), signal.get("_admission_error")
     return _claim_for_signal(instance, signal)
 
@@ -201,30 +260,23 @@ def _same_disposition(prior: dict, binding: dict) -> bool:
 
 
 def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
+    snap = _unique_snapshot(snap)
     candidate_id, candidate_ok = _component(candidate.get("id"))
     if not candidate_ok:
         return None, "malformed_candidate_id"
     assert candidate_id is not None
-    cached_events = snap.get("_event_index")
-    event_index = cached_events if isinstance(cached_events, dict) else {
-        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
-    }
-    cached_signals = snap.get("_signal_index")
-    signal_index = cached_signals if isinstance(cached_signals, dict) else {
-        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
-    }
+    if lookup_record(_record_index(snap, "candidates"), candidate_id).state != "unique":
+        return None, "source_candidate_unavailable"
+    event_index = _record_index(snap, "events")
+    signal_index = _record_index(snap, "signals")
     joined_signal_ids: set[str] = set()
-    seen_signal_ids: set[str] = set()
-    duplicate_signal_ids: set[str] = set()
-    for row in snap["signals"]:
-        identifier = row.get("id") if isinstance(row, dict) else None
-        if isinstance(identifier, str):
-            if identifier in seen_signal_ids:
-                duplicate_signal_ids.add(identifier)
-            seen_signal_ids.add(identifier)
     dangling = False
-    for event_id in candidate.get("event_ids") or []:
-        event = event_index.get(event_id)
+    event_ids = candidate.get("event_ids") or []
+    if not isinstance(event_ids, list):
+        event_ids = []
+        dangling = True
+    for event_id in event_ids:
+        event = lookup_record(event_index, event_id).row
         if not isinstance(event, dict):
             dangling = True
             continue
@@ -234,10 +286,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
             continue
         event_claims = set()
         for signal_id in signal_ids:
-            if not isinstance(signal_id, str) or signal_id in duplicate_signal_ids:
-                dangling = True
-                continue
-            signal = signal_index.get(signal_id)
+            signal = lookup_record(signal_index, signal_id).row
             if not isinstance(signal, dict):
                 dangling = True
                 continue
@@ -255,7 +304,8 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
     # signals in the canonical retained receipt order supplied by read_jsonl.
     joined = [
         signal for signal in snap["signals"]
-        if isinstance(signal, dict) and signal.get("id") in joined_signal_ids
+        if isinstance(signal, dict) and isinstance(signal.get("id"), str)
+        and signal.get("id") in joined_signal_ids
     ]
     claims: list[dict] = []
     for signal in joined:
@@ -310,6 +360,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
 
 
 def _binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
+    snap = _unique_snapshot(snap)
     binding, error = _base_binding_from_snapshot(store, candidate, snap)
     if error or binding is None or "member_keys" not in binding:
         return binding, error
@@ -329,14 +380,29 @@ def binding_for_candidate(store, candidate_id: str) -> tuple[dict | None, str | 
             indexed.reason,
         )
     snap = _snapshot(store)
-    candidate = next((row for row in snap["candidates"] if row.get("id") == candidate_id), None)
+    candidate = lookup_record(_record_index(snap, "candidates"), candidate_id).row
     if not isinstance(candidate, dict) or candidate.get("status", "candidate") != "candidate":
         return None, "source_candidate_unavailable"
     return _binding_from_snapshot(store, candidate, snap)
 
 
+def _member_reference_shape(binding: dict) -> bool:
+    """Validate every present member list before set, sort or SQL attribution."""
+    for field in ("member_keys", "selected_member_keys"):
+        if field not in binding:
+            continue
+        members = binding[field]
+        if not isinstance(members, list) or any(
+            not isinstance(key, str) or len(key) != 64 for key in members
+        ):
+            return False
+        if members != sorted(set(members)):
+            return False
+    return True
+
+
 def _binding_shape(binding: Any) -> bool:
-    if not isinstance(binding, dict):
+    if not isinstance(binding, dict) or not _member_reference_shape(binding):
         return False
     if binding.get("schema_version") != 1 or binding.get("policy_version") != POLICY_VERSION:
         return False
@@ -430,17 +496,17 @@ def _memory_members_for_prior(
     store, prior: dict, current: dict, snap: dict[str, list[dict]],
 ) -> tuple[set[str], str | None]:
     """Attribute persisted memory rows without rewriting historical bytes."""
+    if not _member_reference_shape(prior):
+        return set(), "malformed_member_binding"
     if prior.get("policy_version") == POLICY_VERSION:
         selected = prior.get("selected_member_keys")
-        if isinstance(selected, list) and selected == sorted(set(selected)):
-            return {key for key in selected if isinstance(key, str)}, None
+        if isinstance(selected, list):
+            return set(selected), None
         return set(), "malformed_v2_member_binding"
     if prior.get("policy_version") != "source-admission-v1":
         return set(), None
     source_candidate_id = prior.get("source_candidate_id")
-    source_candidate = next(
-        (row for row in snap["candidates"] if row.get("id") == source_candidate_id), None,
-    )
+    source_candidate = lookup_record(_record_index(snap, "candidates"), source_candidate_id).row
     if isinstance(source_candidate, dict):
         reconstructed, error = _base_binding_from_snapshot(store, source_candidate, snap)
         if not error and reconstructed and reconstructed.get("member_keys"):
@@ -475,6 +541,8 @@ def _memory_prior_rows(
         if _is_successful_applying_disposition(row):
             disposed.update(overlap)
     for row in snap["candidates"]:
+        if lookup_record(_record_index(snap, "candidates"), row.get("id")).state != "unique":
+            continue
         if row.get("kind") != "subconscious_advisory":
             continue
         prior = _advisory_binding(row)
@@ -505,6 +573,7 @@ def _memory_prior_rows(
 
 
 def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tuple[list[dict], bool, str | None]:
+    snap = _unique_snapshot(snap)
     if "member_keys" in binding:
         relevant, disposed, _ = _memory_prior_rows(store, binding, snap)
         selected = set(binding.get("selected_member_keys") or [])
@@ -524,6 +593,8 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
         ):
             decided, reason = True, "prior_disposition"
     for row in snap["candidates"]:
+        if lookup_record(_record_index(snap, "candidates"), row.get("id")).state != "unique":
+            continue
         if row.get("kind") != "subconscious_advisory":
             continue
         prior = _advisory_binding(row)
@@ -540,7 +611,7 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
                 decided, reason = True, "prior_disposition"
             elif row.get("status") in _TERMINAL_STATUSES:
                 decided, reason = True, "explicit_item_closure"
-        elif binding["identity_mode"] == "legacy" and list(row.get("source_candidate_ids") or []) == [binding["source_candidate_id"]]:
+        elif binding["identity_mode"] == "legacy" and row.get("source_candidate_ids") == [binding["source_candidate_id"]]:
             old_fp = str(row.get("source_candidate_fingerprint") or "")
             if not old_fp or old_fp == binding["source_candidate_fingerprint"]:
                 relevant.append({
@@ -575,7 +646,8 @@ def _priority(candidate: dict) -> tuple[float, str, str]:
 
 def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> bool:
     """Identify the automatic producer without changing legacy binding shape."""
-    event_ids = set(candidate.get("event_ids") or [])
+    refs = candidate.get("event_ids")
+    event_ids = {value for value in refs if isinstance(value, str)} if isinstance(refs, list) else set()
     event_rows = snap.get("_event_index")
     events = (
         [event_rows[event_id] for event_id in event_ids if event_id in event_rows]
@@ -586,6 +658,7 @@ def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> 
         for event in events
         if isinstance(event, dict) and event.get("id") in event_ids
         for signal_id in (event.get("source_signal_ids") or [])
+        if isinstance(signal_id, str)
     }
     signal_rows = snap.get("_signal_index")
     signals = (
@@ -676,13 +749,8 @@ def build_admission_plan(
             "source_record_counts": None,
             "projected_candidate_count": 0,
         }
-    snap = view.snapshot
-    snap["_event_index"] = {
-        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
-    }
-    snap["_signal_index"] = {
-        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
-    }
+    snap = _unique_snapshot(view.snapshot)
+
     projected: list[tuple[dict, dict, list[dict]]] = []
     eligible_count = 0
     suppressed: dict[str, int] = {}
@@ -756,9 +824,12 @@ def context_for_binding(store, binding: dict, *, source_decisions: list[dict] | 
             ),
         }
     snap = _snapshot(store)
-    candidate = next(row for row in snap["candidates"] if row.get("id") == binding["source_candidate_id"])
-    wanted_events = set(candidate.get("event_ids") or [])
-    events = [row for row in snap["events"] if row.get("id") in wanted_events]
+    candidate = lookup_record(_record_index(snap, "candidates"), binding["source_candidate_id"]).row
+    if candidate is None:
+        raise ValueError("source_candidate_unavailable")
+    event_index = _record_index(snap, "events")
+    events = [found.row for identifier in candidate.get("event_ids") or []
+              if (found := lookup_record(event_index, identifier)).row is not None]
     if source_decisions is None:
         source_decisions, _, _ = _prior_for_binding(store, binding, snap)
     return {
@@ -788,26 +859,15 @@ def event_source_item_identity(
 ) -> tuple[str, str] | None:
     """Return one unambiguous item/revision claim joined through event signals."""
     rows = signals if signals is not None else store.read_jsonl("signals")
-    signal_index = {
-        row.get("id"): row
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("id"), str)
-    }
-    ids = [row.get("id") for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
-    seen_ids: set[str] = set()
-    duplicate_ids: set[str] = set()
-    for identifier in ids:
-        if identifier in seen_ids:
-            duplicate_ids.add(identifier)
-        seen_ids.add(identifier)
+    signal_index = record_index(rows)
     signal_ids = event.get("source_signal_ids") or []
     if not isinstance(signal_ids, list) or not signal_ids or any(
-        not isinstance(identifier, str) or identifier in duplicate_ids for identifier in signal_ids
+        lookup_record(signal_index, identifier).state != "unique" for identifier in signal_ids
     ):
         return None
     identities: set[tuple[str, str]] = set()
     for signal_id in signal_ids:
-        signal = signal_index.get(signal_id)
+        signal = lookup_record(signal_index, signal_id).row
         if not isinstance(signal, dict):
             return None
         identity = signal_source_item_identity(store.instance, signal)

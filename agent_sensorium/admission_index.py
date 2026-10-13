@@ -14,13 +14,15 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
+from .canonical_records import record_id
+
 STREAMS = ("signals", "events", "decisions", "candidates")
 DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
-# Per-event revision joins and disposition attribution changed; rebuild state.
-SCHEMA_VERSION = 5
+# Entity ambiguity is durable projection state; old ready caches cannot certify it.
+SCHEMA_VERSION = 6
 MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
@@ -53,12 +55,18 @@ def _safe_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _bounded_strings(value: object, *, limit: int | None = None) -> list[str]:
+def _bounded_strings(value: object, *, limit: int | None = None) -> list:
     """Project complete record-local identifiers; the record byte cap is the bound."""
     if not isinstance(value, list):
         return []
     selected = value if limit is None else value[:limit]
-    return [item for item in selected if isinstance(item, str)]
+    # Invalid members must remain visible to record-local join validation.
+    return list(selected)
+
+
+def _reference_ids(value: object) -> set[str]:
+    """SQL relationships carry valid IDs, not proof of complete raw joins."""
+    return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
 
 
 def _binding_projection(value: object) -> dict | None:
@@ -393,8 +401,10 @@ class AdmissionIndex:
         self, conn: sqlite3.Connection, source: str, generation: int,
         ordinal: int, projection: dict, binding: dict,
     ) -> set[str]:
+        from .admission import _member_reference_shape
+
         applied = source == "candidates" or self._is_applying_decision(projection)
-        if not applied:
+        if not applied or not _member_reference_shape(binding):
             return set()
         members = binding.get("selected_member_keys")
         member_rows = members if isinstance(members, list) and members else [None]
@@ -586,13 +596,16 @@ class AdmissionIndex:
     ) -> None:
         if stream == "signals":
             projection = _signal_projection(row, self.store.instance, claim_parser)
-            signal_id = str(row.get("id") or f"ordinal:{ordinal}")
+            signal_id = record_id(row.get("id"))
+            if signal_id is None:
+                return
             previous = conn.execute(
                 "SELECT projection_json FROM signal_claim WHERE signal_id=? AND generation=?",
                 (signal_id, generation),
             ).fetchone()
             if previous is not None:
                 # A duplicate canonical ID is ambiguous, not last-writer proof.
+                projection = {"id": signal_id, "_admission_ambiguous": True}
                 projection["_admission_claim"] = None
                 projection["_admission_error"] = "ambiguous_signal_id"
             conn.execute(
@@ -613,11 +626,16 @@ class AdmissionIndex:
             return
         if stream == "events":
             projection = _event_projection(row)
-            event_id = str(row.get("id") or f"ordinal:{ordinal}")
+            event_id = record_id(row.get("id"))
+            if event_id is None:
+                return
             previous = conn.execute(
                 "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
                 (event_id, generation),
             ).fetchone()
+            if previous is not None:
+                projection = {"id": event_id, "source_signal_ids": [],
+                              "_admission_ambiguous": True}
             conn.execute(
                 "INSERT OR REPLACE INTO event_join VALUES (?,?,?,?)",
                 (event_id, generation, ordinal, _json(projection)),
@@ -625,7 +643,7 @@ class AdmissionIndex:
             conn.execute("DELETE FROM event_signal WHERE event_id=?", (event_id,))
             conn.executemany(
                 "INSERT OR IGNORE INTO event_signal VALUES (?,?)",
-                ((event_id, signal_id) for signal_id in set(projection["source_signal_ids"])),
+                ((event_id, signal_id) for signal_id in _reference_ids(projection["source_signal_ids"])),
             )
             has_dependents = conn.execute(
                 "SELECT 1 FROM candidate_event WHERE event_id=? LIMIT 1", (event_id,),
@@ -641,7 +659,41 @@ class AdmissionIndex:
             return
         if stream == "candidates":
             projection = _candidate_projection(row, fingerprint)
-            candidate_id = str(row.get("id") or f"ordinal:{ordinal}")
+            candidate_id = record_id(row.get("id"))
+            if candidate_id is None:
+                return
+            previous = conn.execute(
+                "SELECT source_ordinal,prompt_projection_json FROM candidate_projection "
+                "WHERE candidate_id=? AND generation=?", (candidate_id, generation),
+            ).fetchone()
+            affected: set[str] = set()
+            if previous is not None:
+                old = json.loads(previous["prompt_projection_json"])
+                old_binding = old.get("admission_binding") or {}
+                # Legacy settlement has no item/member dependency. Refresh only
+                # its exact singleton target after withdrawing ambiguous evidence.
+                legacy_targets = old.get("source_candidate_ids")
+                if (old.get("kind") == "subconscious_advisory"
+                        and isinstance(legacy_targets, list) and len(legacy_targets) == 1
+                        and isinstance(legacy_targets[0], str)):
+                    affected.add(legacy_targets[0])
+                item_key = old_binding.get("item_key")
+                if isinstance(item_key, str):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO dependency_refresh VALUES ('item',?,'')",
+                        (item_key,),
+                    )
+                for member in _reference_ids(old_binding.get("selected_member_keys")):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO dependency_refresh VALUES ('member',?,'')",
+                        (member,),
+                    )
+                conn.execute(
+                    "DELETE FROM disposition_evidence WHERE source_stream='candidates' "
+                    "AND generation=? AND source_ordinal=?", (generation, previous["source_ordinal"]),
+                )
+                projection = {"id": candidate_id, "status": "candidate", "event_ids": [],
+                              "_admission_ambiguous": True}
             conn.execute(
                 "INSERT OR REPLACE INTO candidate_projection VALUES (?,?,?,?,?,?,?,?,?)",
                 (
@@ -657,16 +709,17 @@ class AdmissionIndex:
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO candidate_event VALUES (?,?)",
-                ((candidate_id, event_id) for event_id in set(projection["event_ids"])),
+                ((candidate_id, event_id) for event_id in _reference_ids(projection["event_ids"])),
             )
-            affected: set[str] = set()
             binding = projection.get("admission_binding")
             if projection.get("kind") == "subconscious_advisory":
                 if isinstance(binding, dict):
                     affected = self._insert_dispositions(
                         conn, "candidates", generation, ordinal, projection, binding,
                     )
-                elif projection.get("source_candidate_ids"):
+                elif (isinstance(projection.get("source_candidate_ids"), list)
+                      and len(projection["source_candidate_ids"]) == 1
+                      and isinstance(projection["source_candidate_ids"][0], str)):
                     legacy_id = projection["source_candidate_ids"][0]
                     evidence_id = hashlib.sha256(
                         f"candidates:{generation}:{ordinal}:legacy".encode(),
@@ -683,7 +736,7 @@ class AdmissionIndex:
             self._refresh_candidate(
                 conn, candidate_id, binding_builder, generation=generation,
             )
-            if projection.get("kind") != "subconscious_advisory":
+            if projection.get("kind") != "subconscious_advisory" and previous is None:
                 base, error = binding_builder(self.store, projection, self._joined_snapshot(conn, projection))
                 if not error and base:
                     affected.update(self._resolve_v1_evidence(conn, candidate_id, base))
@@ -1115,7 +1168,7 @@ class AdmissionIndex:
         row = conn.execute(
             "SELECT p.prompt_projection_json,s.source_decisions_json "
             "FROM candidate_projection p JOIN candidate_state s USING(candidate_id) "
-            "WHERE p.candidate_id=? AND p.generation=?",
+            "WHERE p.candidate_id=? AND p.generation=? AND s.binding_json IS NOT NULL",
             (candidate_id, generation),
         ).fetchone()
         if row is None:
@@ -1127,13 +1180,22 @@ class AdmissionIndex:
         candidate = json.loads(row[0])
         events = []
         event_generation = self._current_generation(conn, "events")
-        for event_id in candidate.get("event_ids") or []:
+        valid_event_ids = _reference_ids(candidate.get("event_ids"))
+        # First-reference order, one lookup per literal ID; retain the complete
+        # candidate projection separately so invalid refs still imply uncertainty.
+        ordered_event_ids = dict.fromkeys(
+            value for value in candidate.get("event_ids") or []
+            if isinstance(value, str) and value in valid_event_ids
+        )
+        for event_id in ordered_event_ids:
             event = conn.execute(
                 "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
                 (event_id, event_generation),
             ).fetchone()
             if event is not None:
-                events.append(json.loads(event[0]))
+                projected = json.loads(event[0])
+                if projected.get("_admission_ambiguous") is not True:
+                    events.append(projected)
         progress = self._progress(conn)
         conn.close()
         value = {

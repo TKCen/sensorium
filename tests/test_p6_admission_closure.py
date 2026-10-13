@@ -67,10 +67,10 @@ def _frontier_revision(store: SensoriumStore, revision: str, *, create: bool) ->
         "kind": "creative_pull", "summary": "frontier source",
         "artifact_meta": {"entry_id": "entry", "sha256": revision},
     })
-    store.append_jsonl("events", {
+    store.rewrite_jsonl("events", [{
         "id": "frontier-event", "kind": "creative_pull", "summary": "frontier event",
         "source_signal_ids": [signal_id],
-    })
+    }])
     if create:
         store.append_jsonl("candidates", {
             "id": "frontier-candidate", "status": "candidate", "kind": "creative_pull",
