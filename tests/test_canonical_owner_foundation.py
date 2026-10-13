@@ -376,3 +376,101 @@ def test_indexed_context_is_total_for_nonstring_event_refs(tmp_path, invalid):
     assert result.complete and result.state == "ready"
     assert [event["id"] for event in result.value["events"]] == ["e"]
     assert canonical(store) == before
+
+
+@pytest.mark.parametrize("stream", ["decisions", "candidates"])
+@pytest.mark.parametrize("field", ["member_keys", "selected_member_keys"])
+@pytest.mark.parametrize("invalid", [3, {}])
+def test_ordinary_source_malformed_present_members_no_settlement(tmp_path, stream, field, invalid):
+    store = foundation_seed(tmp_path)
+    binding, error = admission.binding_for_candidate(store, "c")
+    assert error is None and binding["identity_mode"] == "source"
+    assert "member_keys" not in binding
+    malformed = {**binding, field: [invalid]}
+    store.append_jsonl(stream, {"id":"adv", "kind":"subconscious_advisory", "status":"held",
+        "dry_run":False, "action":"drop", "output_action":"DROP", "admission_binding":malformed})
+    before = canonical(store)
+    raw = admission._prior_for_binding(store, binding, raw_snapshot(store))
+    cacheless = admission.build_admission_plan(store)
+    foundation_finish(store)
+    indexed = admission.build_admission_plan(store)
+    assert canonical(store) == before
+    print({"stream":stream,"field":field,"invalid":invalid,"raw_decided":raw[1],
+           "cacheless_selection":cacheless["selection"],"indexed_selection":indexed["selection"]})
+    assert raw[1] is False
+    assert cacheless["selection"] == indexed["selection"] == binding
+
+
+@pytest.mark.parametrize("authority", ["receipt", "held", "nested_held", "terminal", "nested_terminal"])
+@pytest.mark.parametrize("source", [False, True])
+@pytest.mark.parametrize("historical", [False, True])
+@pytest.mark.parametrize("field", [None, "member_keys", "selected_member_keys"])
+def test_ordinary_prior_member_validation_and_absent_inverse(
+    tmp_path, authority, source, historical, field,
+):
+    store = foundation_seed(tmp_path, source=source)
+    binding, error = admission.binding_for_candidate(store, "c")
+    assert error is None and "member_keys" not in binding
+    prior = dict(binding)
+    if historical:
+        prior["policy_version"] = "source-admission-v1"
+    terminal = "terminal" in authority
+    if terminal:
+        prior["admission_key"] = "old-admission"
+        prior["revision_key"] = "old-revision"
+    if field is not None:
+        prior[field] = [3]
+    row = {"id": "adv", "kind": "subconscious_advisory",
+           "status": "archived" if terminal else "held", "source_candidate_ids": ["c"],
+           "dry_run": False, "action": "drop", "output_action": "DROP"}
+    if authority.startswith("nested_"):
+        row["advisory_meta"] = {"admission_binding": prior}
+    else:
+        row["admission_binding"] = prior
+    store.append_jsonl("decisions" if authority == "receipt" else "candidates", row)
+    before = canonical(store)
+    raw = admission._prior_for_binding(store, binding, raw_snapshot(store))
+    cacheless = admission.build_admission_plan(store)
+    foundation_finish(store)
+    indexed = admission.build_admission_plan(store)
+    assert canonical(store) == before
+    valid = field is None
+    assert raw[1] is valid
+    assert bool(raw[0]) is valid
+    expected_reason = ("explicit_item_closure" if terminal else "prior_disposition") if valid else None
+    assert raw[2] == expected_reason
+    assert cacheless["selection"] == indexed["selection"] == (None if valid else binding)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("field", [None, "member_keys", "selected_member_keys"])
+def test_legacy_exact_fallback_rejects_present_members_but_keeps_absent_inverse(
+    tmp_path, nested, field,
+):
+    store = foundation_seed(tmp_path, source=False)
+    binding, error = admission.binding_for_candidate(store, "c")
+    assert error is None and binding["identity_mode"] == "legacy"
+    # A genuine unbound advisory is the historical legacy-exact inverse.
+    prior = {**binding, "item_key": "other-item", "admission_key": "other-admission"}
+    if field is not None:
+        prior[field] = [{}]
+    row = {"id": "adv", "kind": "subconscious_advisory", "status": "held",
+           "source_candidate_ids": ["c"],
+           "source_candidate_fingerprint": binding["source_candidate_fingerprint"]}
+    if field is not None:
+        if nested:
+            row["advisory_meta"] = {"admission_binding": prior}
+        else:
+            row["admission_binding"] = prior
+    store.append_jsonl("candidates", row)
+    before = canonical(store)
+    raw = admission._prior_for_binding(store, binding, raw_snapshot(store))
+    cacheless = admission.build_admission_plan(store)
+    foundation_finish(store)
+    indexed = admission.build_admission_plan(store)
+    assert canonical(store) == before
+    valid = field is None
+    assert raw[1] is valid
+    assert bool(raw[0]) is valid
+    assert raw[2] == ("legacy_exact_source_disposition" if valid else None)
+    assert cacheless["selection"] == indexed["selection"] == (None if valid else binding)

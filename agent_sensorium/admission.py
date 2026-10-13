@@ -584,7 +584,10 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
     reason = None
     for row in snap["decisions"]:
         prior = row.get("admission_binding")
-        if not isinstance(prior, dict) or prior.get("item_key") != binding["item_key"]:
+        if (
+            not isinstance(prior, dict) or not _member_reference_shape(prior)
+            or prior.get("item_key") != binding["item_key"]
+        ):
             continue
         relevant.append(_decision_projection(row))
         if (
@@ -598,6 +601,9 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
         if row.get("kind") != "subconscious_advisory":
             continue
         prior = _advisory_binding(row)
+        # Invalid present members cannot become legacy-exact fallback authority.
+        if isinstance(prior, dict) and not _member_reference_shape(prior):
+            continue
         if isinstance(prior, dict) and prior.get("item_key") == binding["item_key"]:
             relevant.append({
                 "ts": row.get("updated_at") or row.get("created_at"),
