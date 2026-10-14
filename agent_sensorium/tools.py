@@ -725,6 +725,9 @@ def _append_event_and_create_or_update_candidate(
     candidate = event_to_candidate(event, config)
     if related:
         related = lookup_record(record_index(candidates), related["id"]).row
+        # Decay replaces rows and can retire the owner selected by preflight.
+        if related and (related.get("status", "candidate") != "candidate" or related.get("extinct")):
+            related = None
     if related:
         receipt = _coalesce_candidate_with_event(
             store,

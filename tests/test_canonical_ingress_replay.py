@@ -310,3 +310,53 @@ def test_malformed_fresh_claim_does_not_fall_back_to_legacy(tmp_path, monkeypatc
     forbid_effects(store, monkeypatch)
     assert not call(store, row)["success"]
     assert snapshot(store) == before
+
+
+@pytest.mark.parametrize("owner", ["signal", "trusted_event", "internal"])
+def test_new_revision_survives_prior_owner_extinction(tmp_path, monkeypatch, owner):
+    store = store_at(tmp_path)
+    first = ingest(store, signal())
+    rows = store.read_jsonl("candidates")
+    rows[0].update(created_at="2000-01-01T00:00:00Z", updated_at="2000-01-01T00:00:00Z")
+    old_event_ids = list(rows[0]["event_ids"])
+    store.rewrite_jsonl("candidates", rows)
+    observers = []
+    monkeypatch.setattr(tools, "observe_after_success",
+                        lambda *args, **kwargs: observers.append((args[2], args[3])))
+    fresh = signal("new-wrapper", "r2")
+    if owner == "signal":
+        response = call(store, fresh)
+        assert response["success"]
+        result = response["data"]
+    else:
+        store.append_jsonl("signals", fresh)
+        event = promote_signal_to_event(fresh)
+        if owner == "trusted_event":
+            response = call(store, event, event=True)
+            assert response["success"]
+            result = response["data"]
+        else:
+            result = tools._append_event_and_create_or_update_candidate(store, event=event, config={})
+    after = store.read_jsonl("candidates")
+    actual = dict(owner=owner, result=result, candidates=after, observers=observers)
+    print("EXTINCTION_OBSERVATION " + json.dumps(actual, sort_keys=True))
+    old = next(row for row in after if row["id"] == first["candidate_id"])
+    assert old["extinct"] and old["status"] == "suppressed"
+    assert not result["coalesced"], actual
+    assert result["candidate_id"] != first["candidate_id"], actual
+    new = next(row for row in after if row["id"] == result["candidate_id"])
+    assert new["status"] == "candidate" and not new.get("extinct")
+    assert len(after) == 2
+    assert result["event_id"] != first["event_id"]
+    assert old["event_ids"] == old_event_ids
+    assert new["event_ids"] == [result["event_id"]]
+    assert not store.read_jsonl("decisions")
+    expected_stages = {"signal": ["source_observed", "candidate_updated"],
+                       "trusted_event": ["candidate_updated"], "internal": []}
+    assert [stage for stage, _ in observers] == expected_stages[owner]
+    if observers:
+        stage, evidence = observers[-1]
+        assert stage == "candidate_updated"
+        assert evidence["change_state"] == "new"
+        assert evidence["candidate_id"] == new["id"]
+        assert evidence["event_id"] == result["event_id"]
