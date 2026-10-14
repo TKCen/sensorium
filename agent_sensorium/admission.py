@@ -210,6 +210,33 @@ def equivalent_source_claims(left: SignalClaim, right: SignalClaim) -> bool:
     return left.kind == right.kind == "source" and left == right
 
 
+def classify_event_claim(instance: str, event: dict, *, signals: list[dict]) -> SignalClaim:
+    """Classify a complete retained or prospective join without filtering failures.
+
+    Empty references preserve standalone trusted legacy events. Referenced legacy
+    signals must still resolve uniquely; mixed, partial or invalid joins fail.
+    Callers may supply a prospective signal alongside retained rows before writes.
+    """
+    refs = event.get("source_signal_ids", [])
+    if not isinstance(refs, list):
+        return SignalClaim("malformed", error="invalid_event_join")
+    index = record_index(signals)
+    claims = []
+    for identifier in refs:
+        found = lookup_record(index, identifier)
+        if found.state != "unique" or found.row is None:
+            return SignalClaim("malformed", error="invalid_event_join")
+        claim = classify_signal_claim(instance, found.row)
+        if claim.kind == "malformed":
+            return SignalClaim("malformed", error="invalid_event_join")
+        claims.append(claim)
+    if not claims or all(claim.kind == "legacy" for claim in claims):
+        return SignalClaim("legacy")
+    if all(equivalent_source_claims(claims[0], claim) for claim in claims):
+        return claims[0]
+    return SignalClaim("malformed", error="invalid_event_join")
+
+
 class _UniqueSnapshot(dict):
     """Indexes owned by one immutable admission view, never serialized trust."""
 
@@ -865,22 +892,11 @@ def event_source_item_identity(
 ) -> tuple[str, str] | None:
     """Return one unambiguous item/revision claim joined through event signals."""
     rows = signals if signals is not None else store.read_jsonl("signals")
-    signal_index = record_index(rows)
-    signal_ids = event.get("source_signal_ids") or []
-    if not isinstance(signal_ids, list) or not signal_ids or any(
-        lookup_record(signal_index, identifier).state != "unique" for identifier in signal_ids
-    ):
-        return None
-    identities: set[tuple[str, str]] = set()
-    for signal_id in signal_ids:
-        signal = lookup_record(signal_index, signal_id).row
-        if not isinstance(signal, dict):
-            return None
-        identity = signal_source_item_identity(store.instance, signal)
-        if identity is None:
-            return None
-        identities.add(identity)
-    return next(iter(identities)) if len(identities) == 1 else None
+    claim = classify_event_claim(store.instance, event, signals=rows)
+    if (claim.kind == "source" and claim.item_key is not None and claim.revision_key is not None
+            and claim.evidence_class in {"source_owned", "internal_interpretation"}):
+        return claim.item_key, claim.revision_key
+    return None
 
 
 def event_source_item_key(

@@ -8,6 +8,8 @@ Correlation is a thematic relationship, not equality. Complete source-owned item
 
 Multiple complete records per bounded index pass improve progress without replacing cursor/fingerprint/lock authority. A partial tail waits for completion. Neither newest-N snapshots nor time expiry preserve old unresolved material.
 
+Representation fingerprints omit some canonical evidence (notably memory members), so they cannot authorize source replay. Ingress reuses the canonical signal classifier and record-local uniqueness owner, with one typed prospective/retained event-join API. Its legacy/source/malformed result distinguishes a genuinely unversioned trusted event from failed joins; the compatibility identity projection still returns no item for telemetry or legacy. Literal wrapper collisions and ambiguous replay lineages fail before writes or observers. Fresh material needs a fresh wrapper, not a replacement append under an old ID. Preflighting the ordinary signal's downstream event avoids a partial signal append without introducing rollback machinery. Equal legacy representations and complete equivalent producer material remain valid replay inverses.
+
 ## Latent context is not a new foreground job
 
 An explicitly selected review may benefit from held/dormant context, but projection must not launch a review or write lifecycle state. Explicit hold provenance differs from recorded status; operator evaluation differs from preference; ledger touch differs from source observation time. Unknown remains unknown. Output caps are real, but full input reads are unbounded and the projection reports incomplete semantics. No automatic native consumer is included.

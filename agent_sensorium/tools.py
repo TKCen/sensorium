@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .attention import build_attention_inbox
+from .admission import classify_event_claim, classify_signal_claim, equivalent_source_claims
+from .canonical_records import lookup_record, record_index
 from .dispatcher import current_budget_state, dispatch_once as _dispatch_once
 from .gate import (
     build_pressure_pitch,
@@ -374,48 +376,55 @@ def _stored_candidate_fingerprint(candidate: dict) -> str:
 
 
 def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | None:
-    for candidate in candidates:
-        if event_id in (candidate.get("event_ids") or []):
-            return candidate
-    return None
+    return _unique_match(candidates, [row for row in candidates
+                                    if event_id in (row.get("event_ids") or [])])
 
 
 def _candidate_for_event_fingerprint(candidates: list[dict], event: dict) -> dict | None:
     event_candidate = event_to_candidate(event)
     event_candidate_fp = event_candidate.get("fingerprint") or candidate_fingerprint(event_candidate)
-    for candidate in candidates:
-        if _stored_candidate_fingerprint(candidate) == event_candidate_fp:
-            return candidate
-    return None
+    return _unique_match(candidates, [row for row in candidates
+                                    if _stored_candidate_fingerprint(row) == event_candidate_fp])
 
 
-def _find_existing_signal(signals: list[dict], normalized: dict) -> dict | None:
-    incoming_fp = normalized.get("fingerprint") or signal_fingerprint(normalized)
-    incoming_id = normalized.get("id")
-    for existing in signals:
-        if incoming_id and existing.get("id") == incoming_id:
-            return existing
-        if _stored_signal_fingerprint(existing) == incoming_fp:
-            return existing
-    return None
+def _unique_match(rows: list[dict], matches: list[dict]) -> dict | None:
+    """Never select a first/last entity or a duplicate literal identifier."""
+    index = record_index(rows)
+    if len(matches) > 1 or any(lookup_record(index, row.get("id")).state != "unique"
+                               for row in matches):
+        raise ValueError("ambiguous_ingress_lineage")
+    return matches[0] if matches else None
 
 
-def _find_existing_event(events: list[dict], incoming: dict) -> dict | None:
-    incoming_fp = incoming.get("fingerprint") or event_fingerprint(incoming)
-    incoming_id = incoming.get("id")
-    for existing in events:
-        if incoming_id and existing.get("id") == incoming_id:
-            return existing
-        if _stored_event_fingerprint(existing) == incoming_fp:
-            return existing
-    return None
+def _canonical_replays(rows, incoming, *, classify, fingerprint):
+    """Canonical equality owns replay; fingerprints only compare legacy views."""
+    claim = classify(incoming)
+    if claim.kind == "malformed":
+        raise ValueError("invalid_ingress_claim")
+    index = record_index(rows)
+    found = lookup_record(index, incoming.get("id"))
+    if found.state == "ambiguous":
+        raise ValueError("ambiguous_ingress_wrapper")
+
+    def equivalent(row):
+        prior = classify(row)
+        return equivalent_source_claims(claim, prior) or (
+            claim.kind == prior.kind == "legacy" and fingerprint(row) == fingerprint(incoming)
+        )
+
+    if found.row is not None and not equivalent(found.row):
+        raise ValueError("ingress_wrapper_collision")
+    matches = [row for row in rows if equivalent(row)]
+    if any(lookup_record(index, row.get("id")).state != "unique" for row in matches):
+        raise ValueError("ambiguous_ingress_wrapper")
+    if len(matches) > 1:
+        raise ValueError("ambiguous_ingress_material")
+    return matches
 
 
 def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
-    for event in events:
-        if signal_id in (event.get("source_signal_ids") or []):
-            return event
-    return None
+    return _unique_match(events, [row for row in events
+                                 if signal_id in (row.get("source_signal_ids") or [])])
 
 
 GENERIC_CORRELATION_KEYS = {"active-session"}
@@ -453,14 +462,18 @@ def _find_related_candidate(
     if incoming_identity is None:
         return None
     incoming_item = incoming_identity[0]
-    event_index = {row.get("id"): row for row in events}
+    event_index = record_index(events)
+    candidate_index = record_index(candidates)
+    matches = []
     for candidate in candidates:
+        if lookup_record(candidate_index, candidate.get("id")).state != "unique":
+            continue
         if candidate.get("status", "candidate") != "candidate":
             continue
         if candidate.get("kind") != event.get("kind"):
             continue
         candidate_event_ids = list(candidate.get("event_ids") or [])
-        prior_events = [event_index.get(event_id) for event_id in candidate_event_ids]
+        prior_events = [lookup_record(event_index, event_id).row for event_id in candidate_event_ids]
         if not prior_events or any(not isinstance(prior_event, dict) for prior_event in prior_events):
             continue
         prior_identities = [
@@ -470,8 +483,8 @@ def _find_related_candidate(
         if any(identity is None for identity in prior_identities):
             continue
         if {identity[0] for identity in prior_identities if identity is not None} == {incoming_item}:
-            return candidate
-    return None
+            matches.append(candidate)
+    return _unique_match(candidates, matches)
 
 
 def _read_pruned_sensor_policy(
@@ -519,10 +532,7 @@ def _apply_candidate_decay(
 
 
 def _event_to_existing_result(event: dict, candidates: list[dict]) -> dict:
-    candidate = (
-        _candidate_for_event_id(candidates, event.get("id", ""))
-        or _candidate_for_event_fingerprint(candidates, event)
-    )
+    candidate = _candidate_for_event_id(candidates, event.get("id", ""))
     result = {
         "event_id": event.get("id"),
         "duplicate": True,
@@ -550,7 +560,7 @@ def _promoted_signal_existing_result(signal: dict, events: list[dict], candidate
 
 @_candidate_transactional
 def _narrow_replay_visibility(
-    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(),
+    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(), check_only=False,
 ) -> None:
     """Restrict retained lineage for future disclosure, never replay its effects.
 
@@ -561,6 +571,39 @@ def _narrow_replay_visibility(
     events = store.read_jsonl("events")
     candidates = store.read_jsonl("candidates")
     signal_ids, event_ids = set(signal_ids), set(event_ids)
+
+    # Validate the entire reachable lineage before mutating even in-memory rows.
+    signal_index, event_index = record_index(signals), record_index(events)
+    candidate_index = record_index(candidates)
+    for identifier in signal_ids:
+        if lookup_record(signal_index, identifier).state != "unique":
+            raise ValueError("ambiguous_ingress_lineage")
+    for row in events:
+        if row.get("id") in event_ids or signal_ids.intersection(row.get("source_signal_ids") or []):
+            if (lookup_record(event_index, row.get("id")).state != "unique"
+                    or classify_event_claim(store.instance, row, signals=signals).kind == "malformed"):
+                raise ValueError("ambiguous_ingress_lineage")
+            event_ids.add(row.get("id"))
+    affected = {row.get("id") for row in candidates
+                if event_ids.intersection(row.get("event_ids") or [])}
+    while True:
+        descendants = {row.get("id") for row in candidates
+                       if affected.intersection(row.get("source_candidate_ids") or [])}
+        if descendants.issubset(affected):
+            break
+        affected.update(descendants)
+    for identifier in affected:
+        row = lookup_record(candidate_index, identifier).row
+        if row is None or any(lookup_record(event_index, ref).state != "unique"
+                              for ref in row.get("event_ids") or []):
+            raise ValueError("ambiguous_ingress_lineage")
+    threads = store.read_jsonl("threads")
+    thread_index = record_index(threads)
+    if any(lookup_record(thread_index, row.get("id")).state != "unique"
+           for row in threads if row.get("origin_candidate_id") in affected):
+        raise ValueError("ambiguous_ingress_lineage")
+    if check_only:
+        return
 
     def narrow(row):
         sensitivity = merge_sensitivity([
@@ -670,29 +713,18 @@ def _append_event_and_create_or_update_candidate(
     signals = store.read_jsonl("signals")
     candidates = store.read_jsonl("candidates")
 
-    existing_event = _find_existing_event(events, event)
-    from .admission import event_source_item_identity
-
-    if existing_event is None:
-        incoming_identity = event_source_item_identity(store, event, signals=signals)
-        if incoming_identity is not None:
-            existing_event = next((row for row in events
-                                   if event_source_item_identity(store, row, signals=signals) == incoming_identity), None)
-    if existing_event:
-        retained_identity = event_source_item_identity(store, existing_event, signals=signals)
-        replay_ids = [existing_event["id"]]
-        if retained_identity is not None:
-            replay_ids = [row["id"] for row in events
-                          if event_source_item_identity(store, row, signals=signals) == retained_identity]
-        _narrow_replay_visibility(store, event, event_ids=replay_ids)
-        return _event_to_existing_result(existing_event, candidates)
+    replays, related = _preflight_event(store, event, events=events, signals=signals,
+                                        candidates=candidates)
+    if replays:
+        result = _event_to_existing_result(replays[0], candidates)
+        _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays])
+        return result
 
     _apply_candidate_decay(store, candidates, config=config)
     store.append_jsonl("events", event)
     candidate = event_to_candidate(event, config)
-    related = _find_related_candidate(
-        store, candidates, event, events=events, signals=signals,
-    )
+    if related:
+        related = lookup_record(record_index(candidates), related["id"]).row
     if related:
         receipt = _coalesce_candidate_with_event(
             store,
@@ -716,6 +748,22 @@ def _append_event_and_create_or_update_candidate(
         "duplicate": False,
         "coalesced": False,
     }
+
+
+def _preflight_event(store, event, *, events, signals, candidates):
+    replays = _canonical_replays(
+        events, event,
+        classify=lambda row: classify_event_claim(store.instance, row, signals=signals),
+        fingerprint=event_fingerprint,
+    )
+    if replays:
+        for row in replays:
+            _event_to_existing_result(row, candidates)
+        _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays],
+                                 check_only=True)
+        return replays, None
+    related = _find_related_candidate(store, candidates, event, events=events, signals=signals)
+    return [], related
 
 
 def handle_sensorium_sensor_config(
@@ -877,35 +925,35 @@ def handle_sensorium_ingest_signal(
     if config is None:
         config, _ = load_instance_config(state_dir=str(store.root))
 
+    if classify_signal_claim(instance, signal).kind == "malformed":
+        return _err(instance, "invalid_ingress_claim")
     normalized = normalize_signal(signal)
-    normalized["fingerprint"] = signal_fingerprint(normalized)
-
     signals = store.read_jsonl("signals")
-    existing_signal = _find_existing_signal(signals, normalized)
-    if existing_signal is None:
-        from .admission import signal_source_item_identity
-
-        incoming_identity = signal_source_item_identity(instance, normalized)
-        if incoming_identity is not None:
-            existing_signal = next(
-                (
-                    prior for prior in signals
-                    if signal_source_item_identity(instance, prior) == incoming_identity
-                ),
-                None,
-            )
-    if existing_signal:
-        from .admission import signal_source_item_identity
-
-        retained_identity = signal_source_item_identity(instance, existing_signal)
-        replay_ids = [existing_signal["id"]]
-        if retained_identity is not None:
-            replay_ids = [row["id"] for row in signals
-                          if signal_source_item_identity(instance, row) == retained_identity]
-        _narrow_replay_visibility(store, normalized, signal_ids=replay_ids)
+    try:
+        replays = _canonical_replays(signals, normalized,
+                                    classify=lambda row: classify_signal_claim(instance, row),
+                                    fingerprint=signal_fingerprint)
         events = store.read_jsonl("events")
         candidates = store.read_jsonl("candidates")
-        return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
+        if replays:
+            results = [_promoted_signal_existing_result(row, events, candidates) for row in replays]
+            _narrow_replay_visibility(store, normalized, signal_ids=[row["id"] for row in replays])
+            return _ok(instance, results[0])
+        # Read/prune without persistence until downstream admission is proven.
+        policy = prune_sensor_policy(store.read_sensor_policy(), config=config)
+        inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
+        promoted, reason = should_promote_signal(normalized, config)
+        if not promoted:
+            promoted, supported_reason = should_promote_supported_signal(normalized, signals, config)
+            if promoted:
+                reason = supported_reason
+        event = promote_signal_to_event(normalized, config) if promoted and not inhibited else None
+        if event is not None:
+            _preflight_event(store, event, events=events, signals=[*signals, normalized],
+                             candidates=candidates)
+    except ValueError as exc:
+        return _err(instance, str(exc))
+    normalized["fingerprint"] = signal_fingerprint(normalized)
 
     policy = _read_pruned_sensor_policy(store, config=config)
     inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
@@ -934,11 +982,6 @@ def handle_sensorium_ingest_signal(
             "reason": f"inhibited: {inhibition_reason}",
         })
 
-    promoted, reason = should_promote_signal(normalized, config)
-    if not promoted:
-        promoted, supported_reason = should_promote_supported_signal(normalized, signals, config)
-        if promoted:
-            reason = supported_reason
     result: dict = {
         "signal_id": normalized["id"],
         "promoted": promoted,
@@ -947,7 +990,7 @@ def handle_sensorium_ingest_signal(
     }
 
     if promoted:
-        event = promote_signal_to_event(normalized, config)
+        assert event is not None
         event_result = _append_event_and_create_or_update_candidate(store, event=event, config=config)
         # Detached best-effort observer runs only after the canonical owner commits.
         observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
@@ -1002,14 +1045,15 @@ def handle_sensorium_ingest_event(
     incoming.setdefault("sensitivity", "private")
     incoming.setdefault("allowed_surfaces", ["local"])
     incoming.setdefault("expires_at", "")
-    incoming["fingerprint"] = event_fingerprint(incoming)
-
     try:
         validate_event(incoming)
+        if classify_event_claim(instance, incoming, signals=store.read_jsonl("signals")).kind == "malformed":
+            return _err(instance, "invalid_ingress_claim")
+        incoming["fingerprint"] = event_fingerprint(incoming)
+        result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
     except ValueError as e:
         return _err(instance, str(e))
 
-    result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
     if not result.get("duplicate"):
         observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
             "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),

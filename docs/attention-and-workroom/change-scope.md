@@ -27,7 +27,7 @@ This candidate implements three attention changes and documents a native/workroo
 
 ## Retained protections
 
-The canonical admission foundation rejects ambiguous candidate/advisory authority, preserves malformed joins without projection filtering and constructs uniqueness indexes once per immutable snapshot. Unique uncertain candidates may retain legacy first consideration, never a fresh producer revision. Existing quadratic prior scans and measured SQL work are not a new hard execution budget. Tools ingress (B) and lineage visibility (C) remain future-gated and unchanged.
+The canonical admission foundation rejects ambiguous candidate/advisory authority, preserves malformed joins without projection filtering and constructs uniqueness indexes once per immutable snapshot. Unique uncertain candidates may retain legacy first consideration, never a fresh producer revision. Existing quadratic prior scans and measured SQL work are not a new hard execution budget. Tools ingress (B) now classifies canonical claims and complete typed event joins before replay or effects, rejecting wrapper collisions and ambiguous replay descendants. Its local implementation requires independent acceptance; lineage visibility policy (C) remains held and unchanged. No cache/schema, fingerprint protocol or observer contract is changed by B.
 
 - **Instance/config/store/live/admin:** canonical instance validation before effects, no live arbitrary state-root injection, small ordinary tool surface, explicit admin and generic configurable profiles.
 - **Admission/current attention:** source authority and anti-paraphrase suppression, unresolved/held eligibility, bounded attempts and exact index/completeness owners; no capacity-burn projection/window remapping restored.
