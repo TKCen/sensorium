@@ -10,6 +10,7 @@ from agent_sensorium.tools import (
     handle_sensorium_thread_update,
 )
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 
 
 def _thread(**overrides):
@@ -53,6 +54,7 @@ def test_thread_open_returns_compact_capsule_when_surface_allowed(tmp_path):
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["local", "discord"])
     store.append_jsonl("threads", _thread())
+    retain_thread_parents(store)
 
     result = json.loads(
         handle_sensorium_thread_open(
@@ -88,6 +90,7 @@ def test_thread_update_closes_thread_and_removes_pointer_eligibility(tmp_path):
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["local", "discord"])
     store.append_jsonl("threads", _thread())
+    retain_thread_parents(store)
 
     before = json.loads(
         handle_sensorium_attention_pointer(
@@ -329,6 +332,7 @@ class TestThreadOpenPolicyUnification:
         store.ensure_dirs()
         _write_config(tmp_path, surfaces=["local"])
         store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         result = json.loads(handle_sensorium_thread_open(
             instance="test", state_dir=str(tmp_path),
@@ -370,6 +374,7 @@ class TestThreadOpenPolicyUnification:
         store = SensoriumStore(instance="test", state_dir=str(tmp_path))
         store.ensure_dirs()
         store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         result = json.loads(handle_sensorium_thread_open(
             instance="test", state_dir=str(tmp_path),

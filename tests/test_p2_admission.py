@@ -17,6 +17,7 @@ from agent_sensorium.sensors import classify_hindsight_pressure, classify_machin
 from agent_sensorium.store import SensoriumStore
 from agent_sensorium.subconscious import run_subconscious_advisory
 from agent_sensorium.tools import handle_sensorium_ingest_signal
+from tests.test_source_closure_contract import reject_then_retain_historical
 
 ROOT = Path(__file__).parents[1]
 
@@ -358,7 +359,7 @@ def test_04d_distinct_native_memory_item_set_preserves_first_consideration(tmp_p
 def test_04e_malformed_or_forged_native_memory_identity_is_suppressed(tmp_path):
     store = _store(tmp_path, "p4-memory-malformed")
     malformed = _memory_signal("bad-memory", "Malformed generated identity", ["memory-a", "memory-a"])
-    _ingest(store, malformed)
+    reject_then_retain_historical(store, malformed)
     plan = build_admission_plan(store)
     assert plan["selection"] is None
     assert plan["suppressed_counts"] == {"malformed_memory_identity": 1}
@@ -425,7 +426,17 @@ def test_07_transition_sequence_and_real_ingest_distinguish_later_episode_withou
     assert quiet is None
     assert transition["source_revision"] == heartbeat["source_revision"] == "1"
     assert recovered["source_revision"] == "2" and later_fault["source_revision"] == "3"
-    for signal in (transition, heartbeat, recovered, later_fault):
+    assert _ingest(store, transition)["duplicate"] is False
+    from unittest.mock import patch
+    before = {str(p.relative_to(store.root)): p.read_bytes()
+              for p in store.root.rglob("*") if p.is_file()}
+    from agent_sensorium import tools
+    with patch.object(tools, "observe_after_success", side_effect=AssertionError("No observer")), \
+         patch.object(tools, "_apply_candidate_decay", side_effect=AssertionError("No decay")):
+        assert _ingest(store, heartbeat)["duplicate"] is True
+    assert {str(p.relative_to(store.root)): p.read_bytes()
+            for p in store.root.rglob("*") if p.is_file()} == before
+    for signal in (recovered, later_fault):
         assert _ingest(store, signal)["duplicate"] is False
 
 
@@ -635,7 +646,7 @@ def test_matrix_08_malformed_partial_ids_never_claim_member_identity(tmp_path):
     malformed_sets = [["A", "A"], [""], ["x" * 513], [" A"], ["A", 7]]
     for index, item_ids in enumerate(malformed_sets):
         store = _store(tmp_path, f"matrix-malformed-{index}")
-        _ingest(store, _memory_signal(f"bad-{index}", "bad", item_ids))
+        reject_then_retain_historical(store, _memory_signal(f"bad-{index}", "bad", item_ids))
         plan = build_admission_plan(store)
         assert plan["selection"] is None
         assert plan["suppressed_counts"] == {"malformed_memory_identity": 1}

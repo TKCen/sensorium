@@ -498,8 +498,12 @@ def test_retry_updates_do_not_overwrite_corrupt_durable_owner_state():
 ])
 def test_nonqualifying_prior_support_cannot_promote_genuine_weak_source(tmp_path, prior):
     store = _store(tmp_path, f"negative-support-{prior['id']}")
-    first = _ingest(store, prior)
-    assert first["promoted"] is False
+    if prior["id"] == "malformed":
+        from tests.test_source_closure_contract import reject_then_retain_historical
+        reject_then_retain_historical(store, prior, promoted=False)
+    else:
+        first = _ingest(store, prior)
+        assert first["promoted"] is False
     incoming = _research("genuine", "genuine-item", strength=0.4, key="subject:support")
     result = _ingest(store, incoming)
     assert result["promoted"] is False

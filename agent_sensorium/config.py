@@ -1,9 +1,9 @@
 """Instance config loading, validation, and policy application.
 
 Config is loaded from (in order): explicit config_path argument, then
-{state_dir}/instance.config.json, then safe defaults. Missing or corrupt
-config falls back to safe defaults — local-only surfaces, private sensitivity,
-minimal budgets.
+{state_dir}/instance.config.json, then safe defaults. Absent config uses
+local-only defaults; unreadable present config retains diagnostic defaults
+without disclosure authority.
 
 Policy functions only narrow scope; they never broaden an item's sensitivity
 or allowed_surfaces beyond what the item already has.
@@ -470,11 +470,23 @@ def resolve_config_path(
 ) -> Path | None:
     if config_path:
         p = Path(config_path)
-        if p.is_file():
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return p
+        else:
             return p
     if state_dir:
         p = Path(state_dir) / "instance.config.json"
-        if p.is_file():
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return p
+        else:
             return p
     return None
 
@@ -642,8 +654,9 @@ def load_instance_config(
 
     try:
         raw = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeError):
         config = _validate_config({})
+        config["_visibility_invalid"] = True
         diag = _config_diagnostics(config, source="defaults", path=str(path))
         diag["error"] = "config_unreadable"
         return config, diag
@@ -829,13 +842,26 @@ class DisclosureVisibility:
                 and self.linked(found.row, trail | {key}, owner=key))
 
     def linked(self, record: object, trail: frozenset = frozenset(), *, owner=None) -> bool:
+        return self._linked(record, trail, owner=owner)[0]
+
+    def _linked(self, record: object, trail: frozenset = frozenset(), *, owner=None,
+                source_refs=False) -> tuple[bool, bool]:
+        """Return validity and resolved linkage from the same traversal."""
         if not isinstance(record, dict):
-            return False
+            return False, False
         linked = False
         for field, kind in (("candidate_id", "candidate"), ("origin_candidate_id", "candidate"),
                             ("thread_id", "thread")):
             identifier = record.get(field)
-            if identifier is None:
+            # Legacy operational receipts use null for absent direct subjects.
+            # Inside canonical source_refs only the documented string placeholder
+            # can be absent; null or other falsy members remain malformed.
+            if field not in record or (identifier is None and not source_refs):
+                continue
+            # The canonical artifact writer retains this absence beside a
+            # resolved candidate parent, not in arbitrary subject declarations.
+            if (source_refs and field == "thread_id" and identifier == "" and linked
+                    and isinstance(record.get("candidate_id"), str) and record["candidate_id"]):
                 continue
             linked = True
             # Own entity declarations in embedded capsules are not dependency
@@ -843,50 +869,39 @@ class DisclosureVisibility:
             if field in {"candidate_id", "thread_id"} and (kind, identifier) == owner:
                 continue
             if not self.subject(kind, identifier, trail):
-                return False
+                return False, False
         if "source_candidate_ids" in record:
             identifiers = record["source_candidate_ids"]
             if not isinstance(identifiers, list):
-                return False
+                return False, False
             for identifier in identifiers:
                 linked = True
                 if not self.subject("candidate", identifier, trail):
-                    return False
+                    return False, False
         binding = record.get("admission_binding")
         if binding is not None:
             linked = True
             if not isinstance(binding, dict) or not self.subject("candidate", binding.get("source_candidate_id"), trail):
-                return False
+                return False, False
         for field, value in record.items():
             if field in {"admission_binding", "source_candidate_ids"}:
                 continue
             children = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
             for child in children:
                 if isinstance(child, dict):
-                    if not self.linked(child, trail, owner=owner):
-                        return False
-                    linked = linked or self._declares_subject(child)
+                    valid, resolved = self._linked(child, trail, owner=owner,
+                                                   source_refs=field == "source_refs" and isinstance(value, dict))
+                    if not valid:
+                        return False, False
+                    linked = linked or resolved
         if "source_refs" in record and not isinstance(record["source_refs"], (dict, list)):
-            return False
+            return False, False
         if not linked and record.get("type") == "subconscious.advisory":
             if (record.get("output_action") in ("DROP", "SAVE", "CREATE_CONSCIOUS_TASK")
                     or record.get("action") in ("drop", "save", "would_create_conscious_task",
                                                "created_conscious_task_candidate", "updated_conscious_task_candidate")):
-                return False
-        return True
-
-    @staticmethod
-    def _declares_subject(record: dict) -> bool:
-        """Find canonical linkage, not opaque provenance strings."""
-        for key, value in record.items():
-            if key in {"candidate_id", "origin_candidate_id", "thread_id",
-                       "admission_binding", "source_candidate_ids"} and value is not None:
-                return True
-            children = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
-            if any(isinstance(child, dict) and DisclosureVisibility._declares_subject(child)
-                   for child in children):
-                return True
-        return False
+                return False, False
+        return True, linked
 
 
 def apply_surface_policy(

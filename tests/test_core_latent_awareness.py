@@ -4,6 +4,7 @@ import json
 import pytest
 
 from agent_sensorium import attention
+from agent_sensorium.config import DisclosureVisibility
 from agent_sensorium.store import SensoriumStore
 
 POLICY = {"allowed_surfaces": ["local"], "max_sensitivity": "private"}
@@ -23,7 +24,8 @@ def receipt(identifier="sth-a", action="hold", ts="2026-01-01T00:00:00Z"):
 
 def group(rows, decisions=None, **kwargs):
     return attention._ongoing_thread_group(rows, decisions or [], surface="local", config=POLICY,
-                                           previous_activation_at="2026-01-01T00:00:00Z", **kwargs)
+                                           previous_activation_at="2026-01-01T00:00:00Z",
+                                           disclosure=DisclosureVisibility([], rows, "local", POLICY), **kwargs)
 
 
 @pytest.mark.parametrize("field,value", [

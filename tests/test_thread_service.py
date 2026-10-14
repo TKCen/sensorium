@@ -9,6 +9,7 @@ from agent_sensorium.tools import (
     handle_sensorium_thread_update,
 )
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 
 
 def _thread(tmp_path=None, store=None, **overrides):
@@ -52,6 +53,8 @@ def _candidate(**overrides):
         "kind": "design_decision",
         "pressure": 0.8,
         "summary": "Service test candidate",
+        "sensitivity": "private",
+        "allowed_surfaces": ["local"],
         "correlation_keys": ["test-key"],
         "fingerprint": "fp_service_test",
         "updated_at": "2026-05-20T10:00:00Z",
@@ -532,6 +535,7 @@ def test_hold_reason_preserved_in_thread_open(tmp_path):
             source_refs=[{"type": "event", "id": "evt_1"}],
         ),
     )
+    retain_thread_parents(store)
 
     result = json.loads(
         handle_sensorium_thread_open(

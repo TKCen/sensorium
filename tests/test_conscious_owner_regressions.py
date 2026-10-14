@@ -22,6 +22,7 @@ from agent_sensorium.conscious_consumer import consume_conscious_advisory
 from agent_sensorium.conscious_doorway import handle_conscious_doorway_pre_llm
 from agent_sensorium.outbox import _indexed_outbox_request, prepare_local_outbox_request
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_candidate_parent
 
 ROOT = Path(__file__).parents[1]
 START = "2026-09-15T11:00:00Z"
@@ -221,6 +222,7 @@ def test_real_doorway_refuses_full_presentation_index_before_resume_or_new_claim
     (root / "instance.config.json").write_text(json.dumps({"conscious_doorway": {"enabled": True}}))
     store = _store(root)
     store.append_jsonl("candidates", _advisory("active"))
+    retain_candidate_parent(store, "source_1")
     first = handle_conscious_doorway_pre_llm(
         instance="test", platform="local", session_id="same-session", turn_id="turn-0", state_dir=str(root)
     )
@@ -240,6 +242,7 @@ def test_real_doorway_refuses_full_presentation_index_before_resume_or_new_claim
         )
         assert result["success"] is True
     store.append_jsonl("candidates", _advisory("fresh", "revision-2"))
+    retain_candidate_parent(store, "source_1")
     before_candidates = store.paths["candidates"].read_bytes()
     before_decisions = store.paths["decisions"].read_bytes()
     prior_expiry = store.read_jsonl("candidates")[0]["conscious_aperture"]["lease_expires_at"]
@@ -259,6 +262,7 @@ def test_real_doorway_refuses_full_presentation_index_before_resume_or_new_claim
 def test_presentation_render_failure_and_same_turn_replay_do_not_mutate_ownership(tmp_path):
     store = _store(tmp_path / "render")
     store.append_jsonl("candidates", _advisory())
+    retain_candidate_parent(store, "source_1")
     before = _ledger_bytes(store)
     failed = claim_conscious_aperture_for_presentation(
         store,
@@ -269,7 +273,7 @@ def test_presentation_render_failure_and_same_turn_replay_do_not_mutate_ownershi
         render_context=lambda packet: (_ for _ in ()).throw(ValueError("render failed")),
         aperture_size=1,
         max_active_items=1,
-        instance_config={"allowed_surfaces": ["local"]},
+        instance_config={"allowed_surfaces": ["local"], "max_sensitivity": "private"},
         now=START,
     )
     assert failed == {"success": False, "error": "presentation_render_failed"}
@@ -284,7 +288,7 @@ def test_presentation_render_failure_and_same_turn_replay_do_not_mutate_ownershi
         render_context=lambda packet: "context",
         aperture_size=1,
         max_active_items=1,
-        instance_config={"allowed_surfaces": ["local"]},
+        instance_config={"allowed_surfaces": ["local"], "max_sensitivity": "private"},
         now=START,
     )
     after_first = _ledger_bytes(store)
@@ -297,7 +301,7 @@ def test_presentation_render_failure_and_same_turn_replay_do_not_mutate_ownershi
         render_context=lambda packet: "context",
         aperture_size=1,
         max_active_items=1,
-        instance_config={"allowed_surfaces": ["local"]},
+        instance_config={"allowed_surfaces": ["local"], "max_sensitivity": "private"},
         now="2026-09-15T11:01:00Z",
     )
     assert first["presentation"]["action"] == "presentation_attempt_recorded"

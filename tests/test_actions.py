@@ -12,6 +12,7 @@ from agent_sensorium.actions import (
 )
 from agent_sensorium.schemas import validate_signal
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 from agent_sensorium.tools import (
     handle_sensorium_action_attach,
     handle_sensorium_action_prepare,
@@ -708,6 +709,7 @@ class TestThreadOpenActionIntegration:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local"])
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         prepare_action(
             store,
@@ -731,6 +733,7 @@ class TestThreadOpenActionIntegration:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local"])
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         prep = prepare_action(
             store,
@@ -766,6 +769,7 @@ class TestThreadOpenActionIntegration:
         ))
 
         # Action inherits thread surfaces ["local", "discord"]
+        retain_thread_parents(store)
         prepare_action(
             store,
             thread_id="sth_test1",
@@ -789,6 +793,7 @@ class TestThreadOpenActionIntegration:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local"])
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         raw = handle_sensorium_thread_open(
             instance="test", state_dir=state_dir,
@@ -810,6 +815,7 @@ class TestPointerActionIntegration:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local"])
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         prepare_action(
             store,
@@ -835,6 +841,7 @@ class TestPointerActionIntegration:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local"])
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         from agent_sensorium.config import load_instance_config
         inst_cfg, _ = load_instance_config(state_dir=state_dir)

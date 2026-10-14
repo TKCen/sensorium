@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .gate import is_feedback_self_loop
+from .config import DisclosureVisibility, load_instance_config
 from .actuator_contracts import mediated_artifact_review_contract
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
@@ -398,12 +399,29 @@ def _dispatch_core(
     budgets: dict,
 ) -> dict:
     candidates = store.read_jsonl("candidates")
-    selected = select_candidate(candidates, cfg)
+    existing_threads = store.read_jsonl("threads")
+    eligible = candidates
+    if not dry_run and cfg.get("legacy_thread_dispatch_enabled"):
+        # Keep the full canonical view for uniqueness, including terminal rows.
+        surfaces = cfg.get("allowed_surfaces")
+        surfaces = surfaces if isinstance(surfaces, list) else []
+        disclosures = [DisclosureVisibility(candidates, existing_threads, surface, cfg)
+                       for surface in surfaces]
+        eligible = [c for c in candidates if any(
+            disclosure.subject("candidate", c.get("id")) for disclosure in disclosures
+        )]
+        usable = []
+        for candidate in eligible:
+            preview = candidate_to_thread(candidate, cfg)
+            if any(DisclosureVisibility(candidates, [*existing_threads, preview], surface, cfg)
+                   .subject("thread", preview["id"]) for surface in surfaces):
+                usable.append(candidate)
+        eligible = usable
+    selected = select_candidate(eligible, cfg)
 
     if selected is None:
         return {"action": "no_candidate", "reason": "No eligible candidate above threshold."}
 
-    existing_threads = store.read_jsonl("threads")
     for t in existing_threads:
         if t.get("origin_candidate_id") == selected["id"]:
             return {
@@ -478,7 +496,8 @@ def dispatch_once(
     dry_run: bool = True,
     config: dict | None = None,
 ) -> dict:
-    cfg = _merged_config(config)
+    instance_config, _ = load_instance_config(state_dir=str(store.root))
+    cfg = _merged_config({**instance_config, **(config or {})})
     store.ensure_dirs()
     budgets = _budget_state(store, cfg)
 

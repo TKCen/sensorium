@@ -10,6 +10,7 @@ from agent_sensorium.pointers import (
 )
 from agent_sensorium.schemas import truncate_text
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 
 
 def _thread(**overrides):
@@ -78,6 +79,7 @@ def test_pointer_requires_allowed_surface(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path))
     store.ensure_dirs()
     store.append_jsonl("threads", _thread())
+    retain_thread_parents(store)
 
     local = select_attention_pointer(store, surface="local")
     assert local["action"] == "pointer_available"
@@ -93,6 +95,7 @@ def test_pre_llm_pointer_records_cooldown_receipt(tmp_path):
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+    retain_thread_parents(store)
 
     first = handle_pointer_pre_llm(
         instance="test",
@@ -221,6 +224,7 @@ def test_thread_pointer_preferred_over_candidate_fallback(tmp_path):
     _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("candidates", _candidate(allowed_surfaces=["discord"]))
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+    retain_thread_parents(store)
 
     pointer = select_attention_pointer(store, surface="discord")
     assert pointer["action"] == "pointer_available"
@@ -233,6 +237,7 @@ def test_pointer_preview_bypasses_cooldown_when_every_visible_thread_is_blocked(
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+    retain_thread_parents(store)
 
     first = handle_pointer_pre_llm(
         instance="test",
@@ -254,6 +259,7 @@ def test_pointer_preview_can_still_fail_closed_on_cooldown_when_fallback_disable
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+    retain_thread_parents(store)
 
     first = handle_pointer_pre_llm(
         instance="test",
@@ -573,6 +579,7 @@ def test_openable_thread_pointer_bypasses_non_openable_budget(tmp_path):
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=["discord"])
     store.append_jsonl("threads", _thread(allowed_surfaces=["discord"]))
+    retain_thread_parents(store)
 
     first = handle_pointer_pre_llm(
         instance="test",
@@ -616,6 +623,7 @@ class TestPointerPolicyUnification:
         store.ensure_dirs()
         _write_config(tmp_path, surfaces=["local"])
         store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         result = select_attention_pointer(store, surface="local")
         assert result["action"] == "pointer_available"
@@ -660,6 +668,7 @@ class TestPointerPolicyUnification:
         store = SensoriumStore(instance="test", state_dir=str(tmp_path))
         store.ensure_dirs()
         store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
+        retain_thread_parents(store)
 
         result = select_attention_pointer(store, surface="local")
         assert result["action"] == "pointer_available"

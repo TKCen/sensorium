@@ -14,6 +14,7 @@ from agent_sensorium.attention import (
 )
 from agent_sensorium.config import visible_on_surface
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 from agent_sensorium.tools import handle_sensorium_attention_inbox
 
 
@@ -166,6 +167,7 @@ class TestBuildAttentionInbox:
     def test_includes_dormant_and_held_threads(self, store):
         store.append_jsonl("threads", _make_thread("sth_dormant", status="dormant"))
         store.append_jsonl("threads", _make_thread("sth_held", status="held", hold_reason="waiting"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         assert inbox["counts"]["threads"] == 2
         ids = [i["id"] for i in inbox["items"]]
@@ -176,6 +178,7 @@ class TestBuildAttentionInbox:
         store.append_jsonl("threads", _make_thread("sth_dormant"))
         store.append_jsonl("threads", _make_thread("sth_closed", status="closed"))
         store.append_jsonl("threads", _make_thread("sth_archived", status="archived"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         assert inbox["counts"]["threads"] == 1
         assert inbox["items"][0]["id"] == "sth_dormant"
@@ -185,6 +188,7 @@ class TestBuildAttentionInbox:
         store.append_jsonl("candidates", _make_candidate("cand_dash", surfaces=["dashboard"]))
         store.append_jsonl("threads", _make_thread("sth_local", surfaces=["local"]))
         store.append_jsonl("threads", _make_thread("sth_dash", surfaces=["dashboard"]))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(
             store, surface="local",
             config={"allowed_surfaces": ["local", "dashboard"]},
@@ -233,6 +237,7 @@ class TestBuildAttentionInbox:
 
     def test_thread_compact_fields(self, store):
         store.append_jsonl("threads", _make_thread("sth_1"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         item = inbox["items"][0]
         assert item["type"] == "thread"
@@ -248,6 +253,7 @@ class TestBuildAttentionInbox:
         store.append_jsonl("threads", _make_thread(
             "sth_held", status="held", hold_reason="waiting for evidence", resume_trigger="new_data",
         ))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         item = inbox["items"][0]
         assert item["hold_reason"] == "waiting for evidence"
@@ -261,6 +267,7 @@ class TestBuildAttentionInbox:
 
     def test_dormant_thread_allowed_decisions(self, store):
         store.append_jsonl("threads", _make_thread("sth_1", status="dormant"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         item = inbox["items"][0]
         assert item["allowed_decisions"] == THREAD_DECISIONS["dormant"]
@@ -269,6 +276,7 @@ class TestBuildAttentionInbox:
 
     def test_held_thread_allowed_decisions(self, store):
         store.append_jsonl("threads", _make_thread("sth_1", status="held"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         item = inbox["items"][0]
         assert item["allowed_decisions"] == THREAD_DECISIONS["held"]
@@ -278,6 +286,7 @@ class TestBuildAttentionInbox:
     def test_threads_sorted_before_candidates(self, store):
         store.append_jsonl("candidates", _make_candidate("cand_1", pressure=0.9))
         store.append_jsonl("threads", _make_thread("sth_1"))
+        retain_thread_parents(store)
         inbox = build_attention_inbox(store, surface="local")
         assert inbox["items"][0]["type"] == "thread"
         assert inbox["items"][1]["type"] == "candidate"
@@ -368,6 +377,7 @@ class TestToolHandler:
         store.ensure_dirs()
         store.append_jsonl("candidates", _make_candidate("cand_1"))
         store.append_jsonl("threads", _make_thread("sth_1"))
+        retain_thread_parents(store)
         result = json.loads(handle_sensorium_attention_inbox(
             instance="test", state_dir=state_dir, surface="local",
         ))

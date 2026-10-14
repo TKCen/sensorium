@@ -428,7 +428,7 @@ def test_same_owner_yield_dry_run_ineligible_and_no_contender_are_nonmutating(tm
     before = {name: store.read_jsonl(name) for name in ("candidates", "decisions")}
     preview = open_conscious_aperture(
         store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
-        surface="local", instance_config={"allowed_surfaces": ["local", "discord"]},
+        surface="local", instance_config={"allowed_surfaces": ["local", "discord"], "max_sensitivity": "private"},
         dry_run=True, now="2026-06-07T12:02:00Z",
     )
     assert preview["action"] == "resumed_aperture"
