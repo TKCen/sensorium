@@ -27,6 +27,7 @@ from .gate import (
 from .pointers import select_attention_pointer
 from .volunteer_cards import build_volunteer_cards
 from .schemas import (
+    decode_visibility,
     intersect_allowed_surfaces,
     merge_sensitivity,
     normalize_signal,
@@ -346,6 +347,16 @@ def _stored_candidate_fingerprint(candidate: dict) -> str:
     return candidate.get("fingerprint") or candidate_fingerprint(candidate)
 
 
+def _retained_refs(row: dict, key: str) -> list[str]:
+    """Absent historical refs are empty; present authority is never coerced."""
+    values = row.get(key, [])
+    if (not isinstance(values, list)
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(set(values)) != len(values)):
+        raise ValueError("ambiguous_ingress_lineage")
+    return values
+
+
 def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | None:
     """Resolve source ownership, not advisory evidence membership.
 
@@ -357,13 +368,10 @@ def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | Non
     resolved: dict[str, set[str]] = {}
     visiting: set[str] = set()
 
-    def refs(row, key):
-        values = row.get(key, [])
-        if (not isinstance(values, list)
-                or any(not isinstance(value, str) or not value for value in values)
-                or len(set(values)) != len(values)):
-            raise ValueError("ambiguous_ingress_lineage")
-        return values
+    refs = _retained_refs
+    for row in candidates:
+        refs(row, "event_ids")
+        refs(row, "source_candidate_ids")
 
     def roots(identifier):
         found = lookup_record(index, identifier)
@@ -407,7 +415,7 @@ def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | Non
         resolved[identifier] = owners if sources else {identifier}
         return resolved[identifier]
 
-    matches = [row for row in candidates if event_id in (row.get("event_ids") or [])]
+    matches = [row for row in candidates if event_id in refs(row, "event_ids")]
     if not matches:
         return None
     owners = set()
@@ -418,7 +426,7 @@ def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | Non
     while True:
         descendants = [row for row in candidates
                        if any(isinstance(ref, str) and ref in resolved
-                              for ref in (row.get("source_candidate_ids") or []))]
+                              for ref in refs(row, "source_candidate_ids"))]
         prior = len(resolved)
         for row in descendants:
             roots(row.get("id"))
@@ -477,7 +485,7 @@ def _canonical_replays(rows, incoming, *, classify, fingerprint):
 
 def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
     return _unique_match(events, [row for row in events
-                                 if signal_id in (row.get("source_signal_ids") or [])])
+                                 if signal_id in _retained_refs(row, "source_signal_ids")])
 
 
 GENERIC_CORRELATION_KEYS = {"active-session"}
@@ -515,6 +523,11 @@ def _find_related_candidate(
     if incoming_identity is None:
         return None
     incoming_item = incoming_identity[0]
+    for row in events:
+        _retained_refs(row, "source_signal_ids")
+    for row in candidates:
+        _retained_refs(row, "event_ids")
+        _retained_refs(row, "source_candidate_ids")
     event_index = record_index(events)
     candidate_index = record_index(candidates)
     matches = []
@@ -525,7 +538,7 @@ def _find_related_candidate(
             continue
         if candidate.get("kind") != event.get("kind"):
             continue
-        candidate_event_ids = list(candidate.get("event_ids") or [])
+        candidate_event_ids = _retained_refs(candidate, "event_ids")
         prior_events = [lookup_record(event_index, event_id).row for event_id in candidate_event_ids]
         if not prior_events or any(not isinstance(prior_event, dict) for prior_event in prior_events):
             continue
@@ -537,7 +550,11 @@ def _find_related_candidate(
             continue
         if {identity[0] for identity in prior_identities if identity is not None} == {incoming_item}:
             matches.append(candidate)
-    return _unique_match(candidates, matches)
+    related = _unique_match(candidates, matches)
+    if related is not None:
+        _retained_mutation_closure(store, signals=signals, events=events, candidates=candidates,
+                                   candidate_ids=[related["id"]])
+    return related
 
 
 def _read_pruned_sensor_policy(
@@ -611,52 +628,93 @@ def _promoted_signal_existing_result(signal: dict, events: list[dict], candidate
     return result
 
 
-@_candidate_transactional
-def _narrow_replay_visibility(
-    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(), check_only=False,
-) -> None:
-    """Restrict retained lineage for future disclosure, never replay its effects.
+def _retained_mutation_closure(
+    store, *, signals=None, events=None, candidates=None,
+    signal_ids=(), event_ids=(), candidate_ids=(),
+):
+    """Validate typed graph evidence and all affected authority before effects.
 
-    Delivered history is not revoked. Equal/wider metadata produces no writes;
-    the existing sensitivity/surface merge owners only permit narrowing.
+    Reference shape is checked before selection: malformed evidence cannot prove
+    that a row is unrelated. Visibility, by contrast, is checked only on the
+    actual policy mutation selection, not identity-only dependencies. That selection is
+    also the mutation selection, never a second traversal of raw retained refs.
     """
-    signals = store.read_jsonl("signals")
-    events = store.read_jsonl("events")
-    candidates = store.read_jsonl("candidates")
-    signal_ids, event_ids = set(signal_ids), set(event_ids)
-
-    # Validate the entire reachable lineage before mutating even in-memory rows.
-    signal_index, event_index = record_index(signals), record_index(events)
-    candidate_index = record_index(candidates)
-    for identifier in signal_ids:
-        if lookup_record(signal_index, identifier).state != "unique":
-            raise ValueError("ambiguous_ingress_lineage")
-    for row in events:
-        if row.get("id") in event_ids or signal_ids.intersection(row.get("source_signal_ids") or []):
-            if (lookup_record(event_index, row.get("id")).state != "unique"
-                    or classify_event_claim(store.instance, row, signals=signals).kind == "malformed"):
-                raise ValueError("ambiguous_ingress_lineage")
+    signals = store.read_jsonl("signals") if signals is None else signals
+    events = store.read_jsonl("events") if events is None else events
+    candidates = store.read_jsonl("candidates") if candidates is None else candidates
+    threads = store.read_jsonl("threads")
+    event_refs = [_retained_refs(row, "source_signal_ids") for row in events]
+    candidate_events = [_retained_refs(row, "event_ids") for row in candidates]
+    candidate_sources = [_retained_refs(row, "source_candidate_ids") for row in candidates]
+    signal_ids = set(_retained_refs({"refs": list(signal_ids)}, "refs"))
+    event_ids = set(_retained_refs({"refs": list(event_ids)}, "refs"))
+    coalescing_ids = set(_retained_refs({"refs": list(candidate_ids)}, "refs"))
+    affected = set(coalescing_ids)
+    for row, refs in zip(events, event_refs):
+        if signal_ids.intersection(refs):
             event_ids.add(row.get("id"))
-    affected = {row.get("id") for row in candidates
-                if event_ids.intersection(row.get("event_ids") or [])}
+    for row, refs in zip(candidates, candidate_events):
+        if event_ids.intersection(refs):
+            affected.add(row.get("id"))
     while True:
-        descendants = {row.get("id") for row in candidates
-                       if affected.intersection(row.get("source_candidate_ids") or [])}
+        descendants = {row.get("id") for row, refs in zip(candidates, candidate_sources)
+                       if affected.intersection(refs)}
         if descendants.issubset(affected):
             break
         affected.update(descendants)
-    for identifier in affected:
-        row = lookup_record(candidate_index, identifier).row
-        if row is None or any(lookup_record(event_index, ref).state != "unique"
-                              for ref in row.get("event_ids") or []):
+
+    indexes = {"signals": record_index(signals), "events": record_index(events),
+               "candidates": record_index(candidates), "threads": record_index(threads)}
+
+    def require(stream, identifier, *, policy=False):
+        found = lookup_record(indexes[stream], identifier)
+        if (found.state != "unique" or found.row is None
+                or (policy and decode_visibility(found.row) is None)):
             raise ValueError("ambiguous_ingress_lineage")
-    threads = store.read_jsonl("threads")
-    thread_index = record_index(threads)
-    if any(lookup_record(thread_index, row.get("id")).state != "unique"
-           for row in threads if row.get("origin_candidate_id") in affected):
-        raise ValueError("ambiguous_ingress_lineage")
+        return found.row
+
+    # Evidence must resolve completely without conferring disclosure authority.
+    dependencies = set(event_ids)
+    for identifier in affected:
+        row = require("candidates", identifier)
+        dependencies.update(_retained_refs(row, "event_ids"))
+        for source in _retained_refs(row, "source_candidate_ids"):
+            require("candidates", source)
+    for identifier in dependencies:
+        row = require("events", identifier)
+        if classify_event_claim(store.instance, row, signals=signals).kind == "malformed":
+            raise ValueError("ambiguous_ingress_lineage")
+        for ref in _retained_refs(row, "source_signal_ids"):
+            require("signals", ref)
+        _candidate_for_event_id(candidates, identifier)
+    selected_candidates = coalescing_ids if coalescing_ids else affected
+    for identifier in signal_ids:
+        require("signals", identifier, policy=True)
+    selected_threads = []
+    for row in threads:
+        origin = row.get("origin_candidate_id")
+        if not coalescing_ids and isinstance(origin, str) and origin in affected:
+            require("threads", row.get("id"), policy=True)
+            selected_threads.append(row)
+    return [
+        ("threads", threads, selected_threads),
+        ("candidates", candidates, [require("candidates", ref, policy=True)
+                                    for ref in selected_candidates]),
+        ("events", events, [require("events", ref, policy=True) for ref in event_ids]),
+        ("signals", signals, [require("signals", ref, policy=True) for ref in signal_ids]),
+    ]
+
+
+@_candidate_transactional
+def _narrow_replay_visibility(
+    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(), check_only=False,
+    closure=None,
+):
+    """Restrict validated retained lineage, never heal authority or replay effects."""
+    if closure is None:
+        closure = _retained_mutation_closure(store, signal_ids=signal_ids, event_ids=event_ids)
     if check_only:
-        return
+        return closure
 
     def narrow(row):
         sensitivity = merge_sensitivity([
@@ -672,38 +730,12 @@ def _narrow_replay_visibility(
         row["sensitivity"], row["allowed_surfaces"] = sensitivity, surfaces
         return True
 
-    changed_signals = False
-    for row in signals:
-        if row.get("id") in signal_ids:
-            changed_signals = narrow(row) or changed_signals
-    changed_events = False
-    for row in events:
-        if row.get("id") in event_ids or signal_ids.intersection(row.get("source_signal_ids") or []):
-            event_ids.add(row.get("id"))
-            changed_events = narrow(row) or changed_events
-    affected = {row.get("id") for row in candidates if event_ids.intersection(row.get("event_ids") or [])}
-    # Advisory descendants can retain source IDs without retaining event IDs.
-    while True:
-        descendants = {row.get("id") for row in candidates
-                       if affected.intersection(row.get("source_candidate_ids") or [])}
-        if descendants.issubset(affected):
-            break
-        affected.update(descendants)
-    changed_candidates = False
-    for row in candidates:
-        if row.get("id") in affected:
-            changed_candidates = narrow(row) or changed_candidates
-    threads = store.read_jsonl("threads")
-    changed_threads = False
-    for row in threads:
-        if row.get("origin_candidate_id") in affected:
-            changed_threads = narrow(row) or changed_threads
-    # Hide reachable disclosures before changing the upstream retained record.
-    for name, rows, changed in [
-        ("threads", threads, changed_threads), ("candidates", candidates, changed_candidates),
-        ("events", events, changed_events), ("signals", signals, changed_signals),
-    ]:
-        if changed:
+    # All authority was validated before the first in-memory edit. Hide downstream
+    # disclosures first, retaining the exact same selection as preflight.
+    changes = [(name, rows, [narrow(row) for row in selected])
+               for name, rows, selected in closure]
+    for name, rows, changed in changes:
+        if any(changed):
             _rewrite_jsonl(store, name, rows)
 
 
@@ -716,7 +748,7 @@ def _coalesce_candidate_with_event(
     incoming_candidate: dict,
 ) -> dict:
     now = utc_now_iso()
-    event_ids = list(candidate.get("event_ids") or [])
+    event_ids = list(_retained_refs(candidate, "event_ids"))
     if event.get("id") not in event_ids:
         event_ids.append(event.get("id"))
     candidate["event_ids"] = event_ids
@@ -769,11 +801,12 @@ def _append_event_and_create_or_update_candidate(
     signals = store.read_jsonl("signals")
     candidates = store.read_jsonl("candidates")
 
+    replay_closure = []
     replays, related = _preflight_event(store, event, events=events, signals=signals,
-                                        candidates=candidates)
+                                        candidates=candidates, replay_closure=replay_closure)
     if replays:
         result = _event_to_existing_result(replays[0], candidates)
-        _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays])
+        _narrow_replay_visibility(store, event, closure=replay_closure[0])
         return result
 
     _apply_candidate_decay(store, candidates, config=config)
@@ -809,7 +842,12 @@ def _append_event_and_create_or_update_candidate(
     }
 
 
-def _preflight_event(store, event, *, events, signals, candidates):
+def _preflight_event(store, event, *, events, signals, candidates, replay_closure=None):
+    signal_index = record_index(signals)
+    for identifier in _retained_refs(event, "source_signal_ids"):
+        found = lookup_record(signal_index, identifier)
+        if found.state != "unique":
+            raise ValueError("ambiguous_ingress_lineage")
     replays = _canonical_replays(
         events, event,
         classify=lambda row: classify_event_claim(store.instance, row, signals=signals),
@@ -818,8 +856,10 @@ def _preflight_event(store, event, *, events, signals, candidates):
     if replays:
         for row in replays:
             _event_to_existing_result(row, candidates)
-        _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays],
-                                 check_only=True)
+        closure = _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays],
+                                           check_only=True)
+        if replay_closure is not None:
+            replay_closure.append(closure)
         return replays, None
     related = _find_related_candidate(store, candidates, event, events=events, signals=signals)
     return [], related
