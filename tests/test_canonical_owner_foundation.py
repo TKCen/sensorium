@@ -474,3 +474,107 @@ def test_legacy_exact_fallback_rejects_present_members_but_keeps_absent_inverse(
     assert bool(raw[0]) is valid
     assert raw[2] == ("legacy_exact_source_disposition" if valid else None)
     assert cacheless["selection"] == indexed["selection"] == (None if valid else binding)
+
+
+@pytest.mark.parametrize('field', ['member_keys','selected_member_keys'])
+@pytest.mark.parametrize('source,nested,invalid', [(False,False,None),(False,True,3),(False,False,{}),(False,True,['a'*64,3]),(True,False,None),(True,True,3),(True,False,{}),(True,True,['a'*64,3])])
+def test_present_member_shape_before_every_authority(tmp_path, field, source, nested, invalid):
+    store=foundation_seed(tmp_path,source=source)
+    binding,error=admission.binding_for_candidate(store,'c')
+    assert error is None
+    prior={**binding,field:invalid}
+    row={'id':'adv','kind':'subconscious_advisory','status':'archived','source_candidate_ids':['c'],'source_candidate_fingerprint':binding['source_candidate_fingerprint']}
+    if nested:
+        row['advisory_meta']={'admission_binding':prior}
+    else:
+        row['admission_binding']=prior
+    store.append_jsonl('candidates',row)
+    before=canonical(store)
+    raw=admission._prior_for_binding(store,binding,raw_snapshot(store))
+    cacheless=admission.build_admission_plan(store)
+    foundation_finish(store)
+    indexed=admission.build_admission_plan(store)
+    assert canonical(store)==before
+    print(json.dumps({'probe':'shape','source':source,'nested':nested,'invalid':invalid,'field':field,'raw':raw,'cacheless':cacheless['selection'],'indexed':indexed['selection'],'binding':binding}),flush=True)
+    assert raw[0]==[] and raw[1] is False and raw[2] is None
+    assert cacheless['selection']==indexed['selection']==binding
+
+
+@pytest.mark.parametrize("field", ["member_keys", "selected_member_keys"])
+@pytest.mark.parametrize("value,valid", [
+    (None, False), (3, False), ({"untrusted": "payload"}, False),
+    ("untrusted payload", False), (True, False), (["a" * 64, 3], False),
+    (["b" * 64, "a" * 64], False), (["a" * 64, "a" * 64], False),
+    ([], True), (["a" * 64, "b" * 64], True),
+])
+def test_binding_projection_preserves_member_shape(field, value, valid):
+    from agent_sensorium.admission_index import _binding_projection, _decision_projection
+
+    raw = {"item_key": "item", field: value}
+    before = json.dumps(raw, sort_keys=True)
+    projected = _binding_projection(raw)
+    assert isinstance(projected, dict) and field in projected
+    assert projected[field] == (value if isinstance(value, list) else None)
+    assert admission._member_reference_shape(projected) is valid
+    assert _decision_projection({"admission_binding": raw})["admission_binding"] == projected
+    assert json.dumps(raw, sort_keys=True) == before
+    assert _binding_projection({"item_key": "item"}) == {"item_key": "item"}
+
+
+@pytest.mark.parametrize("source", [False, True])
+@pytest.mark.parametrize("case", ["receipt_bool", "advisory_string", "invalid_top", "absent_top"])
+def test_projection_precedence_and_authority_parity(tmp_path, source, case):
+    store = foundation_seed(tmp_path, source=source)
+    binding, error = admission.binding_for_candidate(store, "c")
+    assert error is None and binding is not None
+    historical = {**binding, "policy_version": "source-admission-v1"}
+    row = {"id": "adv", "kind": "subconscious_advisory", "status": "archived",
+           "source_candidate_ids": ["c"], "dry_run": False, "action": "drop",
+           "output_action": "DROP"}
+    if case == "receipt_bool":
+        row["admission_binding"] = {**binding, "selected_member_keys": True}
+    elif case == "advisory_string":
+        row["admission_binding"] = {**binding, "member_keys": "untrusted payload"}
+    else:
+        row["advisory_meta"] = {"admission_binding": historical}
+        if case == "invalid_top":
+            row["admission_binding"] = {**binding, "member_keys": {"untrusted": "payload"}}
+    store.append_jsonl("decisions" if case == "receipt_bool" else "candidates", row)
+    before = canonical(store)
+    raw = admission._prior_for_binding(store, binding, raw_snapshot(store))
+    cacheless = admission.build_admission_plan(store)
+    foundation_finish(store)
+    indexed = admission.build_admission_plan(store)
+    valid = case == "absent_top"
+    assert raw[1] is valid and bool(raw[0]) is valid
+    assert raw[2] == ("prior_disposition" if valid else None)
+    assert cacheless["selection"] == indexed["selection"] == (None if valid else binding)
+    assert canonical(store) == before
+
+
+
+def test_predecessor_generation_ready_reads_refuse_until_bounded_rebuild(tmp_path):
+    from agent_sensorium.admission_index import SCHEMA_VERSION
+
+    store = foundation_seed(tmp_path)
+    binding, error = admission.binding_for_candidate(store, "c")
+    assert error is None and binding is not None
+    foundation_finish(store)
+    index = AdmissionIndex(store)
+    with sqlite3.connect(index.path) as conn:
+        conn.execute("PRAGMA user_version=6")
+    before = canonical(store)
+    cache_before = index.path.read_bytes()
+    for read in [lambda: index.read_plan(candidate_limit=50),
+                 lambda: index.read_binding("c"), lambda: index.read_dispositions(binding),
+                 lambda: index.read_context("c"), index.read_snapshot]:
+        result = read()
+        assert not result.complete and result.state == "rebuilding"
+        assert result.reason == "admission_claim_generation_changed"
+    assert index.path.read_bytes() == cache_before
+    first = store.prepare_admission_index(scan_bytes=256)
+    assert not first.complete and first.bytes_consumed <= 256
+    foundation_finish(store)
+    assert SCHEMA_VERSION == 7
+    assert admission.build_admission_plan(store)["selection"] == binding
+    assert canonical(store) == before

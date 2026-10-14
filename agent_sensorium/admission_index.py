@@ -21,8 +21,8 @@ DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
-# Entity ambiguity is durable projection state; old ready caches cannot certify it.
-SCHEMA_VERSION = 6
+# Invalid-present members must survive projection; old ready caches lost evidence.
+SCHEMA_VERSION = 7
 MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
@@ -84,9 +84,9 @@ def _binding_projection(value: object) -> dict | None:
     for key in ("member_keys", "selected_member_keys"):
         if key in value:
             items = value.get(key)
-            if not isinstance(items, list):
-                return None
-            projected[key] = _bounded_strings(items)
+            # Keep invalid-present distinct from absent without persisting its
+            # arbitrary payload or enabling legacy/nested binding fallback.
+            projected[key] = _bounded_strings(items) if isinstance(items, list) else None
     return projected
 
 
