@@ -12,6 +12,7 @@ from agent_sensorium.config import (
     load_instance_config,
     manage_attention_policy_config,
     resolve_config_path,
+    visible_on_surface,
 )
 from agent_sensorium.gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
 from agent_sensorium.store import SensoriumStore
@@ -129,7 +130,10 @@ class TestConfigLoading:
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({"allowed_surfaces": ["discord", "", "  ", "local"]}))
         config, _ = load_instance_config(config_path=str(cfg))
-        assert config["allowed_surfaces"] == ["discord", "local"]
+        assert config["allowed_surfaces"] == ["local"]
+        assert config["_visibility_invalid"] is True
+        for surface in ("local", "discord"):
+            assert not visible_on_surface({"sensitivity": "private", "allowed_surfaces": [surface]}, surface, config)
 
     def test_blank_only_surface_values_fall_back_to_safe_default(self, tmp_path):
         cfg = tmp_path / "instance.config.json"
@@ -168,7 +172,10 @@ class TestConfigLoading:
         cfg = tmp_path / "instance.config.json"
         cfg.write_text(json.dumps({"allowed_surfaces": []}))
         config, _ = load_instance_config(config_path=str(cfg))
-        assert config["allowed_surfaces"] == ["local"]
+        assert config["allowed_surfaces"] == []
+        assert not config.get("_visibility_invalid", False)
+        for surface in ("local", "discord"):
+            assert not visible_on_surface({"sensitivity": "private", "allowed_surfaces": [surface]}, surface, config)
 
     def test_state_dir_config_loaded(self, tmp_path):
         sd = tmp_path / "state"

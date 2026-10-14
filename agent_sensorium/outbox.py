@@ -18,6 +18,8 @@ import os
 import sqlite3
 from copy import deepcopy
 
+from .canonical_records import lookup_record, record_index
+from .config import DisclosureVisibility, visible_on_surface
 from .schemas import new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -312,6 +314,49 @@ def _denied(reason: str, detail: str, *, thread_id: str = "") -> dict:
     }
 
 
+def _current_delivery_owner(store: SensoriumStore, request: dict) -> bool:
+    """Prepared policy is a ceiling, never current retained-source authority."""
+    surface = request.get("surface")
+    policy = {"max_sensitivity": request.get("sensitivity"),
+              "allowed_surfaces": request.get("allowed_surfaces")}
+    if not visible_on_surface(request, surface, policy):
+        return False
+    candidates = store.read_jsonl("candidates")
+    threads = store.read_jsonl("threads")
+    thread_id = request.get("origin_thread_id", "")
+    candidate_id = request.get("origin_candidate_id", "")
+    # Missing/empty historical declarations are distinct from present nulls.
+    # Validate both selectors before choosing thread or candidate authority.
+    if not isinstance(thread_id, str) or not isinstance(candidate_id, str):
+        return False
+    if thread_id != "":
+        found = lookup_record(record_index(threads), thread_id)
+        if found.state != "unique":
+            return False
+        origin = found.row.get("origin_candidate_id", "")
+        if not isinstance(origin, str):
+            return False
+        if origin not in ("", candidate_id):
+            return False
+        # Only absent/empty historical standalone origins retain compatibility.
+        # Present malformed/dangling declarations never acquire this exemption.
+        if origin == "":
+            threads = [dict(row) for row in threads]
+            for row in threads:
+                if row.get("id") == thread_id:
+                    row.pop("origin_candidate_id", None)
+        disclosure = DisclosureVisibility(candidates, threads, surface, policy)
+        if not disclosure.subject("thread", thread_id):
+            return False
+    elif candidate_id == "":
+        return False
+    disclosure = DisclosureVisibility(candidates, threads, surface, policy)
+    if candidate_id != "" and not disclosure.subject("candidate", candidate_id):
+        return False
+    return disclosure.linked({key: value for key, value in request.items()
+                              if key != "origin_candidate_id" or value != ""})
+
+
 def prepare_local_outbox_request(
     store: SensoriumStore,
     *,
@@ -593,6 +638,15 @@ def prepare_outbox_request(
         (message_preview or title or "").encode()
     ).hexdigest()[:16]
 
+    owner = {"origin_thread_id": thread_id,
+             "origin_candidate_id": (origin_candidate_id if origin_candidate_id != ""
+                                     else thread.get("origin_candidate_id", "")),
+             "surface": surface, "sensitivity": thread.get("sensitivity"),
+             "allowed_surfaces": thread.get("allowed_surfaces")}
+    if not _current_delivery_owner(store, owner):
+        return _denied("current_owner_not_allowed", "Current delivery owner is unresolved or withheld.",
+                       thread_id=thread_id)
+
     idempotency_key = _compute_idempotency_key(
         origin_thread_id=thread_id,
         delivery_mode=delivery_mode,
@@ -625,7 +679,7 @@ def prepare_outbox_request(
         "updated_at": now,
         "status": "prepared",
         "origin_thread_id": thread_id,
-        "origin_candidate_id": origin_candidate_id or thread.get("origin_candidate_id", ""),
+        "origin_candidate_id": owner["origin_candidate_id"],
         "request_type": request_type,
         "surface": surface,
         "delivery_mode": delivery_mode,
@@ -768,7 +822,9 @@ def dispatch_outbox_request(
             "detail": "Dispatch requires execute=True.",
         }
     if not _locked:
-        with store.outbox_transaction():
+        with store.outbox_transaction(), store.candidate_transaction():
+            # Keep current source authority stable until the admitted effect and
+            # its local receipt complete; later replay governs later requests.
             return dispatch_outbox_request(
                 store,
                 outbox_id=outbox_id,
@@ -779,11 +835,10 @@ def dispatch_outbox_request(
             )
 
     requests = store.read_jsonl("outbox")
-    target_req = None
-    for req in requests:
-        if req.get("id") == outbox_id:
-            target_req = req
-            break
+    found = lookup_record(record_index(requests), outbox_id)
+    if found.state == "ambiguous":
+        return _denied("ambiguous_outbox", "Outbox request must resolve uniquely.")
+    target_req = found.row if found.state == "unique" else None
 
     if target_req is None:
         return {"success": False, "error": "not_found", "detail": f"Outbox request '{outbox_id}' not found."}
@@ -805,6 +860,11 @@ def dispatch_outbox_request(
             return {"success": False, "error": "discord_disabled", "detail": "Discord adapter is disabled in config."}
         if adapter is None:
             return {"success": False, "error": "no_adapter", "detail": "No Discord adapter provided for dispatch."}
+
+    if not cfg.get("enabled") or delivery_mode not in (cfg.get("allowed_delivery_modes") or []):
+        return _denied("delivery_mode_not_allowed", "Current outbox config does not allow delivery.")
+    if not _current_delivery_owner(store, target_req):
+        return _denied("current_owner_not_allowed", "Current delivery owner is unresolved or withheld.")
 
     try:
         platform_refs: dict = {}

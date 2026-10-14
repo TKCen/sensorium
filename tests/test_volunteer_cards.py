@@ -178,6 +178,7 @@ def test_volunteer_cards_are_compact_and_do_not_leak_secret_or_body_fields(tmp_p
 def test_artifact_card_has_parent_reference_id_when_selected(tmp_path):
     store = _store(tmp_path)
     store.append_jsonl("artifacts", _artifact("art_only", source_refs={"thread_id": "sth_parent"}))
+    store.append_jsonl("threads", _thread("sth_parent", status="archived"))
 
     cards = build_volunteer_cards(store, surface="local", limit=3)
 

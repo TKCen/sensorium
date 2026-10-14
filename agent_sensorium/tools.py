@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .attention import build_attention_inbox
+from .admission import classify_event_claim, classify_signal_claim, equivalent_source_claims
+from .canonical_records import lookup_record, record_index
 from .dispatcher import current_budget_state, dispatch_once as _dispatch_once
 from .gate import (
     build_pressure_pitch,
@@ -25,6 +27,7 @@ from .gate import (
 from .pointers import select_attention_pointer
 from .volunteer_cards import build_volunteer_cards
 from .schemas import (
+    decode_visibility,
     intersect_allowed_surfaces,
     merge_sensitivity,
     normalize_signal,
@@ -143,6 +146,22 @@ def _legacy_state_latest_info(store: SensoriumStore, state: dict) -> dict:
         "excluded_from_freshness": True,
     }
 
+def _status_record_visible(
+    record: dict, *, candidates: list[dict], threads: list[dict],
+    surface: str, instance_config: dict,
+) -> bool:
+    """Gate linked status prose against current subjects, not stale snapshots.
+
+    All declared direct and admission source subjects must exist and be allowed,
+    even for historical receipts. Resolve visibility only, never live admission
+    or index readiness. Unresolved advisory choices carry source prose, not
+    global diagnostics; genuinely unlinked operational diagnostics remain global.
+    """
+    from .config import DisclosureVisibility
+
+    return DisclosureVisibility(candidates, threads, surface, instance_config).linked(record)
+
+
 def handle_sensorium_status(
     *, instance: str = "default", state_dir: str | None = None,
     config_path: str | None = None,
@@ -155,12 +174,11 @@ def handle_sensorium_status(
     the response includes an ``exact_subject`` block naming that specific
     thread or candidate, rather than forcing the caller to guess which row
     of the rotating top-N corresponds to the pointer the agent just saw.
-    ``surface`` is honored for the exact-subject branch so a local-only
-    candidate is reported as not_found when requested from discord. When
-    ``reference_id`` is omitted, the legacy top-N shape is preserved
-    byte-for-byte for backwards compatibility.
+    ``surface`` (default local) gates top lists, exact subjects and linked
+    historical prose using current visibility. Filtering precedes top-N caps;
+    list shapes and ranking remain compatible. Coarse counts stay global.
     """
-    from .config import load_instance_config
+    from .config import DisclosureVisibility, load_instance_config
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
@@ -176,10 +194,15 @@ def handle_sensorium_status(
     artifacts = store.read_jsonl("artifacts")
     state = store.read_state()
 
+    status_surface = "local" if isinstance(surface, str) and surface == "" else surface
+    disclosure = DisclosureVisibility(candidates, threads, status_surface, instance_config)
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
-    active_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
+    visible_candidates = [c for c in active_candidates
+                          if disclosure.subject("candidate", c.get("id"))]
+    visible_candidates.sort(key=lambda c: c.get("pressure", 0), reverse=True)
 
-    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
+    visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")
+                       and disclosure.subject("thread", t.get("id"))]
     visible_threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
     active_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
@@ -233,7 +256,7 @@ def handle_sensorium_status(
                 "pressure": c.get("pressure"),
                 "summary": truncate_text(c.get("summary", ""), 120),
             }
-            for c in active_candidates[:5]
+            for c in visible_candidates[:5]
         ],
         "top_threads": [
             {
@@ -250,7 +273,7 @@ def handle_sensorium_status(
         "legacy_state_latest": _legacy_state_latest_info(store, state),
         "volunteer_cards": build_volunteer_cards(
             store,
-            surface=surface or "local",
+            surface=status_surface,
             instance_config=instance_config,
             config_path=config_path,
             limit=3,
@@ -259,7 +282,10 @@ def handle_sensorium_status(
     }
 
     decisions = store.read_jsonl("decisions")
-    if decisions:
+    if decisions and _status_record_visible(
+        decisions[-1], candidates=candidates, threads=threads,
+        surface=status_surface, instance_config=instance_config,
+    ):
         latest = decisions[-1]
         data["latest_decision"] = {
             "ts": latest.get("ts"),
@@ -273,7 +299,10 @@ def handle_sensorium_status(
     if state:
         if "state_version" in state:
             data["state_version"] = state.get("state_version")
-        if "last_dispatch_result" in state:
+        if "last_dispatch_result" in state and _status_record_visible(
+            state.get("last_dispatch_result") or {}, candidates=candidates, threads=threads,
+            surface=status_surface, instance_config=instance_config,
+        ):
             legacy_result = dict(state.get("last_dispatch_result") or {})
             raw_legacy_action = legacy_result.get("action")
             if raw_legacy_action in {"would_promote", "promoted"}:
@@ -294,10 +323,9 @@ def handle_sensorium_status(
     # visibility. This lets the conscious layer recover "the subject the
     # prior pointer presented" without guessing across a rotating top-N.
     if reference_id:
-        exact_surface = surface or "local"
         data["exact_subject"] = _resolve_exact_subject(
             reference_id=reference_id,
-            surface=exact_surface,
+            surface=status_surface,
             threads=threads,
             candidates=candidates,
             instance_config=instance_config,
@@ -319,49 +347,145 @@ def _stored_candidate_fingerprint(candidate: dict) -> str:
     return candidate.get("fingerprint") or candidate_fingerprint(candidate)
 
 
+def _retained_refs(row: dict, key: str) -> list[str]:
+    """Absent historical refs are empty; present authority is never coerced."""
+    values = row.get(key, [])
+    if (not isinstance(values, list)
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(set(values)) != len(values)):
+        raise ValueError("ambiguous_ingress_lineage")
+    return values
+
+
 def _candidate_for_event_id(candidates: list[dict], event_id: str) -> dict | None:
-    for candidate in candidates:
-        if event_id in (candidate.get("event_ids") or []):
-            return candidate
-    return None
+    """Resolve source ownership, not advisory evidence membership.
+
+    Existing source edges prove derivation only after the entire connected
+    lineage resolves uniquely and its event membership agrees. Binding prose,
+    fingerprints, kinds and retained order confer no ownership authority.
+    """
+    index = record_index(candidates)
+    resolved: dict[str, set[str]] = {}
+    visiting: set[str] = set()
+
+    refs = _retained_refs
+    for row in candidates:
+        refs(row, "event_ids")
+        refs(row, "source_candidate_ids")
+
+    def roots(identifier):
+        found = lookup_record(index, identifier)
+        if found.state != "unique" or identifier in visiting:
+            raise ValueError("ambiguous_ingress_lineage")
+        if identifier in resolved:
+            return resolved[identifier]
+        row = found.row
+        assert row is not None
+        events = set(refs(row, "event_ids"))
+        sources = refs(row, "source_candidate_ids")
+        metadata = row.get("advisory_meta")
+        bindings = [row[key] for key in ("admission_binding",) if key in row]
+        if isinstance(metadata, dict) and "admission_binding" in metadata:
+            bindings.append(metadata["admission_binding"])
+        # None is the existing writer's unbound legacy/multi-source value.
+        # A present malformed binding must not borrow authority from another.
+        bindings = [binding for binding in bindings if binding is not None]
+        for binding in bindings:
+            if (not isinstance(binding, dict)
+                    or not isinstance(binding.get("source_candidate_id"), str)
+                    or not binding["source_candidate_id"]
+                    or binding["source_candidate_id"] not in sources):
+                raise ValueError("ambiguous_ingress_lineage")
+        if bindings and any(binding != bindings[0] for binding in bindings[1:]):
+            raise ValueError("ambiguous_ingress_lineage")
+        visiting.add(identifier)
+        owners = set()
+        evidence = set()
+        for source_id in sources:
+            owners.update(roots(source_id))
+            source = lookup_record(index, source_id).row
+            assert source is not None
+            source_events = set(refs(source, "event_ids"))
+            if events and not events.intersection(source_events):
+                raise ValueError("ambiguous_ingress_lineage")
+            evidence.update(source_events)
+        if sources and not events.issubset(evidence):
+            raise ValueError("ambiguous_ingress_lineage")
+        visiting.remove(identifier)
+        resolved[identifier] = owners if sources else {identifier}
+        return resolved[identifier]
+
+    matches = [row for row in candidates if event_id in refs(row, "event_ids")]
+    if not matches:
+        return None
+    owners = set()
+    for row in matches:
+        owners.update(roots(row.get("id")))
+    # Validate descendants even when they retain only source IDs, before the
+    # existing narrowing owner can propagate any visibility restriction.
+    while True:
+        descendants = [row for row in candidates
+                       if any(isinstance(ref, str) and ref in resolved
+                              for ref in refs(row, "source_candidate_ids"))]
+        prior = len(resolved)
+        for row in descendants:
+            roots(row.get("id"))
+        if len(resolved) == prior:
+            break
+    event_owners = []
+    for owner in owners:
+        row = lookup_record(index, owner).row
+        assert row is not None
+        if event_id in refs(row, "event_ids"):
+            event_owners.append(row)
+    return _unique_match(candidates, event_owners)
 
 
 def _candidate_for_event_fingerprint(candidates: list[dict], event: dict) -> dict | None:
     event_candidate = event_to_candidate(event)
     event_candidate_fp = event_candidate.get("fingerprint") or candidate_fingerprint(event_candidate)
-    for candidate in candidates:
-        if _stored_candidate_fingerprint(candidate) == event_candidate_fp:
-            return candidate
-    return None
+    return _unique_match(candidates, [row for row in candidates
+                                    if _stored_candidate_fingerprint(row) == event_candidate_fp])
 
 
-def _find_existing_signal(signals: list[dict], normalized: dict) -> dict | None:
-    incoming_fp = normalized.get("fingerprint") or signal_fingerprint(normalized)
-    incoming_id = normalized.get("id")
-    for existing in signals:
-        if incoming_id and existing.get("id") == incoming_id:
-            return existing
-        if _stored_signal_fingerprint(existing) == incoming_fp:
-            return existing
-    return None
+def _unique_match(rows: list[dict], matches: list[dict]) -> dict | None:
+    """Never select a first/last entity or a duplicate literal identifier."""
+    index = record_index(rows)
+    if len(matches) > 1 or any(lookup_record(index, row.get("id")).state != "unique"
+                               for row in matches):
+        raise ValueError("ambiguous_ingress_lineage")
+    return matches[0] if matches else None
 
 
-def _find_existing_event(events: list[dict], incoming: dict) -> dict | None:
-    incoming_fp = incoming.get("fingerprint") or event_fingerprint(incoming)
-    incoming_id = incoming.get("id")
-    for existing in events:
-        if incoming_id and existing.get("id") == incoming_id:
-            return existing
-        if _stored_event_fingerprint(existing) == incoming_fp:
-            return existing
-    return None
+def _canonical_replays(rows, incoming, *, classify, fingerprint):
+    """Canonical equality owns replay; fingerprints only compare legacy views."""
+    claim = classify(incoming)
+    if claim.kind == "malformed":
+        raise ValueError("invalid_ingress_claim")
+    index = record_index(rows)
+    found = lookup_record(index, incoming.get("id"))
+    if found.state == "ambiguous":
+        raise ValueError("ambiguous_ingress_wrapper")
+
+    def equivalent(row):
+        prior = classify(row)
+        return equivalent_source_claims(claim, prior) or (
+            claim.kind == prior.kind == "legacy" and fingerprint(row) == fingerprint(incoming)
+        )
+
+    if found.row is not None and not equivalent(found.row):
+        raise ValueError("ingress_wrapper_collision")
+    matches = [row for row in rows if equivalent(row)]
+    if any(lookup_record(index, row.get("id")).state != "unique" for row in matches):
+        raise ValueError("ambiguous_ingress_wrapper")
+    if len(matches) > 1:
+        raise ValueError("ambiguous_ingress_material")
+    return matches
 
 
 def _find_event_for_signal(events: list[dict], signal_id: str) -> dict | None:
-    for event in events:
-        if signal_id in (event.get("source_signal_ids") or []):
-            return event
-    return None
+    return _unique_match(events, [row for row in events
+                                 if signal_id in _retained_refs(row, "source_signal_ids")])
 
 
 GENERIC_CORRELATION_KEYS = {"active-session"}
@@ -391,52 +515,46 @@ def _find_related_candidate(
     events: list[dict],
     signals: list[dict],
 ) -> dict | None:
-    from .admission import event_source_item_key
+    from .admission import event_source_item_identity
 
-    incoming_keys = _specific_correlation_keys(event.get("correlation_keys") or [])
-    # Generic live-session keys such as `active-session`, `surface:discord`, or
-    # the event kind itself are not enough to merge separate corrections. False
-    # coalescing hides distinct salience and prevents later context pointers.
-    incoming_keys.discard(str(event.get("kind") or ""))
-    if not incoming_keys:
+    incoming_identity = event_source_item_identity(store, event, signals=signals)
+    # Correlation keys describe possible thematic relationships. Without an
+    # unambiguous producer-owned item, they cannot establish equality.
+    if incoming_identity is None:
         return None
-    incoming_item = event_source_item_key(store, event, signals=signals)
-    incoming_signal_rows = [
-        row for row in signals
-        if row.get("id") in set(event.get("source_signal_ids") or [])
-    ]
-    uncertain_candidate_scoped = any(
-        row.get("source") in {"memory", "hermes_session"}
-        or "reflection" in str(row.get("sensor") or "")
-        or "live_turn" in str(row.get("sensor") or "")
-        for row in incoming_signal_rows
-    )
-    event_index = {row.get("id"): row for row in events}
+    incoming_item = incoming_identity[0]
+    for row in events:
+        _retained_refs(row, "source_signal_ids")
+    for row in candidates:
+        _retained_refs(row, "event_ids")
+        _retained_refs(row, "source_candidate_ids")
+    event_index = record_index(events)
+    candidate_index = record_index(candidates)
+    matches = []
     for candidate in candidates:
+        if lookup_record(candidate_index, candidate.get("id")).state != "unique":
+            continue
         if candidate.get("status", "candidate") != "candidate":
             continue
         if candidate.get("kind") != event.get("kind"):
             continue
-        candidate_keys = _specific_correlation_keys(candidate.get("correlation_keys") or [])
-        candidate_keys.discard(str(candidate.get("kind") or ""))
-        candidate_items = {
-            item_key
-            for event_id in candidate.get("event_ids") or []
-            if isinstance((prior_event := event_index.get(event_id)), dict)
-            if (item_key := event_source_item_key(store, prior_event, signals=signals))
-        }
-        # Shared topic/channel keys can correlate salience, but cannot merge
-        # distinct source items or mix source-owned and uncertain identities.
-        if incoming_item is not None:
-            if candidate_items != {incoming_item}:
-                continue
-        elif candidate_items or uncertain_candidate_scoped:
-            # Candidate-scoped reflection/foreground interpretation gets first
-            # consideration, never generic-topic coalescing or corroboration.
+        candidate_event_ids = _retained_refs(candidate, "event_ids")
+        prior_events = [lookup_record(event_index, event_id).row for event_id in candidate_event_ids]
+        if not prior_events or any(not isinstance(prior_event, dict) for prior_event in prior_events):
             continue
-        if incoming_keys & candidate_keys:
-            return candidate
-    return None
+        prior_identities = [
+            event_source_item_identity(store, prior_event, signals=signals)
+            for prior_event in prior_events
+        ]
+        if any(identity is None for identity in prior_identities):
+            continue
+        if {identity[0] for identity in prior_identities if identity is not None} == {incoming_item}:
+            matches.append(candidate)
+    related = _unique_match(candidates, matches)
+    if related is not None:
+        _retained_mutation_closure(store, signals=signals, events=events, candidates=candidates,
+                                   candidate_ids=[related["id"]])
+    return related
 
 
 def _read_pruned_sensor_policy(
@@ -484,10 +602,7 @@ def _apply_candidate_decay(
 
 
 def _event_to_existing_result(event: dict, candidates: list[dict]) -> dict:
-    candidate = (
-        _candidate_for_event_id(candidates, event.get("id", ""))
-        or _candidate_for_event_fingerprint(candidates, event)
-    )
+    candidate = _candidate_for_event_id(candidates, event.get("id", ""))
     result = {
         "event_id": event.get("id"),
         "duplicate": True,
@@ -513,6 +628,117 @@ def _promoted_signal_existing_result(signal: dict, events: list[dict], candidate
     return result
 
 
+def _retained_mutation_closure(
+    store, *, signals=None, events=None, candidates=None,
+    signal_ids=(), event_ids=(), candidate_ids=(),
+):
+    """Validate typed graph evidence and all affected authority before effects.
+
+    Reference shape is checked before selection: malformed evidence cannot prove
+    that a row is unrelated. Visibility, by contrast, is checked only on the
+    actual policy mutation selection, not identity-only dependencies. That selection is
+    also the mutation selection, never a second traversal of raw retained refs.
+    """
+    signals = store.read_jsonl("signals") if signals is None else signals
+    events = store.read_jsonl("events") if events is None else events
+    candidates = store.read_jsonl("candidates") if candidates is None else candidates
+    threads = store.read_jsonl("threads")
+    event_refs = [_retained_refs(row, "source_signal_ids") for row in events]
+    candidate_events = [_retained_refs(row, "event_ids") for row in candidates]
+    candidate_sources = [_retained_refs(row, "source_candidate_ids") for row in candidates]
+    signal_ids = set(_retained_refs({"refs": list(signal_ids)}, "refs"))
+    event_ids = set(_retained_refs({"refs": list(event_ids)}, "refs"))
+    coalescing_ids = set(_retained_refs({"refs": list(candidate_ids)}, "refs"))
+    affected = set(coalescing_ids)
+    for row, refs in zip(events, event_refs):
+        if signal_ids.intersection(refs):
+            event_ids.add(row.get("id"))
+    for row, refs in zip(candidates, candidate_events):
+        if event_ids.intersection(refs):
+            affected.add(row.get("id"))
+    while True:
+        descendants = {row.get("id") for row, refs in zip(candidates, candidate_sources)
+                       if affected.intersection(refs)}
+        if descendants.issubset(affected):
+            break
+        affected.update(descendants)
+
+    indexes = {"signals": record_index(signals), "events": record_index(events),
+               "candidates": record_index(candidates), "threads": record_index(threads)}
+
+    def require(stream, identifier, *, policy=False):
+        found = lookup_record(indexes[stream], identifier)
+        if (found.state != "unique" or found.row is None
+                or (policy and decode_visibility(found.row) is None)):
+            raise ValueError("ambiguous_ingress_lineage")
+        return found.row
+
+    # Evidence must resolve completely without conferring disclosure authority.
+    dependencies = set(event_ids)
+    for identifier in affected:
+        row = require("candidates", identifier)
+        dependencies.update(_retained_refs(row, "event_ids"))
+        for source in _retained_refs(row, "source_candidate_ids"):
+            require("candidates", source)
+    for identifier in dependencies:
+        row = require("events", identifier)
+        if classify_event_claim(store.instance, row, signals=signals).kind == "malformed":
+            raise ValueError("ambiguous_ingress_lineage")
+        for ref in _retained_refs(row, "source_signal_ids"):
+            require("signals", ref)
+        _candidate_for_event_id(candidates, identifier)
+    selected_candidates = coalescing_ids if coalescing_ids else affected
+    for identifier in signal_ids:
+        require("signals", identifier, policy=True)
+    selected_threads = []
+    for row in threads:
+        origin = row.get("origin_candidate_id")
+        if not coalescing_ids and isinstance(origin, str) and origin in affected:
+            require("threads", row.get("id"), policy=True)
+            selected_threads.append(row)
+    return [
+        ("threads", threads, selected_threads),
+        ("candidates", candidates, [require("candidates", ref, policy=True)
+                                    for ref in selected_candidates]),
+        ("events", events, [require("events", ref, policy=True) for ref in event_ids]),
+        ("signals", signals, [require("signals", ref, policy=True) for ref in signal_ids]),
+    ]
+
+
+@_candidate_transactional
+def _narrow_replay_visibility(
+    store: SensoriumStore, incoming: dict, *, signal_ids=(), event_ids=(), check_only=False,
+    closure=None,
+):
+    """Restrict validated retained lineage, never heal authority or replay effects."""
+    if closure is None:
+        closure = _retained_mutation_closure(store, signal_ids=signal_ids, event_ids=event_ids)
+    if check_only:
+        return closure
+
+    def narrow(row):
+        sensitivity = merge_sensitivity([
+            row.get("sensitivity", "private"), incoming.get("sensitivity", "private"),
+        ])
+        surfaces = intersect_allowed_surfaces([
+            row.get("allowed_surfaces") or [], incoming.get("allowed_surfaces") or [],
+        ])
+        if sensitivity == "local_only":
+            surfaces = [surface for surface in surfaces if surface == "local"]
+        if sensitivity == row.get("sensitivity") and surfaces == sorted(row.get("allowed_surfaces") or []):
+            return False
+        row["sensitivity"], row["allowed_surfaces"] = sensitivity, surfaces
+        return True
+
+    # All authority was validated before the first in-memory edit. Hide downstream
+    # disclosures first, retaining the exact same selection as preflight.
+    changes = [(name, rows, [narrow(row) for row in selected])
+               for name, rows, selected in closure]
+    for name, rows, changed in changes:
+        if any(changed):
+            _rewrite_jsonl(store, name, rows)
+
+
 def _coalesce_candidate_with_event(
     store: SensoriumStore,
     *,
@@ -522,7 +748,7 @@ def _coalesce_candidate_with_event(
     incoming_candidate: dict,
 ) -> dict:
     now = utc_now_iso()
-    event_ids = list(candidate.get("event_ids") or [])
+    event_ids = list(_retained_refs(candidate, "event_ids"))
     if event.get("id") not in event_ids:
         event_ids.append(event.get("id"))
     candidate["event_ids"] = event_ids
@@ -568,20 +794,29 @@ def _append_event_and_create_or_update_candidate(
     event: dict,
     config: dict | None = None,
 ) -> dict:
+    from .schemas import validate_ingress_visibility
+
+    validate_ingress_visibility(event)
     events = store.read_jsonl("events")
     signals = store.read_jsonl("signals")
     candidates = store.read_jsonl("candidates")
+
+    replay_closure = []
+    replays, related = _preflight_event(store, event, events=events, signals=signals,
+                                        candidates=candidates, replay_closure=replay_closure)
+    if replays:
+        result = _event_to_existing_result(replays[0], candidates)
+        _narrow_replay_visibility(store, event, closure=replay_closure[0])
+        return result
+
     _apply_candidate_decay(store, candidates, config=config)
-
-    existing_event = _find_existing_event(events, event)
-    if existing_event:
-        return _event_to_existing_result(existing_event, candidates)
-
     store.append_jsonl("events", event)
     candidate = event_to_candidate(event, config)
-    related = _find_related_candidate(
-        store, candidates, event, events=events, signals=signals,
-    )
+    if related:
+        related = lookup_record(record_index(candidates), related["id"]).row
+        # Decay replaces rows and can retire the owner selected by preflight.
+        if related and (related.get("status", "candidate") != "candidate" or related.get("extinct")):
+            related = None
     if related:
         receipt = _coalesce_candidate_with_event(
             store,
@@ -605,6 +840,29 @@ def _append_event_and_create_or_update_candidate(
         "duplicate": False,
         "coalesced": False,
     }
+
+
+def _preflight_event(store, event, *, events, signals, candidates, replay_closure=None):
+    signal_index = record_index(signals)
+    for identifier in _retained_refs(event, "source_signal_ids"):
+        found = lookup_record(signal_index, identifier)
+        if found.state != "unique":
+            raise ValueError("ambiguous_ingress_lineage")
+    replays = _canonical_replays(
+        events, event,
+        classify=lambda row: classify_event_claim(store.instance, row, signals=signals),
+        fingerprint=event_fingerprint,
+    )
+    if replays:
+        for row in replays:
+            _event_to_existing_result(row, candidates)
+        closure = _narrow_replay_visibility(store, event, event_ids=[row["id"] for row in replays],
+                                           check_only=True)
+        if replay_closure is not None:
+            replay_closure.append(closure)
+        return replays, None
+    related = _find_related_candidate(store, candidates, event, events=events, signals=signals)
+    return [], related
 
 
 def handle_sensorium_sensor_config(
@@ -766,18 +1024,38 @@ def handle_sensorium_ingest_signal(
     if config is None:
         config, _ = load_instance_config(state_dir=str(store.root))
 
+    if classify_signal_claim(instance, signal).kind == "malformed":
+        return _err(instance, "invalid_ingress_claim")
     normalized = normalize_signal(signal)
+    signals = store.read_jsonl("signals")
+    try:
+        replays = _canonical_replays(signals, normalized,
+                                    classify=lambda row: classify_signal_claim(instance, row),
+                                    fingerprint=signal_fingerprint)
+        events = store.read_jsonl("events")
+        candidates = store.read_jsonl("candidates")
+        if replays:
+            results = [_promoted_signal_existing_result(row, events, candidates) for row in replays]
+            _narrow_replay_visibility(store, normalized, signal_ids=[row["id"] for row in replays])
+            return _ok(instance, results[0])
+        # Read/prune without persistence until downstream admission is proven.
+        policy = prune_sensor_policy(store.read_sensor_policy(), config=config)
+        inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
+        promoted, reason = should_promote_signal(normalized, config)
+        if not promoted:
+            promoted, supported_reason = should_promote_supported_signal(normalized, signals, config)
+            if promoted:
+                reason = supported_reason
+        event = promote_signal_to_event(normalized, config) if promoted and not inhibited else None
+        if event is not None:
+            _preflight_event(store, event, events=events, signals=[*signals, normalized],
+                             candidates=candidates)
+    except ValueError as exc:
+        return _err(instance, str(exc))
     normalized["fingerprint"] = signal_fingerprint(normalized)
 
     policy = _read_pruned_sensor_policy(store, config=config)
     inhibited, inhibition_reason = inhibited_by_sensor_policy(normalized, policy, config=config)
-
-    signals = store.read_jsonl("signals")
-    existing_signal = _find_existing_signal(signals, normalized)
-    if existing_signal:
-        events = store.read_jsonl("events")
-        candidates = store.read_jsonl("candidates")
-        return _ok(instance, _promoted_signal_existing_result(existing_signal, events, candidates))
 
     store.append_jsonl("signals", normalized)
     # Closed structured projection only; raw feedback joins never reach the study.
@@ -803,11 +1081,6 @@ def handle_sensorium_ingest_signal(
             "reason": f"inhibited: {inhibition_reason}",
         })
 
-    promoted, reason = should_promote_signal(normalized, config)
-    if not promoted:
-        promoted, supported_reason = should_promote_supported_signal(normalized, signals, config)
-        if promoted:
-            reason = supported_reason
     result: dict = {
         "signal_id": normalized["id"],
         "promoted": promoted,
@@ -816,7 +1089,7 @@ def handle_sensorium_ingest_signal(
     }
 
     if promoted:
-        event = promote_signal_to_event(normalized, config)
+        assert event is not None
         event_result = _append_event_and_create_or_update_candidate(store, event=event, config=config)
         # Detached best-effort observer runs only after the canonical owner commits.
         observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
@@ -871,18 +1144,20 @@ def handle_sensorium_ingest_event(
     incoming.setdefault("sensitivity", "private")
     incoming.setdefault("allowed_surfaces", ["local"])
     incoming.setdefault("expires_at", "")
-    incoming["fingerprint"] = event_fingerprint(incoming)
-
     try:
         validate_event(incoming)
+        if classify_event_claim(instance, incoming, signals=store.read_jsonl("signals")).kind == "malformed":
+            return _err(instance, "invalid_ingress_claim")
+        incoming["fingerprint"] = event_fingerprint(incoming)
+        result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
     except ValueError as e:
         return _err(instance, str(e))
 
-    result = _append_event_and_create_or_update_candidate(store, event=incoming, config=config)
-    observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
-        "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),
-        "source_class": "unknown", "change_state": "update" if result.get("coalesced") else "new",
-    })
+    if not result.get("duplicate"):
+        observe_after_success(store.root, config.get("prospective_evidence_capture", {}), "candidate_updated", {
+            "candidate_id": result.get("candidate_id", ""), "event_id": result.get("event_id", ""),
+            "source_class": "unknown", "change_state": "update" if result.get("coalesced") else "new",
+        })
     return _ok(instance, result)
 
 
@@ -1246,12 +1521,21 @@ def _resolve_exact_subject(
     it is no longer reachable" from "I never saw this id". This is the
     exact-subject counterpart to the rotating top-N status shape.
     """
-    from .config import visible_on_surface
+    from .canonical_records import lookup_record
+    from .config import DisclosureVisibility
     from .pointers import DEFAULT_POINTER_CONFIG
 
     cfg = instance_config if isinstance(instance_config, dict) else {}
 
     out: dict = {"id": reference_id}
+    disclosure = DisclosureVisibility(candidates, threads, surface, cfg)
+    matches = [lookup_record(disclosure.indexes[kind], reference_id)
+               for kind in ("candidate", "thread")]
+    if sum(match.state != "missing" for match in matches) != 1 or any(
+        match.state == "ambiguous" for match in matches
+    ):
+        return {"id": reference_id, "kind": "unknown", "not_found": True,
+                "reason": "no_unique_subject"}
 
     for thread in threads:
         if thread.get("id") != reference_id:
@@ -1260,7 +1544,7 @@ def _resolve_exact_subject(
         if status not in ("dormant", "held"):
             return {"id": reference_id, "kind": "unknown", "not_found": True,
                     "reason": f"thread_status_{status or 'unset'}"}
-        if not visible_on_surface(thread, surface, cfg):
+        if not disclosure.subject("thread", thread.get("id")):
             return {"id": reference_id, "kind": "thread", "not_found": True,
                     "surface": surface, "reason": "surface_not_allowed"}
         task = thread.get("conscious_task") or {}
@@ -1288,7 +1572,7 @@ def _resolve_exact_subject(
             and decision in {"SAVE", "PROMOTE_CONSCIOUS"}
             and settlement.get("intake_task_id")
         )
-        if not visible_on_surface(candidate, surface, cfg):
+        if not disclosure.subject("candidate", candidate.get("id")):
             kind_guess = "saved_residue" if is_saved_residue else "candidate"
             return {"id": reference_id, "kind": kind_guess, "not_found": True,
                     "surface": surface, "reason": "surface_not_allowed"}
@@ -1387,7 +1671,8 @@ def handle_sensorium_candidate_open(
     candidates. The capsule explicitly says it is a candidate, not a thread,
     so the surface-facing pointer/doorway does not have to invent a thread.
     """
-    from .config import load_instance_config, visible_on_surface
+    from .canonical_records import lookup_record
+    from .config import DisclosureVisibility, load_instance_config
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
@@ -1397,13 +1682,11 @@ def handle_sensorium_candidate_open(
     )
 
     candidates = store.read_jsonl("candidates")
+    disclosure = DisclosureVisibility(candidates, store.read_jsonl("threads"), surface, instance_config)
     target = None
     if candidate_id and candidate_id != "latest":
-        for c in candidates:
-            if c.get("id") == candidate_id:
-                target = c
-                break
-    if target is None:
+        target = lookup_record(disclosure.indexes["candidate"], candidate_id).row
+    if not candidate_id or candidate_id == "latest":
         # Honour acceptance (b): when "latest" is requested for a surface,
         # prefer the highest-pressure active candidate on that surface and
         # fall back to the highest-pressure saved-residue candidate when no
@@ -1411,7 +1694,7 @@ def handle_sensorium_candidate_open(
         active_visible = [
             c for c in candidates
             if c.get("status") == "candidate"
-            and visible_on_surface(c, surface, instance_config)
+            and disclosure.subject("candidate", c.get("id"))
         ]
         if active_visible:
             active_visible.sort(key=lambda c: (c.get("pressure") or 0), reverse=True)
@@ -1421,7 +1704,7 @@ def handle_sensorium_candidate_open(
                 c for c in candidates
                 if (c.get("kanban_settlement") or {}).get("decision") in {"SAVE", "PROMOTE_CONSCIOUS"}
                 and (c.get("kanban_settlement") or {}).get("intake_task_id")
-                and visible_on_surface(c, surface, instance_config)
+                and disclosure.subject("candidate", c.get("id"))
             ]
             if saved_visible:
                 saved_visible.sort(key=lambda c: (c.get("pressure") or 0), reverse=True)
@@ -1433,7 +1716,7 @@ def handle_sensorium_candidate_open(
             f"No viewable candidate for surface '{surface}' (id='{candidate_id or 'latest'}'); "
             "the agent should call sensorium(action='status', surface=...) instead.",
         )
-    if not visible_on_surface(target, surface, instance_config):
+    if not disclosure.subject("candidate", target.get("id")):
         return _err(
             instance,
             f"Candidate '{target.get('id')}' is not allowed on surface '{surface}'.",
@@ -1481,7 +1764,8 @@ def handle_sensorium_thread_open(
     state_dir: str | None = None,
     config_path: str | None = None,
 ) -> str:
-    from .config import load_instance_config, visible_on_surface
+    from .canonical_records import lookup_record
+    from .config import DisclosureVisibility, load_instance_config
 
     store = SensoriumStore(instance=instance, state_dir=state_dir)
     store.ensure_dirs()
@@ -1494,9 +1778,18 @@ def handle_sensorium_thread_open(
     target = _find_thread(threads, thread_id)
     if target is None:
         return _err(instance, f"Thread '{thread_id or 'latest'}' not found.")
+    disclosure = DisclosureVisibility(store.read_jsonl("candidates"), threads, surface, instance_config)
+    if not thread_id or thread_id == "latest":
+        eligible = [t for t in threads if t.get("status") in _VISIBLE_STATUSES
+                    and disclosure.subject("thread", t.get("id"))]
+        target = _find_thread(eligible, thread_id)
+    else:
+        target = lookup_record(disclosure.indexes["thread"], thread_id).row
+    if target is None:
+        return _err(instance, "No unique viewable thread.")
     if target.get("status") not in _VISIBLE_STATUSES:
         return _err(instance, f"Thread '{target.get('id')}' is {target.get('status')} and cannot be opened.")
-    if not visible_on_surface(target, surface, instance_config):
+    if not disclosure.subject("thread", target.get("id")):
         return _err(instance, f"Thread '{target.get('id')}' is not allowed on surface '{surface}'.")
 
     capsule = _compact_thread_capsule(target)

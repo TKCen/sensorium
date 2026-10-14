@@ -219,15 +219,21 @@ def test_corrupt_prepare_is_authoritative_for_native_entrypoint(tmp_path):
 def test_append_winner_refreshes_projection_without_candidate_rewrite(tmp_path):
     store = _store(tmp_path, "append-winner")
     _seed_one(store)
+    # Initially incomplete membership becomes source-owned; this is not r1 -> r2.
+    store.rewrite_jsonl("candidates", [
+        {**store.read_jsonl("candidates")[0], "event_ids": ["event", "replacement-event"]}
+    ])
+    candidate_bytes = store.paths["candidates"].read_bytes()
     _finish(store)
     old = build_admission_plan(store)["selection"]
     assert old is not None
+    assert old["identity_mode"] == "legacy"
     second = _frontier("signal-two", "revision-two")
     store.append_jsonl("signals", second)
     store.append_jsonl(
         "events",
         {
-            "id": "event",
+            "id": "replacement-event",
             "kind": "creative_pull",
             "summary": "replacement",
             "source_signal_ids": ["signal-two"],
@@ -235,6 +241,8 @@ def test_append_winner_refreshes_projection_without_candidate_rewrite(tmp_path):
     )
     prepared = _finish(store)
     current = build_admission_plan(store)["selection"]
+    assert current["identity_mode"] == "source"
+    assert store.paths["candidates"].read_bytes() == candidate_bytes
     claim, error = _claim_for_signal(store.instance, second)
     assert prepared.dependent_refreshes == 1
     assert error is None and claim is not None and current is not None
@@ -274,13 +282,15 @@ def test_dependency_fanout_is_queued_and_fail_closed_until_complete(tmp_path):
                 "kind": "creative_pull",
                 "pressure": 0.5,
                 "created_at": "2026-01-01T00:00:00Z",
-                "event_ids": ["shared"],
+                "event_ids": ["shared", "replacement-shared"],
             },
         )
+    candidate_bytes = store.paths["candidates"].read_bytes()
     _finish(store)
+    assert build_admission_plan(store)["selection"]["identity_mode"] == "legacy"
     second = _frontier("signal-two", "revision-two")
     store.append_jsonl("signals", second)
-    store.append_jsonl("events", {"id": "shared", "source_signal_ids": ["signal-two"]})
+    store.append_jsonl("events", {"id": "replacement-shared", "source_signal_ids": ["signal-two"]})
     first = store.prepare_admission_index(scan_bytes=4 * 1024 * 1024)
     assert not first.complete
     assert first.reason == "dependent_refresh_pending"
@@ -288,6 +298,8 @@ def test_dependency_fanout_is_queued_and_fail_closed_until_complete(tmp_path):
     incomplete = build_admission_plan(store)
     assert incomplete["state"] == "catching_up" and incomplete["selection"] is None
     final = _finish(store)
+    assert store.paths["candidates"].read_bytes() == candidate_bytes
+    assert build_admission_plan(store)["selection"]["identity_mode"] == "source"
     assert final.dependent_refreshes == 36
     claim, error = _claim_for_signal(store.instance, second)
     assert error is None and claim is not None

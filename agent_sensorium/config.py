@@ -1,9 +1,9 @@
 """Instance config loading, validation, and policy application.
 
 Config is loaded from (in order): explicit config_path argument, then
-{state_dir}/instance.config.json, then safe defaults. Missing or corrupt
-config falls back to safe defaults — local-only surfaces, private sensitivity,
-minimal budgets.
+{state_dir}/instance.config.json, then safe defaults. Absent config uses
+local-only defaults; unreadable present config retains diagnostic defaults
+without disclosure authority.
 
 Policy functions only narrow scope; they never broaden an item's sensitivity
 or allowed_surfaces beyond what the item already has.
@@ -14,11 +14,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from .canonical_records import lookup_record, record_index
 from .gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
 from .schemas import (
     PROFILE_NAME_RE,  # noqa: F401 - re-exported for config API compatibility
     SENSITIVITY_RANK,
     VALID_SENSITIVITIES,
+    decode_visibility,
     sanitize_profile_name,
     utc_now_iso,
 )
@@ -468,16 +470,29 @@ def resolve_config_path(
 ) -> Path | None:
     if config_path:
         p = Path(config_path)
-        if p.is_file():
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return p
+        else:
             return p
     if state_dir:
         p = Path(state_dir) / "instance.config.json"
-        if p.is_file():
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return p
+        else:
             return p
     return None
 
 
 def _validate_config(raw: dict) -> dict:
+    invalid_visibility = not isinstance(raw, dict)
     if not isinstance(raw, dict):
         raw = {}
 
@@ -525,14 +540,16 @@ def _validate_config(raw: dict) -> dict:
             config["policy_card_ref"] = None
     if "allowed_surfaces" in raw:
         val = raw["allowed_surfaces"]
-        if isinstance(val, list) and all(isinstance(s, str) for s in val):
-            surfaces = sorted({s.strip() for s in val if s.strip()})
-            if surfaces:
-                config["allowed_surfaces"] = surfaces
+        if decode_visibility({"sensitivity": "private", "allowed_surfaces": val}) is None:
+            invalid_visibility = True
+        else:
+            config["allowed_surfaces"] = list(val)
     if "max_sensitivity" in raw:
         val = raw["max_sensitivity"]
-        if val in VALID_SENSITIVITIES:
+        if isinstance(val, str) and val in VALID_SENSITIVITIES:
             config["max_sensitivity"] = val
+        else:
+            invalid_visibility = True
     if "thresholds" in raw:
         val = raw["thresholds"]
         if isinstance(val, dict):
@@ -609,6 +626,9 @@ def _validate_config(raw: dict) -> dict:
         config["prospective_evidence_capture"] = sanitize_prospective_evidence_capture(
             raw.get("prospective_evidence_capture")
         )
+    if invalid_visibility:
+        # Keep documented config display defaults, never their authority.
+        config["_visibility_invalid"] = True
     return config
 
 
@@ -634,8 +654,9 @@ def load_instance_config(
 
     try:
         raw = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeError):
         config = _validate_config({})
+        config["_visibility_invalid"] = True
         diag = _config_diagnostics(config, source="defaults", path=str(path))
         diag["error"] = "config_unreadable"
         return config, diag
@@ -785,15 +806,137 @@ def visible_on_surface(item: dict, surface: str, config: dict) -> bool:
     Checks BOTH item allowed_surfaces AND config allowed_surfaces, plus
     sensitivity. Fails closed: missing surfaces or sensitivity data hides item.
     """
-    if not surface:
+    if not isinstance(surface, str) or not surface.strip():
         return False
-    item_surfaces = set(item.get("allowed_surfaces") or [])
-    config_surfaces = set(config.get("allowed_surfaces") or [])
-    if surface not in item_surfaces or surface not in config_surfaces:
+    item_visibility = decode_visibility(item)
+    policy_visibility = decode_visibility(config, sensitivity_key="max_sensitivity")
+    if item_visibility is None or policy_visibility is None:
         return False
-    item_rank = SENSITIVITY_RANK.get(item.get("sensitivity", "private"), 1)
-    max_rank = SENSITIVITY_RANK.get(config.get("max_sensitivity", "private"), 1)
-    return item_rank <= max_rank
+    sensitivity, surfaces = item_visibility
+    maximum, policy_surfaces = policy_visibility
+    return (surface in surfaces and surface in policy_surfaces
+            and SENSITIVITY_RANK[sensitivity] <= SENSITIVITY_RANK[maximum])
+
+
+class DisclosureVisibility:
+    """Read-only candidate/thread authority over one full canonical view.
+
+    Uniqueness precedes lifecycle/ranking. Historical subjects use current
+    metadata without admission preparation. Cyclic/unresolved subjects deny.
+    Action/artifact entity uniqueness remains owned elsewhere.
+    """
+
+    def __init__(self, candidates: list[dict], threads: list[dict], surface: str, config: dict):
+        self.indexes = {"candidate": record_index(candidates), "thread": record_index(threads)}
+        self.surface = surface
+        self.config = config
+
+    def subject(self, kind: str, identifier: object, trail: frozenset = frozenset(),
+                *, _depth=0, _budget=None) -> bool:
+        if _budget is None:
+            _budget = [4096]
+        if _depth >= 64 or _budget[0] <= 0:
+            return False
+        _budget[0] -= 1
+        found = lookup_record(self.indexes[kind], identifier)
+        if found.state != "unique":
+            return False
+        key = (kind, identifier)
+        if key in trail:
+            return False
+        return (visible_on_surface(found.row, self.surface, self.config)
+                and self._linked(found.row, trail | {key}, owner=key,
+                                 _depth=_depth + 1, _budget=_budget)[0])
+
+    def linked(self, record: object, trail: frozenset = frozenset(), *, owner=None) -> bool:
+        return self._linked(record, trail, owner=owner)[0]
+
+    def _linked(self, record: object, trail: frozenset = frozenset(), *, owner=None,
+                source_refs=False, _depth=0, _budget=None) -> tuple[bool, bool]:
+        """Return validity and resolved linkage from the same traversal."""
+        if _budget is None:
+            _budget = [4096]
+        if _depth >= 64 or _budget[0] <= 0:
+            return False, False
+        _budget[0] -= 1
+        if isinstance(record, list):
+            linked = False
+            for child in record:
+                if isinstance(child, (dict, list)):
+                    valid, resolved = self._linked(child, trail, owner=owner,
+                                                   _depth=_depth + 1, _budget=_budget)
+                    if not valid:
+                        return False, False
+                    linked = linked or resolved
+            return True, linked
+        if not isinstance(record, dict):
+            return False, False
+        if record.get("kind") == "subconscious_advisory":
+            metadata = record.get("advisory_meta")
+            nested_binding = metadata.get("admission_binding") if isinstance(metadata, dict) else None
+            # The canonical producer declares its source at top level and in
+            # advisory metadata. Derived prose cannot become standalone when
+            # those declarations disappear; fingerprint text is not authority.
+            if not (record.get("source_candidate_ids")
+                    or isinstance(record.get("admission_binding"), dict)
+                    or isinstance(nested_binding, dict)):
+                return False, False
+        linked = False
+        for field, kind in (("candidate_id", "candidate"), ("origin_candidate_id", "candidate"),
+                            ("thread_id", "thread")):
+            identifier = record.get(field)
+            # Legacy operational receipts use null for absent direct subjects.
+            # Inside canonical source_refs only the documented string placeholder
+            # can be absent; null or other falsy members remain malformed.
+            if field not in record or (identifier is None and not source_refs):
+                continue
+            # The canonical artifact writer retains this absence beside a
+            # resolved candidate parent, not in arbitrary subject declarations.
+            if (source_refs and field == "thread_id" and identifier == "" and linked
+                    and isinstance(record.get("candidate_id"), str) and record["candidate_id"]):
+                continue
+            linked = True
+            # Own entity declarations in embedded capsules are not dependency
+            # cycles; source bindings and origin links remain dependencies.
+            if field in {"candidate_id", "thread_id"} and (kind, identifier) == owner:
+                continue
+            if not self.subject(kind, identifier, trail, _depth=_depth + 1, _budget=_budget):
+                return False, False
+        if "source_candidate_ids" in record:
+            identifiers = record["source_candidate_ids"]
+            if not isinstance(identifiers, list):
+                return False, False
+            for identifier in identifiers:
+                linked = True
+                if not self.subject("candidate", identifier, trail, _depth=_depth + 1, _budget=_budget):
+                    return False, False
+        binding = record.get("admission_binding")
+        if binding is not None:
+            linked = True
+            if not isinstance(binding, dict) or not self.subject(
+                    "candidate", binding.get("source_candidate_id"), trail,
+                    _depth=_depth + 1, _budget=_budget):
+                return False, False
+        for field, value in record.items():
+            if field in {"admission_binding", "source_candidate_ids"}:
+                continue
+            children = [value] if isinstance(value, (dict, list)) else []
+            for child in children:
+                if isinstance(child, (dict, list)):
+                    valid, resolved = self._linked(child, trail, owner=owner,
+                                                   source_refs=field == "source_refs" and isinstance(value, dict),
+                                                   _depth=_depth + 1, _budget=_budget)
+                    if not valid:
+                        return False, False
+                    linked = linked or resolved
+        if "source_refs" in record and not isinstance(record["source_refs"], (dict, list)):
+            return False, False
+        if not linked and record.get("type") == "subconscious.advisory":
+            if (record.get("output_action") in ("DROP", "SAVE", "CREATE_CONSCIOUS_TASK")
+                    or record.get("action") in ("drop", "save", "would_create_conscious_task",
+                                               "created_conscious_task_candidate", "updated_conscious_task_candidate")):
+                return False, False
+        return True, linked
 
 
 def apply_surface_policy(

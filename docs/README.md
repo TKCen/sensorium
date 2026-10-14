@@ -1,10 +1,24 @@
-# Docs
+# Documentation
 
-- `dashboard-and-review-surfaces.md`: read-only dashboard route contract, compact privacy projection rules, and regression checklist for `/snapshot`, `/attention`, `/metrics`, graph, registry, dampener/blocker, and explanation surfaces.
-- `memory-volunteering-protocol.md`: formal evidence-cited capsule → transparent confidence proposal → Conscious authorization contract for volunteering memory, insights, or offer candidates without letting confidence become truth/delivery authority.
-- `extending-sensors-and-subconscious-jobs.md`: how to add new deterministic sensors, hot-reload trusted script actuators, and bounded Subconscious jobs without breaking the awareness/action boundary.
-- `profiles-and-config.md`: the profile model, active-profile resolution, and the code/config boundary — what deployers configure vs what the plugin provides as generic defaults.
-- `examples/demo-instance-config.json`: sample `instance.config.json` for a profile named `demo`.
-- `examples/demo-policy-card.md`: sample policy card showing the boundary between reusable core and deployment-specific policy.
-- `demo-sensors-and-tick.md`: fresh-install walkthrough — seed the demo profile, inspect sensors, run the heartbeat tick, and read status via the live tool.
-- `live-salience-ingest-and-turn-review.md`: design note for foreground-owned salience vs unresolved residue, starvation/over-ingestion monitoring, and a cheap turn-review safety net before broader implementation changes.
+## Attention changes and proposed finite workrooms
+
+- [Architecture](attention-and-workroom/architecture.md): implemented producer replay/index/optional latent metadata, ownership diagram and proposed native capability boundaries.
+- [Design rationale](attention-and-workroom/design-rationale.md): equality, privacy, voluntary finite choice, quota, accounting and process-proof decisions.
+- [Migration](attention-and-workroom/migration.md): retained attention owners and proposed OFF initialization, debit-preserving migration, exact history and STOP rules.
+- [Change scope](attention-and-workroom/change-scope.md): all feature groups, implemented/proposed/held/excluded status, verification contracts and remaining host limitations.
+
+Native/workroom/accounting/transport are design proposals, not installed features. Gateway compatibility and Wiki security remain held; source acceptance does not clear host, activation or publication gates.
+
+## Existing contracts and configuration
+
+- [Bounded current attention](bounded-current-attention.md): current-attention owners, index and completeness boundaries.
+- [Conscious attention lifecycle](conscious-attention-lifecycle.md): exact aperture/consumer/lease ownership and recovery.
+- [Dashboard and review surfaces](dashboard-and-review-surfaces.md): GET-only compact privacy projections and regression checklist.
+- [Memory Volunteering Protocol](memory-volunteering-protocol.md): evidence-cited proposals, confidence-not-authority and explicit authorization.
+- [Extending sensors and advisory jobs](extending-sensors-and-subconscious-jobs.md): deterministic sensors, trusted prepare-only actuators and bounded advisory without executive authority.
+- [Profiles and configuration](profiles-and-config.md): active-profile resolution and reusable-code/deployment-configuration boundary.
+- [Demo instance configuration](examples/demo-instance-config.json) and [demo policy card](examples/demo-policy-card.md): synthetic configuration examples.
+- [Demo sensors and tick](demo-sensors-and-tick.md): seed a demo profile, inspect sensors and run a deliberate heartbeat.
+- [Live salience and turn review](live-salience-ingest-and-turn-review.md): foreground-owned salience, unresolved residue and monitoring design.
+
+See [developer instructions](../AGENTS.md) and the [bundled skill](../skills/agent-sensorium/SKILL.md) for repair and ordinary/admin use.

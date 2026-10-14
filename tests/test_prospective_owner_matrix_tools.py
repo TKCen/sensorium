@@ -91,11 +91,16 @@ def _invoke(operation: str, root: Path) -> tuple[str, list[str]]:
             signal=_signal("sig-promoted-create"), instance="matrix", state_dir=state_dir
         ), ["source_observed", "candidate_updated"]
     if operation == "promoted_coalesce":
+        source_a = _signal("sig-coalesce-a")
+        source_b = _signal("sig-coalesce-b", summary="deterministic production owner fixture second source")
+        for row, revision in ((source_a, "r1"), (source_b, "r2")):
+            row["artifact_meta"] = {"source_id": "synthetic-matrix", "item_id": "coalesce"}
+            row["source_revision"] = revision
         first = json.loads(tools.handle_sensorium_ingest_signal(
-            signal=_signal("sig-coalesce-a"), instance="matrix", state_dir=state_dir
+            signal=source_a, instance="matrix", state_dir=state_dir
         ))
         second = tools.handle_sensorium_ingest_signal(
-            signal=_signal("sig-coalesce-b", summary="deterministic production owner fixture second source"), instance="matrix", state_dir=state_dir
+            signal=source_b, instance="matrix", state_dir=state_dir
         )
         second_data = json.loads(second)["data"]
         # This proves the production coalescer selected the same candidate, not
@@ -105,6 +110,13 @@ def _invoke(operation: str, root: Path) -> tuple[str, list[str]]:
         assert len(SensoriumStore(instance="matrix", state_dir=state_dir).read_jsonl("candidates")) == 1
         return second, ["source_observed", "candidate_updated", "source_observed", "candidate_updated"]
     if operation == "trusted_event_create_update":
+        store = SensoriumStore(instance="matrix", state_dir=state_dir)
+        store.ensure_dirs()
+        for suffix, revision in (("a", "r1"), ("b", "r2")):
+            row = _signal("sig-evt-trusted-" + suffix, kind="task_result")
+            row["artifact_meta"] = {"source_id": "synthetic-matrix", "item_id": "trusted-event"}
+            row["source_revision"] = revision
+            store.append_jsonl("signals", row)
         first = json.loads(tools.handle_sensorium_ingest_event(
             event=_event("evt-trusted-a"), instance="matrix", state_dir=state_dir
         ))

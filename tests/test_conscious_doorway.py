@@ -74,6 +74,37 @@ def _store(tmp_path: Path, enabled=True):
     return store
 
 
+def _retain_sources(store, subject_ids):
+    """Complete only explicitly named synthetic subjects before any lease."""
+    from tests.test_source_closure_contract import retain_candidate_parent
+
+    rows = store.read_jsonl("candidates")
+    parents = []
+    for identifier in subject_ids:
+        subjects = [row for row in rows if row["id"] == identifier]
+        assert len(subjects) == 1
+        subject = subjects[0]
+        assert not subject.get("conscious_aperture")
+        assert subject["source_candidate_ids"] == []
+        parent_id = f"source-{identifier}"
+        assert not any(row["id"] == parent_id for row in rows)
+        subject["source_candidate_ids"] = [parent_id]
+        parents.append(parent_id)
+    store.rewrite_jsonl("candidates", rows)
+    for parent_id in parents:
+        retain_candidate_parent(store, parent_id)
+    return [row for row in store.read_jsonl("candidates") if row["id"] in parents]
+
+
+def _assert_sources_unchanged(store, parents):
+    rows = store.read_jsonl("candidates")
+    for parent in parents:
+        retained = [row for row in rows if row["id"] == parent["id"]]
+        assert retained == [parent]
+        assert parent["status"] == "archived" and parent["pressure"] == 0
+        assert parent["kind"] == "design_decision"
+
+
 def _forbidden_ledgers(store):
     return {
         name: store.read_jsonl(name)
@@ -99,6 +130,7 @@ def test_implicit_root_config_activates_while_disabled_and_absent_remain_no_crea
         json.dumps({"conscious_doorway": {"enabled": True}})
     )
     enabled.append_jsonl("candidates", _candidate("cand_implicit"))
+    parents = _retain_sources(enabled, ["cand_implicit"])
 
     packet = handle_conscious_doorway_pre_llm(instance="enabled", state_dir=None)
     assert packet and "cand_implicit" in packet["context"]
@@ -115,6 +147,7 @@ def test_implicit_root_config_activates_while_disabled_and_absent_remain_no_crea
     absent = SensoriumStore(instance="absent")
     assert handle_conscious_doorway_pre_llm(instance="absent", state_dir=None) is None
     assert not absent.root.exists()
+    _assert_sources_unchanged(enabled, parents)
 
 
 def test_on_without_typed_advisory_is_quiet_and_nonmutating(tmp_path):
@@ -129,6 +162,7 @@ def test_on_without_typed_advisory_is_quiet_and_nonmutating(tmp_path):
 def test_opens_one_private_packet_and_never_mutates_forbidden_ledgers(tmp_path):
     store = _store(tmp_path)
     store.append_jsonl("candidates", _candidate("cand_one"))
+    parents = _retain_sources(store, ["cand_one"])
     packet = handle_conscious_doorway_pre_llm(instance="test", state_dir=str(store.root))
     assert packet and "[Sensorium Conscious Aperture]" in packet["context"]
     assert "cand_one" in packet["context"]
@@ -151,12 +185,14 @@ def test_opens_one_private_packet_and_never_mutates_forbidden_ledgers(tmp_path):
         == 1
     )
     assert _forbidden_ledgers(store) == {name: [] for name in _forbidden_ledgers(store)}
+    _assert_sources_unchanged(store, parents)
 
 
 def test_same_owner_resumes_and_expired_lease_is_reclaimed(tmp_path):
     store = _store(tmp_path)
     store.append_jsonl("candidates", _candidate("cand_one"))
     store.append_jsonl("candidates", _candidate("cand_two"))
+    parents = _retain_sources(store, ["cand_one", "cand_two"])
     first = handle_conscious_doorway_pre_llm(
         instance="test", state_dir=str(store.root), session_id="same-session"
     )
@@ -164,7 +200,7 @@ def test_same_owner_resumes_and_expired_lease_is_reclaimed(tmp_path):
         instance="test", state_dir=str(store.root), session_id="same-session"
     )
     assert first and second
-    assert [r["status"] for r in store.read_jsonl("candidates")] == [
+    assert [r["status"] for r in store.read_jsonl("candidates") if r["id"] in ("cand_one", "cand_two")] == [
         "in_conscious_aperture",
         "in_conscious_aperture",
     ]
@@ -182,6 +218,10 @@ def test_same_owner_resumes_and_expired_lease_is_reclaimed(tmp_path):
     )
     assert stale["action"] == "opened_aperture"
     assert stale["reclaimed_candidate_ids"] == ["cand_one"]
+    assert [row["id"] for row in store.read_jsonl("candidates")] == [
+        "cand_one", "cand_two", "source-cand_one", "source-cand_two",
+    ]
+    _assert_sources_unchanged(store, parents)
 
 
 def test_raw_saved_and_malformed_candidates_remain_ineligible(tmp_path):
@@ -189,12 +229,17 @@ def test_raw_saved_and_malformed_candidates_remain_ineligible(tmp_path):
     store.append_jsonl("candidates", _candidate("cand_raw", kind="design_insight"))
     store.append_jsonl("candidates", _candidate("cand_saved", status="archived"))
     store.append_jsonl("candidates", _candidate("cand_bad", valid=False))
+    parents = _retain_sources(store, ["cand_saved", "cand_bad"])
     assert handle_conscious_doorway_pre_llm(instance="test", state_dir=str(store.root)) is None
-    assert [r["status"] for r in store.read_jsonl("candidates")] == [
+    assert [r["status"] for r in store.read_jsonl("candidates") if r["id"] in ("cand_raw", "cand_saved", "cand_bad")] == [
         "candidate",
         "archived",
         "candidate",
     ]
+    assert [row["id"] for row in store.read_jsonl("candidates")] == [
+        "cand_raw", "cand_saved", "cand_bad", "source-cand_saved", "source-cand_bad",
+    ]
+    _assert_sources_unchanged(store, parents)
 
 
 def test_compact_tool_routes_active_item_to_canonical_settlement(tmp_path, monkeypatch):
@@ -208,6 +253,7 @@ def test_compact_tool_routes_active_item_to_canonical_settlement(tmp_path, monke
         json.dumps({"conscious_doorway": {"enabled": True}})
     )
     store.append_jsonl("candidates", _candidate("cand_settle"))
+    parents = _retain_sources(store, ["cand_settle"])
     assert handle_conscious_doorway_pre_llm(
         instance=instance, state_dir=str(store.root), session_id="tool-session"
     )
@@ -235,6 +281,7 @@ def test_compact_tool_routes_active_item_to_canonical_settlement(tmp_path, monke
     )
     assert store.read_jsonl("decisions")[-1]["type"] == "conscious.aperture.settled"
     assert _forbidden_ledgers(store) == {name: [] for name in _forbidden_ledgers(store)}
+    _assert_sources_unchanged(store, parents)
 
 
 def test_observer_failure_path_cannot_change_canonical_open(tmp_path, monkeypatch):
@@ -295,15 +342,20 @@ def test_doorway_recovers_due_held_but_excludes_malformed_task(tmp_path):
             "reason_code": "time_checkpoint",
         }
         store.append_jsonl("candidates", candidate)
+    parents = _retain_sources(store, ["due", "bad_due"])
     packet = handle_conscious_doorway_pre_llm(instance="test", state_dir=str(store.root))
     assert packet and "due" in packet["context"] and "bad_due" not in packet["context"]
-    assert [row["status"] for row in store.read_jsonl("candidates")] == [
+    assert [row["status"] for row in store.read_jsonl("candidates") if row["id"] in ("due", "bad_due")] == [
         "in_conscious_aperture",
         "held",
     ]
     assert any(
         row.get("type") == "conscious.aperture.returned" for row in store.read_jsonl("decisions")
     )
+    assert [row["id"] for row in store.read_jsonl("candidates")] == [
+        "due", "bad_due", "source-due", "source-bad_due",
+    ]
+    _assert_sources_unchanged(store, parents)
 
 
 def test_registered_doorway_hook_accepts_documented_kwargs_without_state_dir(tmp_path, monkeypatch):
@@ -318,6 +370,7 @@ def test_registered_doorway_hook_accepts_documented_kwargs_without_state_dir(tmp
         json.dumps({"conscious_doorway": {"enabled": True}})
     )
     store.append_jsonl("candidates", _candidate("registered"))
+    parents = _retain_sources(store, ["registered"])
     ctx = FakePluginContext()
     register(ctx)
     packet = list(ctx.hooks.values())[0]["handler"](
@@ -329,11 +382,13 @@ def test_registered_doorway_hook_accepts_documented_kwargs_without_state_dir(tmp
         platform="local",
     )
     assert packet and "registered" in packet["context"]
+    _assert_sources_unchanged(store, parents)
 
 
 def test_concurrent_same_owner_doorway_reuses_one_open_receipt_and_aperture_id(tmp_path):
     store = _store(tmp_path)
     store.append_jsonl("candidates", _candidate("concurrent"))
+    parents = _retain_sources(store, ["concurrent"])
     ctx = multiprocessing.get_context("fork")
     ready, results, release = ctx.Queue(), ctx.Queue(), ctx.Barrier(3)
     processes = [
@@ -363,6 +418,7 @@ def test_concurrent_same_owner_doorway_reuses_one_open_receipt_and_aperture_id(t
         len(receipts) == 1 and candidate["conscious_aperture"]["id"] == receipts[0]["aperture_id"]
     )
     assert all(receipts[0]["aperture_id"] in packet["context"] for packet in opened)
+    _assert_sources_unchanged(store, parents)
 
 
 def test_concurrent_settlement_is_idempotent_without_receipt_or_state_overwrite(tmp_path):

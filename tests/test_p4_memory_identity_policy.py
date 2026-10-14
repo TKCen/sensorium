@@ -211,11 +211,12 @@ def test_retained_unsupported_native_candidate_suppresses_before_model_and_prese
 
 
 def test_malformed_explicit_memory_provenance_keeps_existing_reason(tmp_path):
+    from tests.test_source_closure_contract import reject_then_retain_historical
     store = SensoriumStore(instance="malformed", state_dir=str(tmp_path / "state"))
     store.ensure_dirs()
     signal = _unsupported_signal("malformed")
     signal["memory_provenance"] = {"provider": "hindsight", "bank_id": "b", "item_ids": ["A", "A"]}
-    _ingest(store, signal)
+    reject_then_retain_historical(store, signal)
     assert build_admission_plan(store)["suppressed_counts"] == {"malformed_memory_identity": 1}
 
 

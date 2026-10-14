@@ -10,6 +10,7 @@ from agent_sensorium.plugin import register
 from agent_sensorium.pointers import handle_pointer_pre_llm
 from agent_sensorium.pre_llm_salience import handle_salience_pre_llm
 from agent_sensorium.store import SensoriumStore
+from tests.test_conscious_doorway import _assert_sources_unchanged, _retain_sources
 
 
 LOCAL_HERMES_PLATFORMS = ("desktop", "tui", "cli", "local")
@@ -71,6 +72,7 @@ def test_local_hermes_platforms_reach_local_doorway_with_exact_lease_and_no_outb
     store.ensure_dirs()
     _write_local_config(state_dir)
     store.append_jsonl("candidates", _candidate(f"cand_{platform}"))
+    parents = _retain_sources(store, [f"cand_{platform}"])
 
     result = handle_conscious_doorway_pre_llm(
         instance="test",
@@ -97,6 +99,7 @@ def test_local_hermes_platforms_reach_local_doorway_with_exact_lease_and_no_outb
     assert attempt["aperture_ids"] == [ownership["id"]]
     assert attempt["host_consumption_confirmed"] is False
     assert store.read_jsonl("outbox") == store.read_jsonl("worker_requests") == []
+    _assert_sources_unchanged(store, parents)
 
 
 @pytest.mark.parametrize("platform", NONLOCAL_PLATFORMS)
@@ -106,6 +109,7 @@ def test_remote_and_unknown_platforms_do_not_acquire_local_doorway_access(tmp_pa
     store.ensure_dirs()
     _write_local_config(state_dir)
     store.append_jsonl("candidates", _candidate(f"cand_blocked_{platform}"))
+    parents = _retain_sources(store, [f"cand_blocked_{platform}"])
 
     result = handle_conscious_doorway_pre_llm(
         instance="test",
@@ -119,6 +123,7 @@ def test_remote_and_unknown_platforms_do_not_acquire_local_doorway_access(tmp_pa
     assert store.read_jsonl("candidates")[0]["status"] == "candidate"
     assert store.read_jsonl("decisions") == []
     assert store.read_jsonl("outbox") == store.read_jsonl("worker_requests") == []
+    _assert_sources_unchanged(store, parents)
 
 
 def test_desktop_alias_does_not_bypass_private_candidate_policy(tmp_path):
@@ -127,6 +132,7 @@ def test_desktop_alias_does_not_bypass_private_candidate_policy(tmp_path):
     store.ensure_dirs()
     _write_local_config(state_dir, max_sensitivity="local_only")
     store.append_jsonl("candidates", _candidate("cand_private"))
+    parents = _retain_sources(store, ["cand_private"])
 
     result = handle_conscious_doorway_pre_llm(
         instance="test",
@@ -139,6 +145,7 @@ def test_desktop_alias_does_not_bypass_private_candidate_policy(tmp_path):
     assert result is None
     assert store.read_jsonl("candidates")[0]["status"] == "candidate"
     assert store.read_jsonl("decisions") == []
+    _assert_sources_unchanged(store, parents)
 
 
 @pytest.mark.parametrize("platform", LOCAL_HERMES_PLATFORMS)
@@ -147,6 +154,7 @@ def test_pointer_uses_local_policy_surface_and_preserves_platform(tmp_path, plat
     store.ensure_dirs()
     _write_local_config(tmp_path)
     store.append_jsonl("candidates", _candidate("cand_pointer"))
+    parents = _retain_sources(store, ["cand_pointer"])
 
     result = handle_pointer_pre_llm(
         instance="test",
@@ -161,6 +169,7 @@ def test_pointer_uses_local_policy_surface_and_preserves_platform(tmp_path, plat
     assert receipt["type"] == "pointer.presented"
     assert receipt["surface"] == "local"
     assert receipt["platform"] == platform
+    _assert_sources_unchanged(store, parents)
 
 
 @pytest.mark.parametrize("platform", NONLOCAL_PLATFORMS)
@@ -170,6 +179,7 @@ def test_pointer_and_salience_fail_closed_for_nonlocal_platforms(tmp_path, platf
     _write_local_config(tmp_path)
     store.append_jsonl("candidates", _candidate("cand_pointer"))
 
+    parents = _retain_sources(store, ["cand_pointer"])
     pointer = handle_pointer_pre_llm(
         instance="test",
         platform=platform,
@@ -185,6 +195,7 @@ def test_pointer_and_salience_fail_closed_for_nonlocal_platforms(tmp_path, platf
     assert pointer is None
     assert salience is None
     assert store.read_jsonl("decisions") == []
+    _assert_sources_unchanged(store, parents)
 
 
 @pytest.mark.parametrize("platform", LOCAL_HERMES_PLATFORMS)

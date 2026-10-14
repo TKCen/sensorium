@@ -16,6 +16,7 @@ from agent_sensorium.conscious_aperture import open_conscious_aperture
 from agent_sensorium.conscious_consumer import consume_conscious_advisory
 from agent_sensorium.plugin import register
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_candidate_parent
 
 ROOT = Path(__file__).resolve().parents[1]
 HERMES = ROOT.parent / "hermes"
@@ -503,6 +504,7 @@ def test_foreground_unattended_race_has_one_canonical_winner_and_loser_cannot_mu
     state = tmp_path / "race"
     store = configure_store(state)
     store.append_jsonl("candidates", candidate("cand_race", "race-v1"))
+    retain_candidate_parent(store, "src-cand_race")
     ctx = PluginContext()
     register(ctx)
     foreground = ctx.hooks[0](
@@ -547,6 +549,7 @@ def test_foreground_unattended_race_has_one_canonical_winner_and_loser_cannot_mu
     reverse_state = tmp_path / "reverse-race"
     reverse = configure_store(reverse_state)
     reverse.append_jsonl("candidates", candidate("cand_reverse", "reverse-v1"))
+    retain_candidate_parent(reverse, "src-cand_reverse")
     clock["now"] = "2026-09-09T13:00:00Z"
     foreground_attempts = []
 

@@ -11,6 +11,7 @@ from agent_sensorium.artifacts import (
 )
 from agent_sensorium.actions import prepare_action
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_thread_parents
 from agent_sensorium.tools import (
     handle_sensorium_artifact_store,
     handle_sensorium_artifact_status,
@@ -240,6 +241,7 @@ class TestArtifactSurfacePrivacy:
         store.ensure_dirs()
         _write_config(state_dir, surfaces=["local", "discord"], max_sensitivity="private")
         store.append_jsonl("threads", _make_thread(allowed_surfaces=["local", "discord"]))
+        retain_thread_parents(store)
         store_artifact(
             store,
             kind="video",

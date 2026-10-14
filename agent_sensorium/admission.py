@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
+from .canonical_records import lookup_record, record_index
 from .gate import candidate_fingerprint
 
 POLICY_VERSION = "source-admission-v2"
@@ -40,13 +42,7 @@ def source_candidate_fingerprint(candidate: dict) -> str:
 
 
 def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | None]:
-    if "_admission_claim" in signal or "_admission_error" in signal:
-        claim = signal.get("_admission_claim")
-        error = signal.get("_admission_error")
-        return (
-            claim if isinstance(claim, dict) else None,
-            error if isinstance(error, str) else None,
-        )
+    """Parse canonical producer fields only, never serialized projection keys."""
     sensor, sensor_ok = _component(signal.get("sensor"))
     source, source_ok = _component(signal.get("source"))
     if not sensor_ok or not source_ok:
@@ -95,12 +91,23 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
         return None, "malformed_artifact_meta"
     meta = meta if isinstance(meta, dict) else {}
 
-    if "entry_id" in meta or "sha256" in meta:
+    has_research_identity = "source_id" in meta or "item_id" in meta
+    if "entry_id" in meta and has_research_identity:
+        return None, "ambiguous_source_identity"
+
+    if "entry_id" in meta or ("sha256" in meta and not has_research_identity):
         entry_id, entry_ok = _component(meta.get("entry_id"))
         revision, revision_ok = _component(meta.get("sha256"))
         if not entry_ok or not revision_ok:
             return None, "malformed_frontier_identity"
         assert entry_id is not None and revision is not None
+        aliases = [signal["source_revision"]] if "source_revision" in signal else []
+        if "revision_id" in meta:
+            aliases.append(meta["revision_id"])
+        if any(not _component(value)[1] for value in aliases):
+            return None, "malformed_frontier_revision"
+        if any(value != revision for value in aliases):
+            return None, "conflicting_frontier_revision"
         item_values = [instance, sensor, source, "frontier", entry_id]
         return {
             "item_key": _opaque("item", item_values),
@@ -109,16 +116,40 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
             "evidence_class": "source_owned",
         }, None
 
-    if "source_id" in meta or "item_id" in meta:
+    if has_research_identity:
         source_id, source_id_ok = _component(meta.get("source_id"))
         item_id, item_id_ok = _component(meta.get("item_id"))
         if not source_id_ok or not item_id_ok:
             return None, "malformed_research_identity"
         assert source_id is not None and item_id is not None
+        revision_claims = [
+            value for present, value in (
+                ("source_revision" in signal, signal.get("source_revision")),
+                ("revision_id" in meta, meta.get("revision_id")),
+                ("sha256" in meta, meta.get("sha256")),
+            ) if present
+        ]
+        if revision_claims:
+            revisions = [_component(value) for value in revision_claims]
+            if any(not valid for _, valid in revisions):
+                return None, "malformed_research_revision"
+            revision_values = {value for value, _ in revisions}
+            if len(revision_values) != 1:
+                return None, "conflicting_research_revision"
+            revision = next(iter(revision_values))
+        else:
+            # Missing producer revision means uncertain material freshness, not
+            # a new revision on each observation or view.
+            revision = "unversioned"
+        assert revision is not None
         item_values = [instance, sensor, source, "research_feed", source_id, item_id]
+        revision_values_for_key = (
+            [*item_values, "material_revision", revision]
+            if revision_claims else [*item_values, "unversioned"]
+        )
         return {
             "item_key": _opaque("item", item_values),
-            "revision_key": _opaque("revision", [*item_values, "unversioned"]),
+            "revision_key": _opaque("revision", revision_values_for_key),
             "identity_mode": "source",
             "evidence_class": "source_owned",
         }, None
@@ -150,49 +181,162 @@ def _claim_for_signal(instance: str, signal: dict) -> tuple[dict | None, str | N
     return None, None
 
 
+@dataclass(frozen=True)
+class SignalClaim:
+    """Canonical classification for replay owners; malformed is never legacy."""
+
+    kind: Literal["source", "legacy", "malformed"]
+    item_key: str | None = None
+    revision_key: str | None = None
+    member_keys: tuple[str, ...] = ()
+    evidence_class: str | None = None
+    error: str | None = None
+
+
+def classify_signal_claim(instance: str, signal: dict) -> SignalClaim:
+    claim, error = _claim_for_signal(instance, signal)
+    if error:
+        return SignalClaim("malformed", error=error)
+    if claim is None:
+        return SignalClaim("legacy")
+    return SignalClaim(
+        "source", claim["item_key"], claim["revision_key"],
+        tuple(claim.get("member_keys") or []), claim["evidence_class"],
+    )
+
+
+def equivalent_source_claims(left: SignalClaim, right: SignalClaim) -> bool:
+    """Prove producer material equality, not legacy wrapper equivalence."""
+    return left.kind == right.kind == "source" and left == right
+
+
+def classify_event_claim(instance: str, event: dict, *, signals: list[dict]) -> SignalClaim:
+    """Classify a complete retained or prospective join without filtering failures.
+
+    Empty references preserve standalone trusted legacy events. Referenced legacy
+    signals must still resolve uniquely; mixed, partial or invalid joins fail.
+    Callers may supply a prospective signal alongside retained rows before writes.
+    """
+    refs = event.get("source_signal_ids", [])
+    if not isinstance(refs, list):
+        return SignalClaim("malformed", error="invalid_event_join")
+    index = record_index(signals)
+    claims = []
+    for identifier in refs:
+        found = lookup_record(index, identifier)
+        if found.state != "unique" or found.row is None:
+            return SignalClaim("malformed", error="invalid_event_join")
+        claim = classify_signal_claim(instance, found.row)
+        if claim.kind == "malformed":
+            return SignalClaim("malformed", error="invalid_event_join")
+        claims.append(claim)
+    if not claims or all(claim.kind == "legacy" for claim in claims):
+        return SignalClaim("legacy")
+    if all(equivalent_source_claims(claims[0], claim) for claim in claims):
+        return claims[0]
+    return SignalClaim("malformed", error="invalid_event_join")
+
+
+class _UniqueSnapshot(dict):
+    """Indexes owned by one immutable admission view, never serialized trust."""
+
+    def __init__(self, snap: dict):
+        from .admission_index import _AdmissionSnapshot
+
+        super().__init__(snap)
+        self.projected = isinstance(snap, _AdmissionSnapshot)
+        self.indexes = {
+            stream: record_index(snap[stream], projected=self.projected)
+            for stream in ("candidates", "events", "signals")
+        }
+
+
+def _unique_snapshot(snap: dict) -> _UniqueSnapshot:
+    return snap if isinstance(snap, _UniqueSnapshot) else _UniqueSnapshot(snap)
+
+
+def _record_index(snap: dict, stream: str) -> dict:
+    from .admission_index import _AdmissionSnapshot
+
+    if isinstance(snap, _UniqueSnapshot):
+        return snap.indexes[stream]
+    return record_index(snap[stream], projected=isinstance(snap, _AdmissionSnapshot))
+
+
 def _snapshot(store, *, scan_bytes: int = 4 * 1024 * 1024) -> dict[str, list[dict]]:
     view = store.read_admission_snapshot(scan_bytes=scan_bytes)
     if not view.complete or view.snapshot is None:
         raise ValueError(view.reason or "admission_index_catching_up")
-    return view.snapshot
+    return _unique_snapshot(view.snapshot)
+
+
+def _snapshot_claim(instance: str, signal: dict, snap: dict) -> tuple[dict | None, str | None]:
+    from .admission_index import _AdmissionSnapshot
+
+    if isinstance(snap, _AdmissionSnapshot) or (
+        isinstance(snap, _UniqueSnapshot) and snap.projected
+    ):
+        return signal.get("_admission_claim"), signal.get("_admission_error")
+    return _claim_for_signal(instance, signal)
+
+
+def _same_disposition(prior: dict, binding: dict) -> bool:
+    # Representation/retained IDs cannot prove an old joined producer revision.
+    # Genuine unversioned settlements still match their exact admission key.
+    return prior.get("admission_key") == binding["admission_key"]
 
 
 def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
+    snap = _unique_snapshot(snap)
     candidate_id, candidate_ok = _component(candidate.get("id"))
     if not candidate_ok:
         return None, "malformed_candidate_id"
     assert candidate_id is not None
-    cached_events = snap.get("_event_index")
-    event_index = cached_events if isinstance(cached_events, dict) else {
-        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
-    }
-    cached_signals = snap.get("_signal_index")
-    signal_index = cached_signals if isinstance(cached_signals, dict) else {
-        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
-    }
+    if lookup_record(_record_index(snap, "candidates"), candidate_id).state != "unique":
+        return None, "source_candidate_unavailable"
+    event_index = _record_index(snap, "events")
+    signal_index = _record_index(snap, "signals")
     joined_signal_ids: set[str] = set()
     dangling = False
-    for event_id in candidate.get("event_ids") or []:
-        event = event_index.get(event_id)
+    event_ids = candidate.get("event_ids") or []
+    if not isinstance(event_ids, list):
+        event_ids = []
+        dangling = True
+    for event_id in event_ids:
+        event = lookup_record(event_index, event_id).row
         if not isinstance(event, dict):
             dangling = True
             continue
-        for signal_id in event.get("source_signal_ids") or []:
-            signal = signal_index.get(signal_id)
+        signal_ids = event.get("source_signal_ids") or []
+        if not isinstance(signal_ids, list) or not signal_ids:
+            dangling = True
+            continue
+        event_claims = set()
+        for signal_id in signal_ids:
+            signal = lookup_record(signal_index, signal_id).row
             if not isinstance(signal, dict):
                 dangling = True
                 continue
             joined_signal_ids.add(signal_id)
+            parsed, error = _snapshot_claim(store.instance, signal, snap)
+            if error:
+                return None, error
+            if parsed is not None:
+                event_claims.add((parsed["item_key"], parsed["revision_key"],
+                                  tuple(parsed.get("member_keys") or [])))
+        if len(event_claims) > 1:
+            dangling = True
 
     # Candidate/Event references are membership only. Select and validate joined
     # signals in the canonical retained receipt order supplied by read_jsonl.
     joined = [
         signal for signal in snap["signals"]
-        if isinstance(signal, dict) and signal.get("id") in joined_signal_ids
+        if isinstance(signal, dict) and isinstance(signal.get("id"), str)
+        and signal.get("id") in joined_signal_ids
     ]
     claims: list[dict] = []
     for signal in joined:
-        parsed_claim, error = _claim_for_signal(store.instance, signal)
+        parsed_claim, error = _snapshot_claim(store.instance, signal, snap)
         if error:
             return None, error
         if parsed_claim:
@@ -203,7 +347,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
         for claim in claims
     }
     claim: dict = {}
-    if claims and not dangling and len(claim_identities) == 1:
+    if claims and len(claims) == len(joined) and not dangling and len(claim_identities) == 1:
         claim = claims[-1]
         identity_mode = claim["identity_mode"]
         evidence_class = claim["evidence_class"]
@@ -243,6 +387,7 @@ def _base_binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dic
 
 
 def _binding_from_snapshot(store, candidate: dict, snap: dict[str, list[dict]]) -> tuple[dict | None, str | None]:
+    snap = _unique_snapshot(snap)
     binding, error = _base_binding_from_snapshot(store, candidate, snap)
     if error or binding is None or "member_keys" not in binding:
         return binding, error
@@ -262,14 +407,29 @@ def binding_for_candidate(store, candidate_id: str) -> tuple[dict | None, str | 
             indexed.reason,
         )
     snap = _snapshot(store)
-    candidate = next((row for row in snap["candidates"] if row.get("id") == candidate_id), None)
+    candidate = lookup_record(_record_index(snap, "candidates"), candidate_id).row
     if not isinstance(candidate, dict) or candidate.get("status", "candidate") != "candidate":
         return None, "source_candidate_unavailable"
     return _binding_from_snapshot(store, candidate, snap)
 
 
+def _member_reference_shape(binding: dict) -> bool:
+    """Validate every present member list before set, sort or SQL attribution."""
+    for field in ("member_keys", "selected_member_keys"):
+        if field not in binding:
+            continue
+        members = binding[field]
+        if not isinstance(members, list) or any(
+            not isinstance(key, str) or len(key) != 64 for key in members
+        ):
+            return False
+        if members != sorted(set(members)):
+            return False
+    return True
+
+
 def _binding_shape(binding: Any) -> bool:
-    if not isinstance(binding, dict):
+    if not isinstance(binding, dict) or not _member_reference_shape(binding):
         return False
     if binding.get("schema_version") != 1 or binding.get("policy_version") != POLICY_VERSION:
         return False
@@ -363,17 +523,17 @@ def _memory_members_for_prior(
     store, prior: dict, current: dict, snap: dict[str, list[dict]],
 ) -> tuple[set[str], str | None]:
     """Attribute persisted memory rows without rewriting historical bytes."""
+    if not _member_reference_shape(prior):
+        return set(), "malformed_member_binding"
     if prior.get("policy_version") == POLICY_VERSION:
         selected = prior.get("selected_member_keys")
-        if isinstance(selected, list) and selected == sorted(set(selected)):
-            return {key for key in selected if isinstance(key, str)}, None
+        if isinstance(selected, list):
+            return set(selected), None
         return set(), "malformed_v2_member_binding"
     if prior.get("policy_version") != "source-admission-v1":
         return set(), None
     source_candidate_id = prior.get("source_candidate_id")
-    source_candidate = next(
-        (row for row in snap["candidates"] if row.get("id") == source_candidate_id), None,
-    )
+    source_candidate = lookup_record(_record_index(snap, "candidates"), source_candidate_id).row
     if isinstance(source_candidate, dict):
         reconstructed, error = _base_binding_from_snapshot(store, source_candidate, snap)
         if not error and reconstructed and reconstructed.get("member_keys"):
@@ -408,6 +568,8 @@ def _memory_prior_rows(
         if _is_successful_applying_disposition(row):
             disposed.update(overlap)
     for row in snap["candidates"]:
+        if lookup_record(_record_index(snap, "candidates"), row.get("id")).state != "unique":
+            continue
         if row.get("kind") != "subconscious_advisory":
             continue
         prior = _advisory_binding(row)
@@ -438,6 +600,7 @@ def _memory_prior_rows(
 
 
 def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tuple[list[dict], bool, str | None]:
+    snap = _unique_snapshot(snap)
     if "member_keys" in binding:
         relevant, disposed, _ = _memory_prior_rows(store, binding, snap)
         selected = set(binding.get("selected_member_keys") or [])
@@ -448,18 +611,26 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
     reason = None
     for row in snap["decisions"]:
         prior = row.get("admission_binding")
-        if not isinstance(prior, dict) or prior.get("item_key") != binding["item_key"]:
+        if (
+            not isinstance(prior, dict) or not _member_reference_shape(prior)
+            or prior.get("item_key") != binding["item_key"]
+        ):
             continue
         relevant.append(_decision_projection(row))
         if (
-            prior.get("admission_key") == binding["admission_key"]
+            _same_disposition(prior, binding)
             and _is_successful_applying_disposition(row)
         ):
             decided, reason = True, "prior_disposition"
     for row in snap["candidates"]:
+        if lookup_record(_record_index(snap, "candidates"), row.get("id")).state != "unique":
+            continue
         if row.get("kind") != "subconscious_advisory":
             continue
         prior = _advisory_binding(row)
+        # Invalid present members cannot become legacy-exact fallback authority.
+        if isinstance(prior, dict) and not _member_reference_shape(prior):
+            continue
         if isinstance(prior, dict) and prior.get("item_key") == binding["item_key"]:
             relevant.append({
                 "ts": row.get("updated_at") or row.get("created_at"),
@@ -469,11 +640,11 @@ def _prior_for_binding(store, binding: dict, snap: dict[str, list[dict]]) -> tup
                 "status": row.get("status"),
                 "admission_key": prior.get("admission_key"),
             })
-            if prior.get("admission_key") == binding["admission_key"]:
+            if _same_disposition(prior, binding):
                 decided, reason = True, "prior_disposition"
             elif row.get("status") in _TERMINAL_STATUSES:
                 decided, reason = True, "explicit_item_closure"
-        elif binding["identity_mode"] == "legacy" and list(row.get("source_candidate_ids") or []) == [binding["source_candidate_id"]]:
+        elif binding["identity_mode"] == "legacy" and row.get("source_candidate_ids") == [binding["source_candidate_id"]]:
             old_fp = str(row.get("source_candidate_fingerprint") or "")
             if not old_fp or old_fp == binding["source_candidate_fingerprint"]:
                 relevant.append({
@@ -508,7 +679,8 @@ def _priority(candidate: dict) -> tuple[float, str, str]:
 
 def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> bool:
     """Identify the automatic producer without changing legacy binding shape."""
-    event_ids = set(candidate.get("event_ids") or [])
+    refs = candidate.get("event_ids")
+    event_ids = {value for value in refs if isinstance(value, str)} if isinstance(refs, list) else set()
     event_rows = snap.get("_event_index")
     events = (
         [event_rows[event_id] for event_id in event_ids if event_id in event_rows]
@@ -519,6 +691,7 @@ def _has_native_memory_lineage(candidate: dict, snap: dict[str, list[dict]]) -> 
         for event in events
         if isinstance(event, dict) and event.get("id") in event_ids
         for signal_id in (event.get("source_signal_ids") or [])
+        if isinstance(signal_id, str)
     }
     signal_rows = snap.get("_signal_index")
     signals = (
@@ -609,13 +782,8 @@ def build_admission_plan(
             "source_record_counts": None,
             "projected_candidate_count": 0,
         }
-    snap = view.snapshot
-    snap["_event_index"] = {
-        row.get("id"): row for row in snap["events"] if isinstance(row, dict)
-    }
-    snap["_signal_index"] = {
-        row.get("id"): row for row in snap["signals"] if isinstance(row, dict)
-    }
+    snap = _unique_snapshot(view.snapshot)
+
     projected: list[tuple[dict, dict, list[dict]]] = []
     eligible_count = 0
     suppressed: dict[str, int] = {}
@@ -689,9 +857,12 @@ def context_for_binding(store, binding: dict, *, source_decisions: list[dict] | 
             ),
         }
     snap = _snapshot(store)
-    candidate = next(row for row in snap["candidates"] if row.get("id") == binding["source_candidate_id"])
-    wanted_events = set(candidate.get("event_ids") or [])
-    events = [row for row in snap["events"] if row.get("id") in wanted_events]
+    candidate = lookup_record(_record_index(snap, "candidates"), binding["source_candidate_id"]).row
+    if candidate is None:
+        raise ValueError("source_candidate_unavailable")
+    event_index = _record_index(snap, "events")
+    events = [found.row for identifier in candidate.get("event_ids") or []
+              if (found := lookup_record(event_index, identifier)).row is not None]
     if source_decisions is None:
         source_decisions, _, _ = _prior_for_binding(store, binding, snap)
     return {
@@ -703,19 +874,35 @@ def context_for_binding(store, binding: dict, *, source_decisions: list[dict] | 
     }
 
 
-def event_source_item_key(store, event: dict, *, events: list[dict] | None = None, signals: list[dict] | None = None) -> str | None:
-    """Return a stable item key for ingest coalescing safeguards when available."""
+def signal_source_item_identity(instance: str, signal: dict) -> tuple[str, str] | None:
+    """Return producer-owned (item, material revision) identity when known."""
+    claim, error = _claim_for_signal(instance, signal)
+    if (error or not isinstance(claim, dict) or claim.get("identity_mode") != "source"
+            or claim.get("evidence_class") not in {"source_owned", "internal_interpretation"}):
+        return None
+    item_key = claim.get("item_key")
+    revision_key = claim.get("revision_key")
+    if not isinstance(item_key, str) or not isinstance(revision_key, str):
+        return None
+    return item_key, revision_key
+
+
+def event_source_item_identity(
+    store, event: dict, *, signals: list[dict] | None = None,
+) -> tuple[str, str] | None:
+    """Return one unambiguous item/revision claim joined through event signals."""
+    rows = signals if signals is not None else store.read_jsonl("signals")
+    claim = classify_event_claim(store.instance, event, signals=rows)
+    if (claim.kind == "source" and claim.item_key is not None and claim.revision_key is not None
+            and claim.evidence_class in {"source_owned", "internal_interpretation"}):
+        return claim.item_key, claim.revision_key
+    return None
+
+
+def event_source_item_key(
+    store, event: dict, *, events: list[dict] | None = None, signals: list[dict] | None = None,
+) -> str | None:
+    """Compatibility projection of a uniquely identified event's item key."""
     del events
-    signal_index = {row.get("id"): row for row in (signals if signals is not None else store.read_jsonl("signals"))}
-    claims = []
-    for signal_id in event.get("source_signal_ids") or []:
-        signal = signal_index.get(signal_id)
-        if not isinstance(signal, dict):
-            continue
-        claim, error = _claim_for_signal(store.instance, signal)
-        if error:
-            return None
-        if claim:
-            claims.append(claim)
-    keys = {claim["item_key"] for claim in claims}
-    return next(iter(keys)) if len(keys) == 1 else None
+    identity = event_source_item_identity(store, event, signals=signals)
+    return identity[0] if identity is not None else None

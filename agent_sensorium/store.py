@@ -391,9 +391,11 @@ class SensoriumStore:
         path = self._root / "locks" / "outbox.lock"
         key = str(path.resolve(strict=False))
         held_candidates = getattr(_HELD_CANDIDATE_LOCKS, "locks", None)
-        if held_candidates:
-            raise RuntimeError("outbox transactions cannot nest inside candidate transactions")
         held = getattr(_HELD_OUTBOX_LOCKS, "locks", None)
+        # Reusing an already-owned outbox is not a new lock acquisition.
+        # Candidate -> new outbox remains forbidden, including other roots.
+        if held_candidates and (not held or key not in held):
+            raise RuntimeError("outbox transactions cannot nest inside candidate transactions")
         if held and key not in held:
             raise RuntimeError("outbox transactions cannot nest across profile roots")
         process_lock = _outbox_process_lock(key)

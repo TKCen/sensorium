@@ -15,10 +15,8 @@ Acceptance criteria for the exact-subject status branch:
       top_threads/top_candidates shape is unchanged. (Test 6 below locks this
       down — it MUST pass today and continue passing after the fix.)
 
-These tests reproduce the live P0-2 audit mismatch where the conscious layer
-saw only a rotating top-N and had no way to recover "the subject the prior
-pointer presented" without guessing. The fix is a single optional parameter;
-the tests below pin the contract.
+These wholly fictional glass-orchid fixtures distinguish exact-subject
+recovery from rotating top-N selection. No live profile episode is reproduced.
 """
 
 from __future__ import annotations
@@ -36,34 +34,32 @@ from agent_sensorium.tools import handle_sensorium_status
 # ---------- helpers (mirror test_pointer_doorway_saved_residue.py) ----------
 
 
-def _arxiv_candidate(**overrides):
+def _glass_orchid_candidate(**overrides):
     """Archived research_source_signal candidate with a kanban SAVE settlement."""
     base = {
-        "id": "cand_arxiv_status_ref",
+        "id": "cand_fictional_glass_orchid_status_ref",
         "status": "archived",
         "kind": "research_source_signal",
-        "pressure": 0.783,
+        "pressure": 0.79,
         "summary": (
-            "Research source feed (arXiv cs.AI: agent collaboration / governance): "
-            "From Signals to Structure: How Memory Architecture Drives Language "
-            "Emergence in LLM Agents. Authors: Talebirad et al. Abstract: arXiv:2607.00233."
+            "Fablearium research feed (fictional glass-orchid propagation): Prismatic Petal Atlas. Invented author: Dr. Paper Fern. Synthetic catalog item: glass-orchid-01."
         ),
         "correlation_keys": [
-            "lane:agent-society",
-            "source:arxiv-cs-ai-agent-collaboration-governance",
-            "topic:memory",
-            "topic:multi-agent",
+            "lane:fictional-glasshouse",
+            "source:fablearium-glass-orchid",
+            "topic:petal-optics",
+            "topic:seed-trays",
         ],
         "sensitivity": "private",
         "allowed_surfaces": ["local", "discord"],
-        "created_at": "2026-07-02T04:18:00Z",
-        "updated_at": "2026-07-02T04:39:17Z",
+        "created_at": "2026-09-01T10:00:00Z",
+        "updated_at": "2026-09-01T10:25:00Z",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "t_status_intake",
-            "review_task_id": "t_status_review",
-            "settled_at": "2026-07-02T04:29:29Z",
-            "reason_label": "reason#status_reference_id",
+            "intake_task_id": "t_fictional_status_intake",
+            "review_task_id": "t_fictional_status_review",
+            "settled_at": "2026-09-01T10:12:00Z",
+            "reason_label": "reason#fictional-glass-orchid-save",
         },
     }
     base.update(overrides)
@@ -73,23 +69,23 @@ def _arxiv_candidate(**overrides):
 def _active_candidate(**overrides):
     """Active (status='candidate') candidate, surface-allowed everywhere."""
     base = {
-        "id": "cand_active_status_ref",
+        "id": "cand_fictional_active_status_ref",
         "status": "candidate",
         "kind": "research_source_signal",
         "pressure": 0.91,
         "summary": (
-            "Active pointer candidate for status reference_id test: arXiv "
-            "agent-collaboration governance follow-up."
+            "Active pointer candidate for status reference_id test: Fablearium "
+            "glass-orchid propagation petal optics follow-up."
         ),
         "correlation_keys": [
-            "lane:agent-society",
-            "topic:memory",
-            "topic:multi-agent",
+            "lane:fictional-glasshouse",
+            "topic:petal-optics",
+            "topic:seed-trays",
         ],
         "sensitivity": "private",
         "allowed_surfaces": ["local", "discord"],
-        "created_at": "2026-07-04T08:00:00Z",
-        "updated_at": "2026-07-04T08:00:00Z",
+        "created_at": "2026-09-03T14:00:00Z",
+        "updated_at": "2026-09-03T14:00:00Z",
     }
     base.update(overrides)
     return base
@@ -98,19 +94,19 @@ def _active_candidate(**overrides):
 def _dormant_thread():
     """Dormant thread seeded against the active candidate above."""
     return {
-        "id": "sth_status_ref_dormant",
+        "id": "sth_fictional_status_ref_dormant",
         "status": "dormant",
         "origin": "candidate",
-        "origin_candidate_id": "cand_active_status_ref",
+        "origin_candidate_id": "cand_fictional_active_status_ref",
         "conscious_task": {
-            "id": "ctask_status_ref",
+            "id": "ctask_fictional_status_ref",
             "request_type": "THINK",
-            "title": "Review arXiv agent collaboration governance thread",
+            "title": "Review Fablearium glass-orchid propagation petal optics thread",
             "why": "Pin exact-subject status branch (P0-2 audit)",
             "expected_decision": "decide",
         },
-        "created_at": "2026-07-04T08:00:00Z",
-        "updated_at": "2026-07-04T08:00:00Z",
+        "created_at": "2026-09-03T14:00:00Z",
+        "updated_at": "2026-09-03T14:00:00Z",
         "sensitivity": "private",
         "allowed_surfaces": ["local", "discord"],
     }
@@ -120,7 +116,7 @@ def _write_config(state_dir, *, surfaces=("discord", "local")):
     config = {
         "allowed_surfaces": list(surfaces),
         "max_sensitivity": "private",
-        "instance_name": "test",
+        "instance_name": "fictional-glasshouse",
     }
     path = Path(state_dir) / "instance.config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +124,7 @@ def _write_config(state_dir, *, surfaces=("discord", "local")):
 
 
 def _seed_state(tmp_path, *, candidates=None, threads=None, surfaces=("discord", "local")):
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="fictional-glasshouse", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path, surfaces=surfaces)
     for c in (candidates or []):
@@ -145,25 +141,25 @@ def test_status_reference_id_pins_thread(tmp_path):
     """A dormant thread's reference_id must surface as exact_subject.kind='thread'."""
     _seed_state(
         tmp_path,
-        candidates=[_active_candidate(), _arxiv_candidate()],
+        candidates=[_active_candidate(), _glass_orchid_candidate()],
         threads=[_dormant_thread()],
     )
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
-        reference_id="sth_status_ref_dormant",
+        reference_id="sth_fictional_status_ref_dormant",
     )
     payload = json.loads(raw)
     assert payload["success"] is True, payload
     exact = payload["data"]["exact_subject"]
     assert exact["kind"] == "thread"
-    assert exact["id"] == "sth_status_ref_dormant"
+    assert exact["id"] == "sth_fictional_status_ref_dormant"
     assert exact["status"] == "dormant"
     # Title must come from conscious_task.title (the conscious-layer-visible
     # title), so the pointer can hand the agent back the same words the
     # pointer context presented.
-    assert exact["title"] == "Review arXiv agent collaboration governance thread"
+    assert exact["title"] == "Review Fablearium glass-orchid propagation petal optics thread"
     # Thread exact_subject does not need kanban_settlement; if present it
     # must not be populated from a candidate record.
     assert exact.get("kanban_settlement") in (None, {}, "", [])
@@ -177,25 +173,25 @@ def test_status_reference_id_pins_candidate(tmp_path):
     """An active candidate's reference_id must surface with kind='candidate' + pressure."""
     _seed_state(
         tmp_path,
-        candidates=[_active_candidate(), _arxiv_candidate()],
+        candidates=[_active_candidate(), _glass_orchid_candidate()],
         threads=[_dormant_thread()],
     )
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
-        reference_id="cand_active_status_ref",
+        reference_id="cand_fictional_active_status_ref",
     )
     payload = json.loads(raw)
     assert payload["success"] is True, payload
     exact = payload["data"]["exact_subject"]
     assert exact["kind"] == "candidate"
-    assert exact["id"] == "cand_active_status_ref"
+    assert exact["id"] == "cand_fictional_active_status_ref"
     assert exact["status"] == "candidate"
     assert exact["pressure"] == pytest.approx(0.91)
     # The active candidate has no kanban settlement yet; if the field is
     # returned, it must be empty rather than borrowing one from the archived
-    # arXiv candidate in the same store.
+    # Fablearium candidate in the same store.
     settlement = exact.get("kanban_settlement") or {}
     assert not settlement.get("intake_task_id")
     assert not exact.get("not_found")
@@ -210,27 +206,27 @@ def test_status_reference_id_pins_saved_residue(tmp_path):
     handle on a saved residue it never saw promoted."""
     _seed_state(
         tmp_path,
-        candidates=[_active_candidate(), _arxiv_candidate()],
+        candidates=[_active_candidate(), _glass_orchid_candidate()],
         threads=[_dormant_thread()],
     )
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
-        reference_id="cand_arxiv_status_ref",
+        reference_id="cand_fictional_glass_orchid_status_ref",
     )
     payload = json.loads(raw)
     assert payload["success"] is True, payload
     exact = payload["data"]["exact_subject"]
     assert exact["kind"] == "saved_residue"
-    assert exact["id"] == "cand_arxiv_status_ref"
+    assert exact["id"] == "cand_fictional_glass_orchid_status_ref"
     # Saved residue is archived; kind is the active-status twin.
     assert exact["status"] == "archived"
     # kanban_settlement block is the whole point of this branch.
     settlement = exact["kanban_settlement"]
     assert settlement["decision"] == "SAVE"
-    assert settlement["intake_task_id"] == "t_status_intake"
-    assert settlement["review_task_id"] == "t_status_review"
+    assert settlement["intake_task_id"] == "t_fictional_status_intake"
+    assert settlement["review_task_id"] == "t_fictional_status_review"
     assert not exact.get("not_found")
 
 
@@ -241,16 +237,16 @@ def test_status_reference_id_classifies_reviewed_kanban_settlement_as_saved_resi
     result = apply_kanban_settlement(
         store,
         decision=decision,
-        candidate_id="cand_active_status_ref",
+        candidate_id="cand_fictional_active_status_ref",
         intake_task_id="t_settlement_intake",
         review_task_id="t_settlement_review",
     )
     assert result["action"] == "settled"
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
-        reference_id="cand_active_status_ref",
+        reference_id="cand_fictional_active_status_ref",
     )
     payload = json.loads(raw)
     exact = payload["data"]["exact_subject"]
@@ -268,14 +264,14 @@ def test_status_reference_id_unknown_marks_not_found(tmp_path):
     not_found, not silently coerced into the top-N or omitted entirely."""
     _seed_state(
         tmp_path,
-        candidates=[_active_candidate(), _arxiv_candidate()],
+        candidates=[_active_candidate(), _glass_orchid_candidate()],
         threads=[_dormant_thread()],
     )
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
-        reference_id="cand_doesnotexist",
+        reference_id="cand_fictional_doesnotexist",
     )
     payload = json.loads(raw)
     assert payload["success"] is True, payload
@@ -283,7 +279,7 @@ def test_status_reference_id_unknown_marks_not_found(tmp_path):
     assert exact["not_found"] is True
     # The id the caller asked about must be echoed back, so the conscious
     # layer can log the mismatch against the pointer that presented it.
-    assert exact.get("id") == "cand_doesnotexist"
+    assert exact.get("id") == "cand_fictional_doesnotexist"
     # An unknown id is not a thread, not a candidate, not a saved residue.
     assert exact.get("kind") in (None, "", "unknown")
 
@@ -300,17 +296,17 @@ def test_status_reference_id_respects_surface(tmp_path):
         tmp_path,
         candidates=[
             _active_candidate(allowed_surfaces=["local"]),  # local only!
-            _arxiv_candidate(),
+            _glass_orchid_candidate(),
         ],
         threads=[],
         surfaces=("discord", "local"),
     )
 
     raw = handle_sensorium_status(
-        instance="test",
+        instance="fictional-glasshouse",
         state_dir=str(tmp_path),
         surface="discord",
-        reference_id="cand_active_status_ref",
+        reference_id="cand_fictional_active_status_ref",
     )
     payload = json.loads(raw)
     assert payload["success"] is True, payload
@@ -331,12 +327,12 @@ def test_status_without_reference_id_keeps_existing_top_n(tmp_path):
     """
     _seed_state(
         tmp_path,
-        candidates=[_active_candidate(), _arxiv_candidate()],
+        candidates=[_active_candidate(), _glass_orchid_candidate()],
         threads=[_dormant_thread()],
     )
 
     # No reference_id kwarg at all.
-    raw = handle_sensorium_status(instance="test", state_dir=str(tmp_path))
+    raw = handle_sensorium_status(instance="fictional-glasshouse", state_dir=str(tmp_path))
     payload = json.loads(raw)
     assert payload["success"] is True, payload
     data = payload["data"]
@@ -346,12 +342,12 @@ def test_status_without_reference_id_keeps_existing_top_n(tmp_path):
     assert isinstance(data["top_threads"], list)
     assert isinstance(data["top_candidates"], list)
     assert len(data["top_threads"]) == 1
-    assert data["top_threads"][0]["id"] == "sth_status_ref_dormant"
+    assert data["top_threads"][0]["id"] == "sth_fictional_status_ref_dormant"
     assert data["top_threads"][0]["status"] == "dormant"
     # Only status=='candidate' rows appear in top_candidates; archived rows
     # with a kanban SAVE are NOT in top_candidates (they live in saved_residue).
     assert len(data["top_candidates"]) == 1
-    assert data["top_candidates"][0]["id"] == "cand_active_status_ref"
+    assert data["top_candidates"][0]["id"] == "cand_fictional_active_status_ref"
     assert data["top_candidates"][0]["pressure"] == pytest.approx(0.91)
 
     # Counts remain consistent with the top-N.

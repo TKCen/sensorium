@@ -2,14 +2,13 @@
 
 Bounded inner-lifecycle substrate for Hermes agents. Captures salient signals, promotes them through a deterministic pipeline (signal → event → candidate → conscious thread capsule), and surfaces policy-gated attention for pull-based review.
 
-## Repair posture (for the host agent reading this skill)
+## Development and repair
 
-If you are a host agent or lead and you are reading this skill because Sensorium itself is broken or you want to change it: **do not patch the substrate inline.** Sensorium is an *attention substrate*, and altering it from the foreground compromises the very attention you are using to fix it.
+Repair in an isolated development checkout, not by editing the installed runtime or private state. Define a bounded scope, preserve source/state bytes and separate diagnosis, implementation, independent verification and authorized installation. A worker/worktree is useful for substantial changes, but no external orchestration framework or private companion skill is required. Do not automatically revert another contributor's work or activate schedulers/services while investigating.
 
-- ≤3 tool calls, reversible, mostly judgment/synthesis → foreground is fine (a `status`/`ingest` smoke, a one-line config read).
-- 4+ tool calls, repo-wide inspection, code patch, migration, gateway/runtime sync, ambiguous substrate repair, or anything touching `~/.hermes/plugins/agent-sensorium/` live state → dispatch a worker lane (OMC `/ultrawork` in an isolated worktree, or OMX for surgical). The host keeps the DM cockpit; the lane does the work; the host reviews the report and decides.
+Use synthetic fixtures and explicit configuration; never copy real conversations, identities, account settings, host paths or accounting into reusable source/tests. Keep canonical privacy, exact-owner, lease, replay and outbox safeguards. Passing a focused test set does not establish full-suite, distribution privacy or host capability acceptance.
 
-If a foreground patch was already started before this rule was checked: stop, save `git diff --binary`, revert, and seed the lane with the captured WIP. Do not finish the patch in the foreground.
+Read the [architecture](../../docs/attention-and-workroom/architecture.md), [rationale](../../docs/attention-and-workroom/design-rationale.md), [migration](../../docs/attention-and-workroom/migration.md) and [change scope](../../docs/attention-and-workroom/change-scope.md) before working on attention or a native extension. Attention replay/index/optional latent metadata are implemented in the candidate; native/workroom/accounting/transport are proposals, not availability or activation guarantees. Request-time quota, failed-read preconsumption, journal/migration, lifetime continuation and full-tree cancellation remain proposed improvements. Gateway compatibility and Wiki security remain held.
 
 ## Ordinary use: the `sensorium` live tool
 
@@ -120,7 +119,7 @@ evidence-cited capsule -> transparent confidence proposal -> Conscious authoriza
 
 Confidence is an attention-routing signal only. It may justify `ATTENTION_INBOX` or `CONSCIOUS_REVIEW`; it may not write Hindsight/Memory/LCM, create durable truth, generate confident personal offer language, create external tasks, prepare artifacts, or authorize delivery by itself. The capsule must carry resolvable evidence refs, explicit `do_not_know` gaps, sensitivity, and allowed surfaces. The proposal must expose confidence components and negative evidence. Durable memory writes, skill/doc changes, artifact presentation, and outbound delivery require an explicit Conscious authorization receipt plus any configured operator/policy gate.
 
-See `docs/memory-volunteering-protocol.md` in the plugin docs for the formal schema, threshold defaults, source-type rules, and acceptance probes.
+See the [Memory Volunteering Protocol](../../docs/memory-volunteering-protocol.md) for the formal schema, threshold defaults, source-type rules, and acceptance probes.
 
 ---
 

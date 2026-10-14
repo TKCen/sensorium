@@ -40,6 +40,7 @@ from agent_sensorium.settlement import (
     select_active_above_threshold,
 )
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_event_signals
 from agent_sensorium.tools import (
     handle_sensorium_conscious_claim,
     handle_sensorium_dispatch_once,
@@ -397,10 +398,12 @@ class TestKanbanBridgePrimitives:
         first = self._hindsight_event(
             eid="evt_hp_1", summary="pending=300", fingerprint="hp_active",
         )
+        retain_event_signals(SensoriumStore(instance="test", state_dir=state_dir), first)
         ingest_raw = handle_sensorium_ingest_event(
             event=first, instance="test", state_dir=state_dir,
         )
         ingest = json.loads(ingest_raw)
+        assert ingest["success"] is True, ingest
         candidate_id = ingest["data"]["candidate_id"]
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
@@ -445,9 +448,11 @@ class TestKanbanBridgePrimitives:
         first = self._hindsight_event(
             eid="evt_idem", summary="pending=300", fingerprint="hp_idem",
         )
-        handle_sensorium_ingest_event(
+        retain_event_signals(SensoriumStore(instance="test", state_dir=state_dir), first)
+        ingest = json.loads(handle_sensorium_ingest_event(
             event=first, instance="test", state_dir=state_dir,
-        )
+        ))
+        assert ingest["success"] is True, ingest
         store = SensoriumStore(instance="test", state_dir=state_dir)
         s1 = apply_kanban_settlement(
             store,
@@ -549,9 +554,11 @@ class TestStaleCandidateReconciliation:
         event = self._hindsight_event(
             eid="evt_stale", summary="pending=210 critical", fingerprint="hp_stale",
         )
+        retain_event_signals(SensoriumStore(instance="test", state_dir=state_dir), event)
         ingest = json.loads(
             handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
         )
+        assert ingest["success"] is True, ingest
         candidate_id = ingest["data"]["candidate_id"]
 
         store = SensoriumStore(instance="test", state_dir=state_dir)
@@ -575,9 +582,11 @@ class TestStaleCandidateReconciliation:
         event = self._hindsight_event(
             eid="evt_rep", summary="pending=210", fingerprint="hp_rep",
         )
+        retain_event_signals(SensoriumStore(instance="test", state_dir=state_dir), event)
         ingest = json.loads(
             handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
         )
+        assert ingest["success"] is True, ingest
         candidate_id = ingest["data"]["candidate_id"]
         store = SensoriumStore(instance="test", state_dir=state_dir)
         candidates = store.read_jsonl("candidates")
@@ -640,9 +649,11 @@ class TestStaleCandidateReconciliation:
         event = self._hindsight_event(
             eid="evt_e2e", summary="pending=300 critical", fingerprint="hp_e2e",
         )
+        retain_event_signals(SensoriumStore(instance="test", state_dir=state_dir), event)
         ingest = json.loads(
             handle_sensorium_ingest_event(event=event, instance="test", state_dir=state_dir)
         )
+        assert ingest["success"] is True, ingest
         candidate_id = ingest["data"]["candidate_id"]
         store = SensoriumStore(instance="test", state_dir=state_dir)
 

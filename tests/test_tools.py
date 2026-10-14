@@ -174,6 +174,27 @@ class TestSensoriumIngestSignal:
 
 
 class TestSensoriumIngestEvent:
+    def test_external_reference_import_rejected_without_effects(self, state_dir, monkeypatch):
+        from agent_sensorium import tools
+        from tests.test_canonical_ingress_replay import forbid_effects
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        store.ensure_dirs()
+        event = {
+            "id": "evt_trusted", "ts": "2026-05-25T00:00:00Z",
+            "type": "sensor.event.promoted", "kind": "task_result",
+            "summary": "Trusted sensor already promoted this event",
+            "source_signal_ids": ["sig_external"], "signal_count": 2,
+            "strength": 0.88, "correlation_keys": ["trusted-import"],
+            "sensitivity": "private", "allowed_surfaces": ["local", "discord"],
+        }
+        before = {str(p): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+        forbid_effects(store, monkeypatch)
+        result = json.loads(tools.handle_sensorium_ingest_event(
+            event=event, instance="test", state_dir=state_dir))
+        assert not result["success"] and result["error"] == "invalid_ingress_claim"
+        assert {str(p): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == before
+
     def test_valid_event_ingested_and_candidate_created(self, state_dir):
         event = {
             "id": "evt_trusted",
@@ -181,7 +202,7 @@ class TestSensoriumIngestEvent:
             "type": "sensor.event.promoted",
             "kind": "task_result",
             "summary": "Trusted sensor already promoted this event",
-            "source_signal_ids": ["sig_external"],
+            "source_signal_ids": [],
             "signal_count": 2,
             "strength": 0.88,
             "correlation_keys": ["trusted-import"],
@@ -230,7 +251,7 @@ class TestSensoriumIngestEvent:
             "type": "sensor.event.promoted",
             "kind": "task_result",
             "summary": "Trusted duplicate event",
-            "source_signal_ids": ["sig_external"],
+            "source_signal_ids": [],
             "strength": 0.9,
             "correlation_keys": ["trusted-dedupe"],
             "sensitivity": "private",
@@ -252,6 +273,7 @@ class TestSensoriumIngestEvent:
     def test_related_event_updates_existing_candidate(self, state_dir):
         first_event = {
             "id": "evt_rel_1",
+            "source_signal_ids": ["sig-fictional-event-r1"],
             "ts": "2026-05-25T00:00:00Z",
             "type": "sensor.event.promoted",
             "kind": "task_result",
@@ -263,6 +285,7 @@ class TestSensoriumIngestEvent:
         }
         second_event = {
             "id": "evt_rel_2",
+            "source_signal_ids": ["sig-fictional-event-r2"],
             "ts": "2026-05-25T00:05:00Z",
             "type": "sensor.event.promoted",
             "kind": "task_result",
@@ -272,6 +295,16 @@ class TestSensoriumIngestEvent:
             "sensitivity": "private",
             "allowed_surfaces": ["local"],
         }
+
+        store = SensoriumStore(instance="test", state_dir=state_dir)
+        for revision in ("r1", "r2"):
+            store.append_jsonl("signals", {
+                "id": f"sig-fictional-event-{revision}",
+                "sensor": "fictional.glasshouse", "source": "artifact",
+                "kind": "task_result", "source_revision": revision,
+                "summary": f"Fictional glass-orchid material {revision}",
+                "artifact_meta": {"source_id": "fictional-catalog", "item_id": "glass-orchid-01"},
+            })
 
         first = json.loads(handle_sensorium_ingest_event(event=first_event, instance="test", state_dir=state_dir))
         second = json.loads(handle_sensorium_ingest_event(event=second_event, instance="test", state_dir=state_dir))

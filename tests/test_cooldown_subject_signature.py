@@ -11,7 +11,7 @@ cooldowns from saved-residue cooldowns cannot slip through).
 What's pinned:
 
   1. A candidate receipt and a saved_residue receipt for the SAME candidate id
-     share one cooldown bucket. If cand_x was just presented as an active
+     share one cooldown bucket. If cand_fictional_x was just presented as an active
      candidate pointer, it cannot be re-surfaced as a saved_residue pointer
      within the cooldown window. (Pin: candidate ↔ saved_residue cooling
      blocks the same candidate id.)
@@ -27,8 +27,8 @@ What's pinned:
   3. Thread receipts and candidate receipts use INDEPENDENT cooldown keys
      (thread receipt looks up by ``thread_id``; candidate receipt looks up
      by ``candidate_id``). Presenting a thread that was spawned from
-     cand_associated does NOT block a future candidate pointer for
-     cand_associated, because the thread receipt has no ``candidate_id``
+     cand_fictional_associated does NOT block a future candidate pointer for
+     cand_fictional_associated, because the thread receipt has no ``candidate_id``
      field — only ``thread_id`` and ``origin_candidate_id``.
 
   4. Cooldown is a TIME-WINDOW preference, not a permanent block. A receipt
@@ -60,7 +60,7 @@ def _write_config(state_dir, *, surfaces=("discord", "local"), max_sensitivity="
     config = {
         "allowed_surfaces": list(surfaces),
         "max_sensitivity": max_sensitivity,
-        "instance_name": "test",
+        "instance_name": "fictional-glasshouse",
     }
     path = Path(state_dir) / "instance.config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,15 +70,15 @@ def _write_config(state_dir, *, surfaces=("discord", "local"), max_sensitivity="
 def _candidate(**overrides):
     """Active salience candidate (status=candidate) — used for tests 1, 3, 4."""
     base = {
-        "id": "cand_x",
+        "id": "cand_fictional_x",
         "status": "candidate",
         "kind": "relational_salience",
         "summary": "Cross-type cooldown test candidate: relational salience left open for later",
         "pressure": 0.82,
         "sensitivity": "private",
         "allowed_surfaces": ["discord", "local"],
-        "created_at": "2026-07-04T08:00:00Z",
-        "updated_at": "2026-07-04T08:00:00Z",
+        "created_at": "2026-09-03T14:00:00Z",
+        "updated_at": "2026-09-03T14:00:00Z",
     }
     base.update(overrides)
     return base
@@ -87,55 +87,53 @@ def _candidate(**overrides):
 def _saved_residue_candidate(**overrides):
     """Archived Kanban-saved residue — used for tests 1, 2, 4."""
     base = {
-        "id": "cand_x",
+        "id": "cand_fictional_x",
         "status": "archived",
         "kind": "research_source_signal",
         "pressure": 0.71,
-        "summary": "Cross-type cooldown test saved residue: archived arXiv collaboration salience",
+        "summary": "Cross-type cooldown test saved residue: archived Fablearium propagation salience",
         "sensitivity": "private",
         "allowed_surfaces": ["discord", "local"],
-        "created_at": "2026-07-04T08:00:00Z",
-        "updated_at": "2026-07-04T08:10:00Z",
+        "created_at": "2026-09-03T14:00:00Z",
+        "updated_at": "2026-09-03T14:10:00Z",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "t_intake_x",
-            "review_task_id": "t_review_x",
-            "settled_at": "2026-07-04T08:05:00Z",
-            "reason_label": "reason#x",
+            "intake_task_id": "t_fictional_intake_x",
+            "review_task_id": "t_fictional_review_x",
+            "settled_at": "2026-09-03T14:05:00Z",
+            "reason_label": "reason#fictional-cooldown-save",
         },
     }
     base.update(overrides)
     return base
 
 
-def _arxiv_candidate(**overrides):
+def _glass_orchid_candidate(**overrides):
     """Mirror tests/test_pointer_doorway_saved_residue.py — used by test 4."""
     base = {
-        "id": "cand_arxiv_regression",
+        "id": "cand_fictional_glass_orchid_regression",
         "status": "archived",
         "kind": "research_source_signal",
-        "pressure": 0.783,
+        "pressure": 0.79,
         "summary": (
-            "Research source feed (arXiv cs.AI: agent collaboration / governance): "
-            "From Signals to Structure: How Memory Architecture Drives Language "
-            "Emergence in LLM Agents. Authors: Talebirad et al. Abstract: arXiv:2607.00233."
+            "Fablearium research feed (fictional glass-orchid propagation): Prismatic Petal Atlas. Invented author: Dr. Paper Fern. Synthetic catalog item: glass-orchid-01."
         ),
         "correlation_keys": [
-            "lane:agent-society",
-            "source:arxiv-cs-ai-agent-collaboration-governance",
-            "topic:memory",
-            "topic:multi-agent",
+            "lane:fictional-glasshouse",
+            "source:fablearium-glass-orchid",
+            "topic:petal-optics",
+            "topic:seed-trays",
         ],
         "sensitivity": "private",
         "allowed_surfaces": ["discord", "local"],
-        "created_at": "2026-07-02T04:18:00Z",
-        "updated_at": "2026-07-02T04:39:17Z",
+        "created_at": "2026-09-01T10:00:00Z",
+        "updated_at": "2026-09-01T10:25:00Z",
         "kanban_settlement": {
             "decision": "SAVE",
-            "intake_task_id": "task_intake_saved",
-            "review_task_id": "task_review_saved",
-            "settled_at": "2026-07-02T04:29:29Z",
-            "reason_label": "reason#bdf731842efcbb5b",
+            "intake_task_id": "task_fictional_intake_saved",
+            "review_task_id": "task_fictional_review_saved",
+            "settled_at": "2026-09-01T10:12:00Z",
+            "reason_label": "reason#fictional-glass-orchid-save",
         },
     }
     base.update(overrides)
@@ -145,18 +143,18 @@ def _arxiv_candidate(**overrides):
 def _thread(**overrides):
     """Thread row with explicit origin_candidate_id — used by test 3."""
     base = {
-        "id": "sth_x",
+        "id": "sth_fictional_x",
         "status": "dormant",
         "origin": "candidate",
         "conscious_task": {
-            "id": "ctask_x",
+            "id": "ctask_fictional_x",
             "request_type": "THINK",
-            "title": "Cross-type cooldown test thread: review relational salience for cand_associated",
-            "why": "test",
+            "title": "Cross-type cooldown test thread: review relational salience for cand_fictional_associated",
+            "why": "fictional-glasshouse",
             "expected_decision": "decide",
         },
-        "origin_candidate_id": "cand_associated",
-        "continuity_summary": ["test"],
+        "origin_candidate_id": "cand_fictional_associated",
+        "continuity_summary": ["fictional-glasshouse"],
         "decision_log": [],
         "interaction_refs": [],
         "summary_dirty": False,
@@ -164,9 +162,9 @@ def _thread(**overrides):
         "next_prompt_to_operator": "Take it up?",
         "sensitivity": "private",
         "allowed_surfaces": ["discord", "local"],
-        "created_at": "2026-07-04T08:00:00Z",
-        "updated_at": "2026-07-04T08:00:00Z",
-        "expires_at": "2026-07-11T08:00:00Z",
+        "created_at": "2026-09-03T14:00:00Z",
+        "updated_at": "2026-09-03T14:00:00Z",
+        "expires_at": "2026-09-10T14:00:00Z",
     }
     base.update(overrides)
     return base
@@ -205,13 +203,13 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
     Set-up mirrors the live workflow where salience is first surfaced as an
     active candidate pointer, then archived (Kanban SAVE). The candidate_id
     cooldown key is preserved across that transition, so the saved-residue
-    pathway will not re-surface cand_x within the cooldown window.
+    pathway will not re-surface cand_fictional_x within the cooldown window.
 
-    Pin shape: after a fresh ``pointer.presented`` receipt for cand_x
-    (pointer_type=candidate), ``_cooldown_open(store, "cand_x", ...,
+    Pin shape: after a fresh ``pointer.presented`` receipt for cand_fictional_x
+    (pointer_type=candidate), ``_cooldown_open(store, "cand_fictional_x", ...,
     id_field="candidate_id")`` returns ``(False, "cooldown_until:...")``
     even when the row is now archived+kanban-saved. The visible outcome
-    is that the saved_residue pathway silently does not return cand_x
+    is that the saved_residue pathway silently does not return cand_fictional_x
     while the receipt is fresh.
 
     If a future refactor splits candidate vs saved_residue cooldown keys
@@ -220,31 +218,31 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
     """
     from agent_sensorium.pointers import _cooldown_open
 
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="fictional-glasshouse", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path)
 
-    # Phase 1: cand_x is an active candidate. Surface it as a candidate
+    # Phase 1: cand_fictional_x is an active candidate. Surface it as a candidate
     # pointer and record the receipt (the normal pre-LLM round-trip path).
     store.append_jsonl("candidates", _candidate())
     first_pointer = select_attention_pointer(store, surface="discord")
     assert first_pointer["action"] == "pointer_available"
     assert first_pointer["pointer_type"] == "candidate"
-    assert first_pointer["candidate_id"] == "cand_x"
+    assert first_pointer["candidate_id"] == "cand_fictional_x"
     receipt = record_pointer_presented(
         store, first_pointer, session_id="s1", surface="discord",
     )
     assert receipt["type"] == "pointer.presented"
     assert receipt["subject_kind"] == "candidate"
     assert receipt["pointer_type"] == "candidate"
-    assert receipt["candidate_id"] == "cand_x"
+    assert receipt["candidate_id"] == "cand_fictional_x"
 
     # Pin: the candidate receipt alone already blocks the candidate-id
-    # cooldown for cand_x, regardless of whether cand_x is currently
+    # cooldown for cand_fictional_x, regardless of whether cand_fictional_x is currently
     # active or archived. (The candidate pointer pathway re-uses this
     # exact id_field branch.)
     open_, reason = _cooldown_open(
-        store, "cand_x", 120, id_field="candidate_id",
+        store, "cand_fictional_x", 120, id_field="candidate_id",
     )
     assert open_ is False, (
         f"Fresh candidate receipt must keep candidate-id cooldown closed. Got: {(open_, reason)!r}"
@@ -253,7 +251,7 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
         f"Cooldown reason must carry the until marker. Got: {reason!r}"
     )
 
-    # Phase 2: the operator archives cand_x with Kanban SAVE — now cand_x
+    # Phase 2: the operator archives cand_fictional_x with Kanban SAVE — now cand_fictional_x
     # is eligible for the saved_residue pathway (and the row writes append
     # to the jsonl alongside the active phase-1 row).
     store.append_jsonl("candidates", _saved_residue_candidate())
@@ -264,7 +262,7 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
     # underlying candidate status, which is exactly the cross-type shared
     # bucket the audit is flagging.
     open_after_archive, reason_after = _cooldown_open(
-        store, "cand_x", 120, id_field="candidate_id",
+        store, "cand_fictional_x", 120, id_field="candidate_id",
     )
     assert open_after_archive is False, (
         f"Cooldown must remain closed across the active→archived transition. "
@@ -273,9 +271,9 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
     assert reason_after.startswith("cooldown_until:")
 
     # Pin through select_attention_pointer: with NO threads, NO active
-    # candidate rows visible on discord, and ONLY cand_x as a saved
+    # candidate rows visible on discord, and ONLY cand_fictional_x as a saved
     # residue, the candidate_id cooldown keeps the saved_residue pathway
-    # from re-surfacing cand_x. The user-facing outcome is no_pointer
+    # from re-surfacing cand_fictional_x. The user-facing outcome is no_pointer
     # (with no usable threads, candidates, or residue candidates).
     # The pre-existing saved_residue pathway never returns a
     # cooldown_until reason via this surface — it silently fails through
@@ -283,7 +281,7 @@ def test_cooldown_blocks_same_candidate_across_pointer_types(tmp_path):
     # the candidate_id branch called inside the saved_residue loop
     # returned False. We assert that directly via _cooldown_open
     # above, and additionally assert the function actually surfaces
-    # cand_x as a saved_residue pointer when the cooldown DOES elapse
+    # cand_fictional_x as a saved_residue pointer when the cooldown DOES elapse
     # (test_cooldown_elapses_after_window), to close the loop.
 
 
@@ -296,7 +294,7 @@ def test_cooldown_receipt_records_subject_kind_and_pointer_type(tmp_path):
     This test pins that the rows do carry them — so a future, narrower
     cooldown key has the per-row data to filter on.
     """
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="fictional-glasshouse", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path)
 
@@ -310,8 +308,8 @@ def test_cooldown_receipt_records_subject_kind_and_pointer_type(tmp_path):
     assert cand_receipt["type"] == "pointer.presented"
     assert cand_receipt["pointer_type"] == "candidate"
     assert cand_receipt["subject_kind"] == "candidate"
-    assert cand_receipt["subject_id"] == "cand_x"
-    assert cand_receipt["candidate_id"] == "cand_x"
+    assert cand_receipt["subject_id"] == "cand_fictional_x"
+    assert cand_receipt["candidate_id"] == "cand_fictional_x"
     assert cand_receipt["thread_id"] in (None, "")
 
     # Pin: the candidate receipt row itself carries the per-row subject
@@ -320,7 +318,7 @@ def test_cooldown_receipt_records_subject_kind_and_pointer_type(tmp_path):
     # filter on.
     candidate_receipts = [
         r for r in store.read_jsonl("decisions")
-        if r.get("type") == "pointer.presented" and r.get("candidate_id") == "cand_x"
+        if r.get("type") == "pointer.presented" and r.get("candidate_id") == "cand_fictional_x"
     ]
     assert len(candidate_receipts) == 1, candidate_receipts
 
@@ -341,20 +339,20 @@ def test_cooldown_receipt_records_subject_kind_and_pointer_type(tmp_path):
         "ts": utc_now_iso(),
         "type": "pointer.presented",
         "pointer_type": "saved_residue",
-        "candidate_id": "cand_x",
+        "candidate_id": "cand_fictional_x",
         "thread_id": "",
         "task_id": "",
         "surface": "discord",
         "session_id": "s2",
         "subject_kind": "saved_residue",
-        "subject_id": "cand_x",
-        "presented_title": "saved residue for cand_x",
+        "subject_id": "cand_fictional_x",
+        "presented_title": "saved residue for cand_fictional_x",
     }
     store.append_jsonl("decisions", saved_residue_receipt)
 
     receipts = [
         r for r in store.read_jsonl("decisions")
-        if r.get("type") == "pointer.presented" and r.get("candidate_id") == "cand_x"
+        if r.get("type") == "pointer.presented" and r.get("candidate_id") == "cand_fictional_x"
     ]
     assert len(receipts) == 2, receipts
 
@@ -365,14 +363,14 @@ def test_cooldown_receipt_records_subject_kind_and_pointer_type(tmp_path):
     # distinguish them.
     assert by_kind["candidate"]["pointer_type"] == "candidate"
     assert by_kind["saved_residue"]["pointer_type"] == "saved_residue"
-    assert by_kind["candidate"]["candidate_id"] == "cand_x"
-    assert by_kind["saved_residue"]["candidate_id"] == "cand_x"
+    assert by_kind["candidate"]["candidate_id"] == "cand_fictional_x"
+    assert by_kind["saved_residue"]["candidate_id"] == "cand_fictional_x"
 
     # Pin: _recent_pointer_receipts today only filters on candidate_id /
     # thread_id and returns BOTH kinds. This is the very shape the audit
     # wants pinned, so a future cross-type decoupling is a deliberate
     # change (and forces this test's cohort to be updated).
-    both = _recent_pointer_receipts(store, candidate_id="cand_x")
+    both = _recent_pointer_receipts(store, candidate_id="cand_fictional_x")
     assert len(both) == 2, both
     subject_kinds = sorted(r["subject_kind"] for r in both)
     assert subject_kinds == ["candidate", "saved_residue"]
@@ -382,8 +380,8 @@ def test_cooldown_threads_and_candidates_have_independent_keys(tmp_path):
     """Pin P2-1c: Thread receipts and candidate receipts use INDEPENDENT
     cooldown keys.
 
-    Presenting a thread that originated from cand_associated does NOT block
-    a subsequent candidate pointer for cand_associated, because the thread
+    Presenting a thread that originated from cand_fictional_associated does NOT block
+    a subsequent candidate pointer for cand_fictional_associated, because the thread
     receipt has no ``candidate_id`` field — it only carries ``thread_id``
     (and ``origin_candidate_id``, which the cooldown key ignores).
 
@@ -400,32 +398,32 @@ def test_cooldown_threads_and_candidates_have_independent_keys(tmp_path):
     """
     from agent_sensorium.pointers import _cooldown_open
 
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="fictional-glasshouse", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path)
 
-    # Phase A: create a thread spawned from cand_associated (local-only),
-    # AND an active candidate cand_associated (visible on discord). Plant a
+    # Phase A: create a thread spawned from cand_fictional_associated (local-only),
+    # AND an active candidate cand_fictional_associated (visible on discord). Plant a
     # thread receipt directly so the cooldown-key check is unambiguous.
     # We can't go through select_attention_pointer here because on the
     # discord surface the thread isn't visible — which would short-circuit
     # before the thread's bookkeeping is exercised. So we plant the receipt
     # the same way a real pre-LLM invocation on the local surface would.
-    store.append_jsonl("candidates", _candidate(id="cand_associated"))
+    store.append_jsonl("candidates", _candidate(id="cand_fictional_associated"))
     store.append_jsonl("threads", _thread(allowed_surfaces=["local"]))
     # Use the local surface to surface+record the thread receipt.
     thread_pointer = select_attention_pointer(store, surface="local")
     assert thread_pointer["action"] == "pointer_available"
     assert thread_pointer["pointer_type"] == "thread"
-    assert thread_pointer["thread_id"] == "sth_x"
-    assert thread_pointer["origin_candidate_id"] == "cand_associated"
+    assert thread_pointer["thread_id"] == "sth_fictional_x"
+    assert thread_pointer["origin_candidate_id"] == "cand_fictional_associated"
     receipt = record_pointer_presented(
         store, thread_pointer, session_id="s1", surface="local",
     )
     assert receipt["type"] == "pointer.presented"
     assert receipt["pointer_type"] == "thread"
     assert receipt["subject_kind"] == "thread"
-    assert receipt["thread_id"] == "sth_x"
+    assert receipt["thread_id"] == "sth_fictional_x"
 
     # Pin: the thread receipt does NOT set candidate_id. The origin
     # candidate id travels under ``origin_candidate_id`` and must remain
@@ -435,36 +433,36 @@ def test_cooldown_threads_and_candidates_have_independent_keys(tmp_path):
         "Thread receipts must not set candidate_id — that would couple "
         "thread cooldowns to the candidate namespace."
     )
-    assert receipt.get("origin_candidate_id") == "cand_associated"
+    assert receipt.get("origin_candidate_id") == "cand_fictional_associated"
 
     # Pin: the internal lookup, asked for the candidate namespace, ignores
     # thread receipts entirely (because they have no candidate_id).
-    candidate_namespace = _recent_pointer_receipts(store, candidate_id="cand_associated")
+    candidate_namespace = _recent_pointer_receipts(store, candidate_id="cand_fictional_associated")
     assert candidate_namespace == [], (
         "Thread receipts must not appear under candidate_id lookups. Got: "
         f"{candidate_namespace!r}"
     )
-    thread_namespace = _recent_pointer_receipts(store, thread_id="sth_x")
+    thread_namespace = _recent_pointer_receipts(store, thread_id="sth_fictional_x")
     assert len(thread_namespace) == 1
     assert thread_namespace[0]["subject_kind"] == "thread"
 
-    # Pin: the candidate-id cooldown for cand_associated is OPEN even
-    # though a thread pointer with origin_candidate_id=cand_associated was
+    # Pin: the candidate-id cooldown for cand_fictional_associated is OPEN even
+    # though a thread pointer with origin_candidate_id=cand_fictional_associated was
     # just presented. If a future refactor couples them (e.g., matching on
     # origin_candidate_id), this assertion will start failing.
     open_cand, reason_cand = _cooldown_open(
-        store, "cand_associated", 120, id_field="candidate_id",
+        store, "cand_fictional_associated", 120, id_field="candidate_id",
     )
     assert open_cand is True, (
-        "Thread receipt for sth_x must not contaminate the candidate-id "
-        f"cooldown for cand_associated. Got: {(open_cand, reason_cand)!r}"
+        "Thread receipt for sth_fictional_x must not contaminate the candidate-id "
+        f"cooldown for cand_fictional_associated. Got: {(open_cand, reason_cand)!r}"
     )
     assert reason_cand == "never_presented"
 
     # Pin through select_attention_pointer: on the discord surface the
     # thread is invisible (allowed_surfaces=["local"]), so the threads
     # branch is empty and the function falls through to the candidate
-    # branch. The candidate pointer for cand_associated must surface
+    # branch. The candidate pointer for cand_fictional_associated must surface
     # cleanly because the thread receipt above has NO candidate_id field.
     surf = select_attention_pointer(
         store,
@@ -472,11 +470,11 @@ def test_cooldown_threads_and_candidates_have_independent_keys(tmp_path):
         config={"fallback_when_all_visible_on_cooldown": False},
     )
     assert surf["action"] == "pointer_available", (
-        "Thread receipt for sth_x must NOT block the candidate pointer "
-        f"for cand_associated on the discord surface. Got: {surf!r}"
+        "Thread receipt for sth_fictional_x must NOT block the candidate pointer "
+        f"for cand_fictional_associated on the discord surface. Got: {surf!r}"
     )
     assert surf["pointer_type"] == "candidate"
-    assert surf["candidate_id"] == "cand_associated"
+    assert surf["candidate_id"] == "cand_fictional_associated"
 
 
 def test_cooldown_elapses_after_window(tmp_path):
@@ -485,7 +483,7 @@ def test_cooldown_elapses_after_window(tmp_path):
     A receipt whose ``ts`` is older than ``cooldown_minutes`` ago must NOT
     block subsequent pointer selection. The same item re-surfaces.
     """
-    store = SensoriumStore(instance="test", state_dir=str(tmp_path))
+    store = SensoriumStore(instance="fictional-glasshouse", state_dir=str(tmp_path))
     store.ensure_dirs()
     _write_config(tmp_path)
 
@@ -493,7 +491,7 @@ def test_cooldown_elapses_after_window(tmp_path):
     # candidate_fallback_enabled=True ensures the saved-residue pathway
     # does NOT catch us by surprise — we want the candidate pathway to be
     # the only one that can re-surface.
-    store.append_jsonl("candidates", _arxiv_candidate())  # saved residue alt
+    store.append_jsonl("candidates", _glass_orchid_candidate())  # saved residue alt
 
     # Plant a candidate receipt whose ts is older than the default 120-min
     # cooldown window. Use 200 minutes back to be safely past the window.
@@ -502,17 +500,17 @@ def test_cooldown_elapses_after_window(tmp_path):
     store.append_jsonl("decisions", _backdated_receipt(
         ts=backdated_ts,
         pointer_type="candidate",
-        candidate_id="cand_x",
+        candidate_id="cand_fictional_x",
         subject_kind="candidate",
     ))
 
     # Pin: the receipt is on disk and visible to the candidate-id lookup.
-    before = _recent_pointer_receipts(store, candidate_id="cand_x")
+    before = _recent_pointer_receipts(store, candidate_id="cand_fictional_x")
     assert len(before) == 1
     assert before[0]["ts"] == backdated_ts
 
     # Pin: with a 200-minute-old receipt and cooldown_minutes=120 the
-    # candidate pointer for cand_x must surface again.
+    # candidate pointer for cand_fictional_x must surface again.
     surf = select_attention_pointer(
         store,
         surface="discord",
@@ -526,7 +524,7 @@ def test_cooldown_elapses_after_window(tmp_path):
         f"re-surfacing. Got: {surf!r}"
     )
     assert surf["pointer_type"] == "candidate"
-    assert surf["candidate_id"] == "cand_x"
+    assert surf["candidate_id"] == "cand_fictional_x"
     # The pointer's stated reason should explicitly call out elapsed time.
     assert surf["reason"] == "cooldown_elapsed", (
         f"Expected cooldown_elapsed reason, got: {surf.get('reason')!r}"
@@ -551,9 +549,9 @@ def test_cooldown_elapses_after_window(tmp_path):
         },
     )
     # With the saved_residue pathway still enabled and a fresh cooldown on
-    # cand_x (a candidate), the candidate branch skips cand_x (cooldown
+    # cand_fictional_x (a candidate), the candidate branch skips cand_fictional_x (cooldown
     # open=False) but the saved_residue branch _also_ uses candidate-id
-    # cooldown so cand_arxiv_regression should surface instead.
+    # cooldown so cand_fictional_glass_orchid_regression should surface instead.
     if blocked["action"] == "no_pointer":
         assert "cooldown_until:" in blocked.get("reason", "")
     else:
@@ -561,7 +559,7 @@ def test_cooldown_elapses_after_window(tmp_path):
         # blocked by candidate-id cooldowns only if they share the id —
         # they don't, so the saved_residue path surfaces a different item.
         assert blocked["pointer_type"] in {"candidate", "saved_residue"}
-        assert blocked["candidate_id"] != "cand_x", (
-            "Fresh receipt should block cand_x from re-surfacing as either "
+        assert blocked["candidate_id"] != "cand_fictional_x", (
+            "Fresh receipt should block cand_fictional_x from re-surfacing as either "
             "candidate or saved_residue pointer."
         )

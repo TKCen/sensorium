@@ -10,6 +10,7 @@ from agent_sensorium.conscious_aperture import (
 from agent_sensorium.conscious_doorway import handle_conscious_doorway_pre_llm
 from agent_sensorium.plugin import register
 from agent_sensorium.store import SensoriumStore
+from tests.test_conscious_doorway import _assert_sources_unchanged, _retain_sources
 
 
 def _candidate(candidate_id, *, pressure=0.7):
@@ -200,6 +201,7 @@ def test_foreground_doorway_attempts_resumes_and_live_tool_settles(tmp_path, mon
         "conscious_doorway": {"enabled": True, "aperture_size": 2, "max_active_items": 2, "lease_minutes": 10, "surfaces": ["local"], "agent_label": "Review Agent"},
     }))
     store.rewrite_jsonl("candidates", [_candidate("alpha"), _candidate("beta")])
+    parents = _retain_sources(store, ["alpha", "beta"])
     assert handle_conscious_doorway_pre_llm(instance="generic", platform="discord", session_id="session-a", turn_id="turn-0", state_dir=str(state_dir)) is None
     first = handle_conscious_doorway_pre_llm(instance="generic", platform="local", session_id="session-a", turn_id="turn-1", state_dir=str(state_dir))
     resumed = handle_conscious_doorway_pre_llm(instance="generic", platform="local", session_id="session-a", turn_id="turn-2", state_dir=str(state_dir))
@@ -242,6 +244,7 @@ def test_foreground_doorway_attempts_resumes_and_live_tool_settles(tmp_path, mon
     assert unsupported["success"] is False
     assert next(item for item in store.read_jsonl("candidates") if item["id"] == "beta")["status"] == "in_conscious_aperture"
     assert store.read_jsonl("outbox") == store.read_jsonl("worker_requests") == []
+    _assert_sources_unchanged(store, parents)
 
 
 def test_plugin_pointer_receives_current_hermes_turn_fields(tmp_path, monkeypatch):
@@ -259,6 +262,7 @@ def test_plugin_pointer_receives_current_hermes_turn_fields(tmp_path, monkeypatc
         "conscious_doorway": {"enabled": False},
     }))
     store.append_jsonl("candidates", _candidate("pointer", pressure=0.96))
+    parents = _retain_sources(store, ["pointer"])
     ctx = _PluginContext()
     register(ctx)
     pointer_hook = ctx.hooks[1]
@@ -272,3 +276,4 @@ def test_plugin_pointer_receives_current_hermes_turn_fields(tmp_path, monkeypatc
     receipts = store.read_jsonl("decisions")
     assert [row["foreground_turn_index"] for row in receipts] == [1, 2, 3]
     assert receipts[1]["reason"] == "min_turn_gap"
+    _assert_sources_unchanged(store, parents)

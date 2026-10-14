@@ -94,7 +94,36 @@ def truncate_text(text: str, max_chars: int = 120) -> str:
     return cut + "…"
 
 
+def decode_visibility(metadata: object, *, sensitivity_key: str = "sensitivity") -> tuple[str, list[str]] | None:
+    """Decode explicit retained authority without coercion or fallback."""
+    if not isinstance(metadata, dict) or metadata.get("_visibility_invalid") is True:
+        return None
+    sensitivity = metadata.get(sensitivity_key)
+    surfaces = metadata.get("allowed_surfaces")
+    if (not isinstance(sensitivity, str) or sensitivity not in SENSITIVITY_RANK
+            or not isinstance(surfaces, list)
+            or any(not isinstance(value, str) or not value.strip() for value in surfaces)):
+        return None
+    return sensitivity, surfaces
+
+
+def validate_ingress_visibility(metadata: object) -> None:
+    """Missing ingress fields have safe defaults; malformed PRESENT fields deny."""
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid_visibility_metadata")
+    sensitivity = metadata.get("sensitivity", "private")
+    if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITY_RANK:
+        raise ValueError("Invalid sensitivity")
+    effective = {
+        "sensitivity": sensitivity,
+        "allowed_surfaces": metadata.get("allowed_surfaces", ["local"]),
+    }
+    if decode_visibility(effective) is None:
+        raise ValueError("invalid_visibility_metadata")
+
+
 def normalize_signal(raw: dict) -> dict:
+    validate_ingress_visibility(raw)
     sig = dict(raw)
     if "id" not in sig:
         sig["id"] = new_id("sig")
@@ -121,13 +150,11 @@ def classify_feedback_outcome(outcome: str) -> str:
 
 
 def validate_signal(signal: dict) -> None:
+    validate_ingress_visibility(signal)
     missing = SIGNAL_REQUIRED_FIELDS - signal.keys()
     if missing:
         raise ValueError(f"Signal missing required fields: {missing}")
-    if signal.get("sensitivity") and signal["sensitivity"] not in VALID_SENSITIVITIES:
-        raise ValueError(
-            f"Invalid sensitivity: {signal['sensitivity']}. Must be one of {VALID_SENSITIVITIES}"
-        )
+
     if signal.get("source") == "feedback":
         fb_missing = FEEDBACK_REQUIRED_FIELDS - signal.keys()
         if fb_missing:
@@ -158,14 +185,12 @@ def validate_signal(signal: dict) -> None:
 
 
 def validate_event(event: dict) -> None:
+    validate_ingress_visibility(event)
     required = {"id", "ts", "type", "kind", "summary"}
     missing = required - event.keys()
     if missing:
         raise ValueError(f"Event missing required fields: {missing}")
-    if event.get("sensitivity") and event["sensitivity"] not in VALID_SENSITIVITIES:
-        raise ValueError(
-            f"Invalid sensitivity: {event['sensitivity']}. Must be one of {VALID_SENSITIVITIES}"
-        )
+
 
 
 def merge_sensitivity(values: list[str]) -> str:

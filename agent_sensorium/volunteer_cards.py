@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from .attention import _freshness, _safe_atom, _safe_atom_list, _safe_text
-from .config import load_instance_config, visible_on_surface
+from .config import DisclosureVisibility, load_instance_config, visible_on_surface
 from .pointers import DEFAULT_POINTER_CONFIG, _saved_residue_candidates
 from .schemas import truncate_text
 from .store import SensoriumStore
@@ -267,17 +267,20 @@ def build_volunteer_cards(
 
     now = datetime.now(timezone.utc)
     ranked_cards: list[tuple[tuple, dict]] = []
+    candidate_rows = store.read_jsonl("candidates")
+    thread_rows = store.read_jsonl("threads")
+    disclosure = DisclosureVisibility(candidate_rows, thread_rows, surface, inst_cfg)
 
     threads = [
-        t for t in store.read_jsonl("threads")
-        if t.get("status") in {"dormant", "held"} and visible_on_surface(t, surface, inst_cfg)
+        t for t in thread_rows
+        if t.get("status") in {"dormant", "held"} and disclosure.subject("thread", t.get("id"))
     ]
     for thread in threads:
         ranked_cards.append(_thread_card(thread, now))
 
     candidates = [
-        c for c in store.read_jsonl("candidates")
-        if c.get("status") == "candidate" and visible_on_surface(c, surface, inst_cfg)
+        c for c in candidate_rows
+        if c.get("status") == "candidate" and disclosure.subject("candidate", c.get("id"))
     ]
     for candidate in candidates:
         ranked_cards.append(_candidate_card(candidate, now))
@@ -289,7 +292,7 @@ def build_volunteer_cards(
         ranked_cards.append(_saved_residue_card(candidate, now))
 
     for artifact in store.read_jsonl("artifacts"):
-        if not visible_on_surface(artifact, surface, inst_cfg):
+        if not visible_on_surface(artifact, surface, inst_cfg) or not disclosure.linked(artifact):
             continue
         artifact_card = _artifact_card(artifact, now)
         if artifact_card is not None:

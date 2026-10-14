@@ -14,12 +14,15 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
+from .canonical_records import record_id
+
 STREAMS = ("signals", "events", "decisions", "candidates")
 DEFAULT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 BOUNDARY_BYTES = 64
 SQLITE_TIMEOUT_SECONDS = 0.2
-SCHEMA_VERSION = 3
+# Invalid-present members must survive projection; old ready caches lost evidence.
+SCHEMA_VERSION = 7
 MAX_DEPENDENT_REFRESHES_PER_PASS = 64
 
 
@@ -40,6 +43,10 @@ class AdmissionIndexResult:
     value: object | None = None
 
 
+class _AdmissionSnapshot(dict):
+    """Internal projection boundary; JSON producer payloads cannot preserve it."""
+
+
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -48,12 +55,18 @@ def _safe_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _bounded_strings(value: object, *, limit: int | None = None) -> list[str]:
+def _bounded_strings(value: object, *, limit: int | None = None) -> list:
     """Project complete record-local identifiers; the record byte cap is the bound."""
     if not isinstance(value, list):
         return []
     selected = value if limit is None else value[:limit]
-    return [item for item in selected if isinstance(item, str)]
+    # Invalid members must remain visible to record-local join validation.
+    return list(selected)
+
+
+def _reference_ids(value: object) -> set[str]:
+    """SQL relationships carry valid IDs, not proof of complete raw joins."""
+    return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
 
 
 def _binding_projection(value: object) -> dict | None:
@@ -71,9 +84,9 @@ def _binding_projection(value: object) -> dict | None:
     for key in ("member_keys", "selected_member_keys"):
         if key in value:
             items = value.get(key)
-            if not isinstance(items, list):
-                return None
-            projected[key] = _bounded_strings(items)
+            # Keep invalid-present distinct from absent without persisting its
+            # arbitrary payload or enabling legacy/nested binding fallback.
+            projected[key] = _bounded_strings(items) if isinstance(items, list) else None
     return projected
 
 
@@ -174,13 +187,7 @@ class AdmissionIndex:
     @staticmethod
     def _schema(conn: sqlite3.Connection) -> None:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        cursor_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_cursor'"
-        ).fetchone() is not None
-        legacy_zero = version == 0 and cursor_exists and "next_ordinal" not in {
-            row[1] for row in conn.execute("PRAGMA table_info(source_cursor)")
-        }
-        if version not in {0, SCHEMA_VERSION} or legacy_zero:
+        if version != SCHEMA_VERSION:
             # The index is disposable. Rebuild instead of running an unbounded
             # data migration over stale derived state.
             conn.executescript("""
@@ -282,8 +289,8 @@ class AdmissionIndex:
         CREATE TABLE IF NOT EXISTS admission_summary (
           key TEXT PRIMARY KEY, value INTEGER NOT NULL
         );
-        PRAGMA user_version=3;
         """)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def _source_stat(self, stream: str) -> os.stat_result | None:
         try:
@@ -376,7 +383,7 @@ class AdmissionIndex:
             (event_generation, signal_generation, candidate_id),
         ).fetchall()
         signals = [json.loads(row[0]) for row in sorted(signal_rows, key=lambda item: item[1])]
-        return {"signals": signals, "events": events, "candidates": [candidate], "decisions": []}
+        return _AdmissionSnapshot(signals=signals, events=events, candidates=[candidate], decisions=[])
 
     @staticmethod
     def _is_applying_decision(projection: dict) -> bool:
@@ -394,8 +401,10 @@ class AdmissionIndex:
         self, conn: sqlite3.Connection, source: str, generation: int,
         ordinal: int, projection: dict, binding: dict,
     ) -> set[str]:
+        from .admission import _member_reference_shape
+
         applied = source == "candidates" or self._is_applying_decision(projection)
-        if not applied:
+        if not applied or not _member_reference_shape(binding):
             return set()
         members = binding.get("selected_member_keys")
         member_rows = members if isinstance(members, list) and members else [None]
@@ -587,11 +596,18 @@ class AdmissionIndex:
     ) -> None:
         if stream == "signals":
             projection = _signal_projection(row, self.store.instance, claim_parser)
-            signal_id = str(row.get("id") or f"ordinal:{ordinal}")
+            signal_id = record_id(row.get("id"))
+            if signal_id is None:
+                return
             previous = conn.execute(
                 "SELECT projection_json FROM signal_claim WHERE signal_id=? AND generation=?",
                 (signal_id, generation),
             ).fetchone()
+            if previous is not None:
+                # A duplicate canonical ID is ambiguous, not last-writer proof.
+                projection = {"id": signal_id, "_admission_ambiguous": True}
+                projection["_admission_claim"] = None
+                projection["_admission_error"] = "ambiguous_signal_id"
             conn.execute(
                 "INSERT OR REPLACE INTO signal_claim VALUES (?,?,?,?)",
                 (signal_id, generation, ordinal, _json(projection)),
@@ -610,11 +626,16 @@ class AdmissionIndex:
             return
         if stream == "events":
             projection = _event_projection(row)
-            event_id = str(row.get("id") or f"ordinal:{ordinal}")
+            event_id = record_id(row.get("id"))
+            if event_id is None:
+                return
             previous = conn.execute(
                 "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
                 (event_id, generation),
             ).fetchone()
+            if previous is not None:
+                projection = {"id": event_id, "source_signal_ids": [],
+                              "_admission_ambiguous": True}
             conn.execute(
                 "INSERT OR REPLACE INTO event_join VALUES (?,?,?,?)",
                 (event_id, generation, ordinal, _json(projection)),
@@ -622,7 +643,7 @@ class AdmissionIndex:
             conn.execute("DELETE FROM event_signal WHERE event_id=?", (event_id,))
             conn.executemany(
                 "INSERT OR IGNORE INTO event_signal VALUES (?,?)",
-                ((event_id, signal_id) for signal_id in set(projection["source_signal_ids"])),
+                ((event_id, signal_id) for signal_id in _reference_ids(projection["source_signal_ids"])),
             )
             has_dependents = conn.execute(
                 "SELECT 1 FROM candidate_event WHERE event_id=? LIMIT 1", (event_id,),
@@ -638,7 +659,41 @@ class AdmissionIndex:
             return
         if stream == "candidates":
             projection = _candidate_projection(row, fingerprint)
-            candidate_id = str(row.get("id") or f"ordinal:{ordinal}")
+            candidate_id = record_id(row.get("id"))
+            if candidate_id is None:
+                return
+            previous = conn.execute(
+                "SELECT source_ordinal,prompt_projection_json FROM candidate_projection "
+                "WHERE candidate_id=? AND generation=?", (candidate_id, generation),
+            ).fetchone()
+            affected: set[str] = set()
+            if previous is not None:
+                old = json.loads(previous["prompt_projection_json"])
+                old_binding = old.get("admission_binding") or {}
+                # Legacy settlement has no item/member dependency. Refresh only
+                # its exact singleton target after withdrawing ambiguous evidence.
+                legacy_targets = old.get("source_candidate_ids")
+                if (old.get("kind") == "subconscious_advisory"
+                        and isinstance(legacy_targets, list) and len(legacy_targets) == 1
+                        and isinstance(legacy_targets[0], str)):
+                    affected.add(legacy_targets[0])
+                item_key = old_binding.get("item_key")
+                if isinstance(item_key, str):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO dependency_refresh VALUES ('item',?,'')",
+                        (item_key,),
+                    )
+                for member in _reference_ids(old_binding.get("selected_member_keys")):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO dependency_refresh VALUES ('member',?,'')",
+                        (member,),
+                    )
+                conn.execute(
+                    "DELETE FROM disposition_evidence WHERE source_stream='candidates' "
+                    "AND generation=? AND source_ordinal=?", (generation, previous["source_ordinal"]),
+                )
+                projection = {"id": candidate_id, "status": "candidate", "event_ids": [],
+                              "_admission_ambiguous": True}
             conn.execute(
                 "INSERT OR REPLACE INTO candidate_projection VALUES (?,?,?,?,?,?,?,?,?)",
                 (
@@ -654,16 +709,17 @@ class AdmissionIndex:
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO candidate_event VALUES (?,?)",
-                ((candidate_id, event_id) for event_id in set(projection["event_ids"])),
+                ((candidate_id, event_id) for event_id in _reference_ids(projection["event_ids"])),
             )
-            affected: set[str] = set()
             binding = projection.get("admission_binding")
             if projection.get("kind") == "subconscious_advisory":
                 if isinstance(binding, dict):
                     affected = self._insert_dispositions(
                         conn, "candidates", generation, ordinal, projection, binding,
                     )
-                elif projection.get("source_candidate_ids"):
+                elif (isinstance(projection.get("source_candidate_ids"), list)
+                      and len(projection["source_candidate_ids"]) == 1
+                      and isinstance(projection["source_candidate_ids"][0], str)):
                     legacy_id = projection["source_candidate_ids"][0]
                     evidence_id = hashlib.sha256(
                         f"candidates:{generation}:{ordinal}:legacy".encode(),
@@ -680,7 +736,7 @@ class AdmissionIndex:
             self._refresh_candidate(
                 conn, candidate_id, binding_builder, generation=generation,
             )
-            if projection.get("kind") != "subconscious_advisory":
+            if projection.get("kind") != "subconscious_advisory" and previous is None:
                 base, error = binding_builder(self.store, projection, self._joined_snapshot(conn, projection))
                 if not error and base:
                     affected.update(self._resolve_v1_evidence(conn, candidate_id, base))
@@ -825,6 +881,9 @@ class AdmissionIndex:
                         elif size == cursor["offset"] and stat and stat.st_mtime_ns != cursor["mtime_ns"]:
                             reset = True
                         elif fd is not None:
+                            if budget < min(int(cursor["offset"]), BOUNDARY_BYTES):
+                                pending_reason = "boundary_validation_budget_exhausted"
+                                break
                             boundary, charged = self._boundary(fd, int(cursor["offset"]))
                             consumed += charged
                             budget -= charged
@@ -841,7 +900,7 @@ class AdmissionIndex:
                         ordinal = int(cursor["next_ordinal"])
                         record_count = int(cursor["record_count"])
                     complete = offset == size
-                    if not complete and budget > BOUNDARY_BYTES and fd is not None:
+                    while not complete and budget > BOUNDARY_BYTES and fd is not None:
                         available = size - offset
                         request = min(available, budget - BOUNDARY_BYTES, MAX_RECORD_BYTES + 1)
                         chunk = os.pread(fd, request, offset)
@@ -849,19 +908,25 @@ class AdmissionIndex:
                         budget -= len(chunk)
                         final_newline = chunk.rfind(b"\n")
                         if final_newline < 0:
-                            if available > MAX_RECORD_BYTES:
+                            if len(chunk) > MAX_RECORD_BYTES:
                                 raise ValueError(f"{stream}:record_too_large")
                             if len(chunk) == available:
-                                raise ValueError(f"{stream}:incomplete_record")
+                                if reset and cursor is not None:
+                                    raise ValueError(f"{stream}:incomplete_record")
+                                pending_reason = f"{stream}:incomplete_record"
+                                break
                             # The remaining aggregate budget may have been spent
                             # on earlier streams. Keep the complete-record cursor
                             # unchanged so the next pass can resume safely.
                             pending_reason = f"{stream}:record_waiting_for_larger_remaining_budget"
+                            break
                         else:
                             parsed = chunk[:final_newline + 1]
                             for raw in parsed.splitlines():
                                 if not raw.strip():
                                     continue
+                                if len(raw) > MAX_RECORD_BYTES:
+                                    raise ValueError(f"{stream}:record_too_large")
                                 value = json.loads(raw)
                                 if not isinstance(value, dict):
                                     raise ValueError(f"{stream}:non_object_record")
@@ -874,9 +939,13 @@ class AdmissionIndex:
                                 records += 1
                             offset += len(parsed)
                             complete = offset == size
-                    boundary = hashlib.sha256(b"").hexdigest()
+                    boundary_unchanged = not reset and offset == cursor["offset"]
+                    boundary = (
+                        cursor["boundary_sha256"] if boundary_unchanged
+                        else hashlib.sha256(b"").hexdigest()
+                    )
                     charge = min(offset, BOUNDARY_BYTES)
-                    if fd is not None and budget >= charge:
+                    if not boundary_unchanged and fd is not None and budget >= charge:
                         boundary, charged = self._boundary(fd, offset)
                         consumed += charged
                         budget -= charged
@@ -905,7 +974,7 @@ class AdmissionIndex:
             )
             conn.commit()
             progress = self._progress(conn)
-            complete = not refresh_pending and stable and set(progress) == set(STREAMS) and all(
+            complete = pending_reason is None and not refresh_pending and stable and set(progress) == set(STREAMS) and all(
                 value["complete"] for value in progress.values()
             )
             conn.set_progress_handler(None, 0)
@@ -955,6 +1024,11 @@ class AdmissionIndex:
     def _ready_connection(self) -> tuple[sqlite3.Connection | None, AdmissionIndexResult | None]:
         try:
             conn = self._connect(create=False, readonly=True)
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                conn.close()
+                return None, AdmissionIndexResult(
+                    False, "rebuilding", None, {}, 0, "admission_claim_generation_changed",
+                )
             progress = self._progress(conn)
             if set(progress) != set(STREAMS) or not all(v["complete"] for v in progress.values()):
                 conn.close()
@@ -1094,7 +1168,7 @@ class AdmissionIndex:
         row = conn.execute(
             "SELECT p.prompt_projection_json,s.source_decisions_json "
             "FROM candidate_projection p JOIN candidate_state s USING(candidate_id) "
-            "WHERE p.candidate_id=? AND p.generation=?",
+            "WHERE p.candidate_id=? AND p.generation=? AND s.binding_json IS NOT NULL",
             (candidate_id, generation),
         ).fetchone()
         if row is None:
@@ -1106,13 +1180,22 @@ class AdmissionIndex:
         candidate = json.loads(row[0])
         events = []
         event_generation = self._current_generation(conn, "events")
-        for event_id in candidate.get("event_ids") or []:
+        valid_event_ids = _reference_ids(candidate.get("event_ids"))
+        # First-reference order, one lookup per literal ID; retain the complete
+        # candidate projection separately so invalid refs still imply uncertainty.
+        ordered_event_ids = dict.fromkeys(
+            value for value in candidate.get("event_ids") or []
+            if isinstance(value, str) and value in valid_event_ids
+        )
+        for event_id in ordered_event_ids:
             event = conn.execute(
                 "SELECT projection_json FROM event_join WHERE event_id=? AND generation=?",
                 (event_id, event_generation),
             ).fetchone()
             if event is not None:
-                events.append(json.loads(event[0]))
+                projected = json.loads(event[0])
+                if projected.get("_admission_ambiguous") is not True:
+                    events.append(projected)
         progress = self._progress(conn)
         conn.close()
         value = {
@@ -1143,7 +1226,7 @@ def bounded_cacheless_snapshot(
     """Read a small exact snapshot without creating cache state."""
     remaining = max(1, int(scan_bytes))
     consumed = records = 0
-    snapshot: dict[str, list[dict]] = {stream: [] for stream in STREAMS}
+    snapshot: dict[str, list[dict]] = _AdmissionSnapshot({stream: [] for stream in STREAMS})
     opening = {}
     try:
         for stream in STREAMS:
