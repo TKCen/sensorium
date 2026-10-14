@@ -212,6 +212,15 @@ def test_bound_advisory_reason_obeys_current_source(tmp_path, monkeypatch, actio
     assert receipt['type'] == 'subconscious.advisory'
     assert receipt['admission_binding']['source_candidate_id'] == candidate['id']
     assert (receipt['candidate_id'] is None) == (dry_run or action != 'CREATE_CONSCIOUS_TASK')
+    from tests.test_canonical_ingress_replay import forbid_effects
+    before_replay = _snapshot(store)
+    with monkeypatch.context() as replay_patch:
+        forbid_effects(store, replay_patch)
+        replay = ingest(store, first)
+        assert replay['candidate_id'] == candidate['id']
+        assert replay['event_id'] == candidate['event_ids'][0]
+        assert replay['signal_id'] == first['id']
+        assert _snapshot(store) == before_replay
     kw = {'instance': store.instance, 'state_dir': str(store.root), 'surface': 'telegram'}
     assert marker in json.dumps(json.loads(tools.handle_sensorium_status(**kw)))
     incoming = dict(first)
@@ -220,6 +229,10 @@ def test_bound_advisory_reason_obeys_current_source(tmp_path, monkeypatch, actio
     else:
         incoming['sensitivity'] = 'local_only'
     assert ingest(store, incoming)['duplicate']
+    narrowed_owner = ingest(store, incoming)
+    assert narrowed_owner['candidate_id'] == candidate['id']
+    assert narrowed_owner['event_id'] == candidate['event_ids'][0]
+    assert narrowed_owner['signal_id'] == first['id']
     before = _snapshot(store)
     forbidden = json.loads(tools.handle_sensorium_status(reference_id=candidate['id'], **kw))
     assert forbidden['data']['exact_subject']['not_found']

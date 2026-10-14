@@ -360,3 +360,144 @@ def test_new_revision_survives_prior_owner_extinction(tmp_path, monkeypatch, own
         assert evidence["change_state"] == "new"
         assert evidence["candidate_id"] == new["id"]
         assert evidence["event_id"] == result["event_id"]
+
+
+def create_role_advisory(store, candidate):
+    response = json.loads(tools.handle_sensorium_subconscious_advisory(
+        instance=store.instance, state_dir=str(store.root), enabled=True, dry_run=False,
+        advisory_output={"action": "CREATE_CONSCIOUS_TASK", "rationale": "Synthetic role evidence",
+                         "candidate_ids": [candidate["id"]], "event_ids": candidate["event_ids"],
+                         "conscious_task": {"request_type": "THINK", "title": "Synthetic task",
+                                            "why": "Evaluate", "expected_decision": "Hold or engage"}},
+        config={"model_enabled": False}, record_receipt=True))
+    assert response["success"], response
+    return store.read_jsonl("candidates")[-1]
+
+
+@pytest.mark.parametrize("event", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_independent_replay_root_rejected(tmp_path, monkeypatch, event, reverse):
+    store = store_at(tmp_path)
+    ingest(store, signal())
+    root = store.read_jsonl("candidates")[0]
+    competing = {**root, "id": "independent-root"}
+    rows = [root, competing]
+    store.rewrite_jsonl("candidates", rows[::-1] if reverse else rows)
+    incoming = dict(store.read_jsonl("events")[0]) if event else signal()
+    incoming.update(sensitivity="local_only", allowed_surfaces=[])
+    before = snapshot(store)
+    forbid_effects(store, monkeypatch)
+    assert not call(store, incoming, event=event)["success"]
+    assert snapshot(store) == before
+
+
+@pytest.mark.parametrize("event", [False, True])
+@pytest.mark.parametrize("restriction", ["surface", "sensitivity"])
+def test_real_advisory_replay_returns_source_and_only_narrows(tmp_path, monkeypatch, event, restriction):
+    from agent_sensorium.dispatcher import candidate_to_thread
+
+    store = store_at(tmp_path)
+    first = signal()
+    first.update(sensitivity="public_safe", allowed_surfaces=["local", "telegram"])
+    original = ingest(store, first)
+    root = store.read_jsonl("candidates")[0]
+    derived = create_role_advisory(store, root)
+    assert derived["event_ids"] == root["event_ids"]
+    assert derived["source_candidate_ids"] == [root["id"]]
+    for row in [root, derived]:
+        store.append_jsonl("threads", candidate_to_thread(row))
+    # Reverse retention order: role is not append-position authority.
+    store.rewrite_jsonl("candidates", [derived, root])
+    incoming = dict(store.read_jsonl("events")[0]) if event else dict(first)
+    before = snapshot(store)
+    with monkeypatch.context() as effects:
+        forbid_effects(store, effects)
+        replay = call(store, incoming, event=event)
+        assert replay["success"] and replay["data"]["duplicate"]
+        assert replay["data"]["candidate_id"] == original["candidate_id"]
+        assert replay["data"]["event_id"] == original["event_id"]
+        if not event:
+            assert replay["data"]["signal_id"] == original["signal_id"]
+        assert snapshot(store) == before
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Narrowing must not append, observe, decay or prune")
+    for name in ["observe_after_success", "_apply_candidate_decay", "_read_pruned_sensor_policy"]:
+        monkeypatch.setattr(tools, name, forbidden)
+    monkeypatch.setattr(type(store), "append_jsonl", forbidden)
+    narrower = {**incoming, "allowed_surfaces": ["local"]} if restriction == "surface" else {
+        **incoming, "sensitivity": "local_only"}
+    result = call(store, narrower, event=event)
+    assert result["success"] and result["data"]["candidate_id"] == root["id"]
+    after = snapshot(store)
+    assert after != before
+    for stream in ["events", "candidates", "threads"]:
+        for row in store.read_jsonl(stream):
+            assert row["allowed_surfaces"] == ["local"]
+            if restriction == "sensitivity":
+                assert row["sensitivity"] == "local_only"
+    assert {row["id"] for row in store.read_jsonl("candidates")} == {root["id"], derived["id"]}
+    assert len(store.read_jsonl("events")) == len(store.read_jsonl("signals")) == 1
+    with monkeypatch.context() as effects:
+        forbid_effects(store, effects)
+        wider = call(store, incoming, event=event)
+        assert wider["success"] and wider["data"]["candidate_id"] == root["id"]
+        assert snapshot(store) == after
+
+
+@pytest.mark.parametrize("event", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("shape", ["duplicate", "dangling", "conflicting", "cycle", "membership",
+                                   "malformed_binding", "malformed_sources", "nested_conflict",
+                                   "pseudo_derived", "descendant_binding"])
+def test_structural_replay_lineage_rejected_without_effects(tmp_path, monkeypatch, event, reverse, shape):
+    store = store_at(tmp_path)
+    ingest(store, signal())
+    root = store.read_jsonl("candidates")[0]
+    derived = create_role_advisory(store, root)
+    rows = [root, derived]
+    if shape == "duplicate":
+        rows.append(copy.deepcopy(derived))
+    elif shape == "dangling":
+        derived["source_candidate_ids"] = ["absent"]
+    elif shape == "conflicting":
+        derived["admission_binding"]["source_candidate_id"] = "absent"
+    elif shape == "cycle":
+        root["source_candidate_ids"] = [derived["id"]]
+    elif shape == "membership":
+        root["event_ids"] = []
+    elif shape == "malformed_binding":
+        derived["admission_binding"] = []
+    elif shape == "malformed_sources":
+        derived["source_candidate_ids"] = root["id"]
+    elif shape == "nested_conflict":
+        derived["advisory_meta"]["admission_binding"]["item_key"] = "contradictory"
+    elif shape == "pseudo_derived":
+        derived.pop("source_candidate_ids")
+    else:
+        derived["event_ids"] = []
+        derived["admission_binding"] = {}
+    store.rewrite_jsonl("candidates", rows[::-1] if reverse else rows)
+    incoming = dict(store.read_jsonl("events")[0]) if event else signal()
+    incoming.update(sensitivity="local_only", allowed_surfaces=[])
+    before = snapshot(store)
+    forbid_effects(store, monkeypatch)
+    assert not call(store, incoming, event=event)["success"]
+    with pytest.raises(ValueError, match="ambiguous_ingress_lineage"):
+        tools._preflight_event(store, store.read_jsonl("events")[0],
+                               events=store.read_jsonl("events"),
+                               signals=store.read_jsonl("signals"),
+                               candidates=store.read_jsonl("candidates"))
+    assert snapshot(store) == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_multi_source_legacy_evidence_has_one_root_per_event(reverse):
+    one = {"id": "one", "event_ids": ["event-one"]}
+    two = {"id": "two", "event_ids": ["event-two"]}
+    derived = {"id": "derived", "event_ids": ["event-one", "event-two"],
+               "source_candidate_ids": ["one", "two"]}
+    rows = [one, two, derived]
+    if reverse:
+        rows.reverse()
+    assert tools._candidate_for_event_id(rows, "event-one") is one
+    assert tools._candidate_for_event_id(rows, "event-two") is two

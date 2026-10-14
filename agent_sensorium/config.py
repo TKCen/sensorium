@@ -14,11 +14,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from .canonical_records import lookup_record, record_index
 from .gate import DEFAULT_CONFIG as GATE_DEFAULT_CONFIG
 from .schemas import (
     PROFILE_NAME_RE,  # noqa: F401 - re-exported for config API compatibility
     SENSITIVITY_RANK,
     VALID_SENSITIVITIES,
+    decode_visibility,
     sanitize_profile_name,
     utc_now_iso,
 )
@@ -478,6 +480,7 @@ def resolve_config_path(
 
 
 def _validate_config(raw: dict) -> dict:
+    invalid_visibility = not isinstance(raw, dict)
     if not isinstance(raw, dict):
         raw = {}
 
@@ -525,14 +528,16 @@ def _validate_config(raw: dict) -> dict:
             config["policy_card_ref"] = None
     if "allowed_surfaces" in raw:
         val = raw["allowed_surfaces"]
-        if isinstance(val, list) and all(isinstance(s, str) for s in val):
-            surfaces = sorted({s.strip() for s in val if s.strip()})
-            if surfaces:
-                config["allowed_surfaces"] = surfaces
+        if decode_visibility({"sensitivity": "private", "allowed_surfaces": val}) is None:
+            invalid_visibility = True
+        else:
+            config["allowed_surfaces"] = list(val)
     if "max_sensitivity" in raw:
         val = raw["max_sensitivity"]
-        if val in VALID_SENSITIVITIES:
+        if isinstance(val, str) and val in VALID_SENSITIVITIES:
             config["max_sensitivity"] = val
+        else:
+            invalid_visibility = True
     if "thresholds" in raw:
         val = raw["thresholds"]
         if isinstance(val, dict):
@@ -609,6 +614,9 @@ def _validate_config(raw: dict) -> dict:
         config["prospective_evidence_capture"] = sanitize_prospective_evidence_capture(
             raw.get("prospective_evidence_capture")
         )
+    if invalid_visibility:
+        # Keep documented config display defaults, never their authority.
+        config["_visibility_invalid"] = True
     return config
 
 
@@ -785,15 +793,100 @@ def visible_on_surface(item: dict, surface: str, config: dict) -> bool:
     Checks BOTH item allowed_surfaces AND config allowed_surfaces, plus
     sensitivity. Fails closed: missing surfaces or sensitivity data hides item.
     """
-    if not surface:
+    if not isinstance(surface, str) or not surface.strip():
         return False
-    item_surfaces = set(item.get("allowed_surfaces") or [])
-    config_surfaces = set(config.get("allowed_surfaces") or [])
-    if surface not in item_surfaces or surface not in config_surfaces:
+    item_visibility = decode_visibility(item)
+    policy_visibility = decode_visibility(config, sensitivity_key="max_sensitivity")
+    if item_visibility is None or policy_visibility is None:
         return False
-    item_rank = SENSITIVITY_RANK.get(item.get("sensitivity", "private"), 1)
-    max_rank = SENSITIVITY_RANK.get(config.get("max_sensitivity", "private"), 1)
-    return item_rank <= max_rank
+    sensitivity, surfaces = item_visibility
+    maximum, policy_surfaces = policy_visibility
+    return (surface in surfaces and surface in policy_surfaces
+            and SENSITIVITY_RANK[sensitivity] <= SENSITIVITY_RANK[maximum])
+
+
+class DisclosureVisibility:
+    """Read-only candidate/thread authority over one full canonical view.
+
+    Uniqueness precedes lifecycle/ranking. Historical subjects use current
+    metadata without admission preparation. Cyclic/unresolved subjects deny.
+    Action/artifact entity uniqueness remains owned elsewhere.
+    """
+
+    def __init__(self, candidates: list[dict], threads: list[dict], surface: str, config: dict):
+        self.indexes = {"candidate": record_index(candidates), "thread": record_index(threads)}
+        self.surface = surface
+        self.config = config
+
+    def subject(self, kind: str, identifier: object, trail: frozenset = frozenset()) -> bool:
+        found = lookup_record(self.indexes[kind], identifier)
+        if found.state != "unique":
+            return False
+        key = (kind, identifier)
+        if key in trail:
+            return False
+        return (visible_on_surface(found.row, self.surface, self.config)
+                and self.linked(found.row, trail | {key}, owner=key))
+
+    def linked(self, record: object, trail: frozenset = frozenset(), *, owner=None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        linked = False
+        for field, kind in (("candidate_id", "candidate"), ("origin_candidate_id", "candidate"),
+                            ("thread_id", "thread")):
+            identifier = record.get(field)
+            if identifier is None:
+                continue
+            linked = True
+            # Own entity declarations in embedded capsules are not dependency
+            # cycles; source bindings and origin links remain dependencies.
+            if field in {"candidate_id", "thread_id"} and (kind, identifier) == owner:
+                continue
+            if not self.subject(kind, identifier, trail):
+                return False
+        if "source_candidate_ids" in record:
+            identifiers = record["source_candidate_ids"]
+            if not isinstance(identifiers, list):
+                return False
+            for identifier in identifiers:
+                linked = True
+                if not self.subject("candidate", identifier, trail):
+                    return False
+        binding = record.get("admission_binding")
+        if binding is not None:
+            linked = True
+            if not isinstance(binding, dict) or not self.subject("candidate", binding.get("source_candidate_id"), trail):
+                return False
+        for field, value in record.items():
+            if field in {"admission_binding", "source_candidate_ids"}:
+                continue
+            children = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+            for child in children:
+                if isinstance(child, dict):
+                    if not self.linked(child, trail, owner=owner):
+                        return False
+                    linked = linked or self._declares_subject(child)
+        if "source_refs" in record and not isinstance(record["source_refs"], (dict, list)):
+            return False
+        if not linked and record.get("type") == "subconscious.advisory":
+            if (record.get("output_action") in ("DROP", "SAVE", "CREATE_CONSCIOUS_TASK")
+                    or record.get("action") in ("drop", "save", "would_create_conscious_task",
+                                               "created_conscious_task_candidate", "updated_conscious_task_candidate")):
+                return False
+        return True
+
+    @staticmethod
+    def _declares_subject(record: dict) -> bool:
+        """Find canonical linkage, not opaque provenance strings."""
+        for key, value in record.items():
+            if key in {"candidate_id", "origin_candidate_id", "thread_id",
+                       "admission_binding", "source_candidate_ids"} and value is not None:
+                return True
+            children = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+            if any(isinstance(child, dict) and DisclosureVisibility._declares_subject(child)
+                   for child in children):
+                return True
+        return False
 
 
 def apply_surface_policy(

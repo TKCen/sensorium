@@ -11,7 +11,7 @@ import hashlib
 import re
 import json
 
-from .config import SENSITIVITY_RANK, load_instance_config, visible_on_surface
+from .config import DisclosureVisibility, SENSITIVITY_RANK, load_instance_config, visible_on_surface
 from .schemas import parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
@@ -342,7 +342,7 @@ def _ongoing_thread_item(
 
 def _ongoing_thread_group(
     threads: list[dict], decisions: list[dict], *, surface: str,
-    config: dict, previous_activation_at: str | None,
+    config: dict, previous_activation_at: str | None, disclosure: DisclosureVisibility,
 ) -> dict:
     grouped: dict[str, list[dict]] = {"held": [], "dormant": []}
     duplicate_ids: set[str] = set()
@@ -374,7 +374,7 @@ def _ongoing_thread_group(
         thread_id = thread.get("id")
         if not isinstance(thread_id, str) or not thread_id:
             continue
-        if visible_on_surface(thread, surface, config):
+        if disclosure.subject("thread", thread_id):
             grouped[thread["status"]].append(thread)
     for status in grouped:
         grouped[status] = [row for row in grouped[status] if row.get("id") not in duplicate_ids]
@@ -383,7 +383,8 @@ def _ongoing_thread_group(
     selected = eligible[:MAX_ONGOING_THREADS]
     omitted_held = max(0, len(grouped["held"]) - sum(row.get("status") == "held" for row in selected))
     omitted_dormant = max(0, len(grouped["dormant"]) - sum(row.get("status") == "dormant" for row in selected))
-    projected = [_ongoing_thread_item(row, decisions, previous_activation_at) for row in selected]
+    visible_decisions = [row for row in decisions if disclosure.linked(row)]
+    projected = [_ongoing_thread_item(row, visible_decisions, previous_activation_at) for row in selected]
     detail_truncated_count = sum(bool(row["truncated"]) for row in projected)
     group = {
         "available": True,
@@ -455,6 +456,7 @@ def build_attention_inbox(
 
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
+    disclosure = DisclosureVisibility(candidates, threads, surface, instance_config)
 
     active_candidates = [c for c in candidates if c.get("status") == "candidate"]
     visible_threads = [t for t in threads if t.get("status") in ("dormant", "held")]
@@ -463,13 +465,13 @@ def build_attention_inbox(
     filtered_out = 0
 
     for c in active_candidates:
-        if _closed_visible(c, surface, instance_config):
+        if disclosure.subject("candidate", c.get("id")):
             items.append(_candidate_item(c, now))
         else:
             filtered_out += 1
 
     for t in visible_threads:
-        if _closed_visible(t, surface, instance_config):
+        if disclosure.subject("thread", t.get("id")):
             items.append(_thread_item(t, now))
         else:
             filtered_out += 1
@@ -504,5 +506,6 @@ def build_attention_inbox(
         result["ongoing_threads"] = _ongoing_thread_group(
             threads, decision_rows, surface=surface, config=instance_config,
             previous_activation_at=previous_activation_at,
+            disclosure=disclosure,
         )
     return result

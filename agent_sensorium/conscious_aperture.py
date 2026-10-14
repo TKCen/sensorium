@@ -14,7 +14,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Callable
 
-from .config import load_instance_config, visible_on_surface
+from .config import DisclosureVisibility, load_instance_config, visible_on_surface
 from .prospective_evidence import attention_snapshot_evidence, observe_after_success
 from .schemas import new_id, parse_utc_z_checkpoint, truncate_text, utc_now_iso
 from .store import (
@@ -473,6 +473,10 @@ def open_conscious_aperture(
                 candidates, now=now_dt, stale_after_minutes=stale_after_minutes
             ),
         )
+        # None retains the private lease-selection API, not disclosure authority.
+        disclosure = (DisclosureVisibility(candidates, store.read_jsonl("threads"), surface,
+                                           instance_config if isinstance(instance_config, dict) else {})
+                      if surface is not None else None)
         canonical_ids = _canonical_source_ids(candidates)
         active = [
             candidate
@@ -523,6 +527,7 @@ def open_conscious_aperture(
                 and _visible(
                     candidate, surface=surface, instance_config=instance_config
                 )
+                and (disclosure is None or disclosure.subject("candidate", candidate.get("id")))
             ]
             if explicit_consumer
             else []
@@ -544,6 +549,8 @@ def open_conscious_aperture(
             if canonical_ids.get(_logical_source_key(candidate)) != candidate_id:
                 continue
             if not _visible(candidate, surface=surface, instance_config=instance_config):
+                continue
+            if disclosure is not None and not disclosure.subject("candidate", candidate.get("id")):
                 continue
             if recovery_candidate:
                 recovery_eligible.append(candidate)

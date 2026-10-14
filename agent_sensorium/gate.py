@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from .schemas import (
     new_id,
     utc_now_iso,
+    validate_ingress_visibility,
 )
 
 DEFAULT_CONFIG: dict = {
@@ -340,6 +341,7 @@ def should_promote_supported_signal(
 
 
 def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:
+    validate_ingress_visibility(signal)
     now = utc_now_iso()
     event = {
         "id": new_id("evt"),
@@ -366,6 +368,7 @@ def promote_signal_to_event(signal: dict, config: dict | None = None) -> dict:
 
 
 def event_to_candidate(event: dict, config: dict | None = None) -> dict:
+    validate_ingress_visibility(event)
     now = utc_now_iso()
     strength = event.get("strength", 0.5)
     pressure = round(strength * 0.6 + 0.2 * 0.5 + 0.2 * 0.5, 3)

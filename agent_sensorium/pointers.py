@@ -11,7 +11,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .actions import count_active_actions_for_thread
-from .config import load_instance_config, resolve_hermes_surface, visible_on_surface
+from .config import DisclosureVisibility, load_instance_config, resolve_hermes_surface
 from .schemas import truncate_text, utc_now_iso
 from .store import SensoriumStore
 from .prospective_evidence import observe_after_success
@@ -420,8 +420,11 @@ def select_attention_pointer(
     if inst_cfg is None:
         inst_cfg, _ = load_instance_config(state_dir=str(store.root))
 
+    candidate_rows = store.read_jsonl("candidates")
+    thread_rows = store.read_jsonl("threads")
+    disclosure = DisclosureVisibility(candidate_rows, thread_rows, surface, inst_cfg)
     threads = [
-        t for t in store.read_jsonl("threads")
+        t for t in thread_rows
         if t.get("status") in ("dormant", "held") and not t.get("summary_dirty")
     ]
     threads.sort(key=lambda t: t.get("created_at", ""), reverse=True)
@@ -540,7 +543,7 @@ def select_attention_pointer(
 
     cooldown_blocked: list[tuple[dict, str]] = []
     for thread in threads:
-        if not visible_on_surface(thread, surface, inst_cfg):
+        if not disclosure.subject("thread", thread.get("id")):
             continue
         open_, reason = _cooldown_open(store, thread.get("id", ""), int(cfg.get("cooldown_minutes", 120)))
         if not open_:
@@ -567,8 +570,8 @@ def select_attention_pointer(
         }
     if cfg.get("candidate_fallback_enabled", True):
         candidates = [
-            c for c in store.read_jsonl("candidates")
-            if c.get("status") == "candidate" and visible_on_surface(c, surface, inst_cfg)
+            c for c in candidate_rows
+            if c.get("status") == "candidate" and disclosure.subject("candidate", c.get("id"))
         ]
         for candidate in sorted(candidates, key=_candidate_sort_key):
             open_, reason = _cooldown_open(
@@ -632,8 +635,10 @@ def _saved_residue_candidates(
     max_age_days = merged_cfg.get("saved_residue_max_age_days")
     max_items = merged_cfg.get("saved_residue_max_items")
     saved = []
-    for candidate in store.read_jsonl("candidates"):
-        if not visible_on_surface(candidate, surface, cfg_for_visibility):
+    candidates = store.read_jsonl("candidates")
+    disclosure = DisclosureVisibility(candidates, store.read_jsonl("threads"), surface, cfg_for_visibility)
+    for candidate in candidates:
+        if not disclosure.subject("candidate", candidate.get("id")):
             continue
         settlement = candidate.get("kanban_settlement") or {}
         decision = str(settlement.get("decision") or "")
