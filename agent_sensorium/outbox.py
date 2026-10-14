@@ -323,13 +323,19 @@ def _current_delivery_owner(store: SensoriumStore, request: dict) -> bool:
         return False
     candidates = store.read_jsonl("candidates")
     threads = store.read_jsonl("threads")
-    thread_id = request.get("origin_thread_id")
-    candidate_id = request.get("origin_candidate_id")
-    if thread_id not in (None, ""):
+    thread_id = request.get("origin_thread_id", "")
+    candidate_id = request.get("origin_candidate_id", "")
+    # Missing/empty historical declarations are distinct from present nulls.
+    # Validate both selectors before choosing thread or candidate authority.
+    if not isinstance(thread_id, str) or not isinstance(candidate_id, str):
+        return False
+    if thread_id != "":
         found = lookup_record(record_index(threads), thread_id)
         if found.state != "unique":
             return False
         origin = found.row.get("origin_candidate_id", "")
+        if not isinstance(origin, str):
+            return False
         if origin not in ("", candidate_id):
             return False
         # Only absent/empty historical standalone origins retain compatibility.
@@ -342,13 +348,13 @@ def _current_delivery_owner(store: SensoriumStore, request: dict) -> bool:
         disclosure = DisclosureVisibility(candidates, threads, surface, policy)
         if not disclosure.subject("thread", thread_id):
             return False
-    elif candidate_id in (None, ""):
+    elif candidate_id == "":
         return False
     disclosure = DisclosureVisibility(candidates, threads, surface, policy)
-    if candidate_id not in (None, "") and not disclosure.subject("candidate", candidate_id):
+    if candidate_id != "" and not disclosure.subject("candidate", candidate_id):
         return False
     return disclosure.linked({key: value for key, value in request.items()
-                              if key != "origin_candidate_id" or value not in (None, "")})
+                              if key != "origin_candidate_id" or value != ""})
 
 
 def prepare_local_outbox_request(
@@ -633,7 +639,8 @@ def prepare_outbox_request(
     ).hexdigest()[:16]
 
     owner = {"origin_thread_id": thread_id,
-             "origin_candidate_id": origin_candidate_id or thread.get("origin_candidate_id", ""),
+             "origin_candidate_id": (origin_candidate_id if origin_candidate_id != ""
+                                     else thread.get("origin_candidate_id", "")),
              "surface": surface, "sensitivity": thread.get("sensitivity"),
              "allowed_surfaces": thread.get("allowed_surfaces")}
     if not _current_delivery_owner(store, owner):
@@ -672,7 +679,7 @@ def prepare_outbox_request(
         "updated_at": now,
         "status": "prepared",
         "origin_thread_id": thread_id,
-        "origin_candidate_id": origin_candidate_id or thread.get("origin_candidate_id", ""),
+        "origin_candidate_id": owner["origin_candidate_id"],
         "request_type": request_type,
         "surface": surface,
         "delivery_mode": delivery_mode,

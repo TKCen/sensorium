@@ -1,5 +1,6 @@
 """Synthetic current-owner delivery and bounded disclosure regressions."""
 import json
+import pytest
 from agent_sensorium import tools
 from agent_sensorium.config import DisclosureVisibility
 from agent_sensorium.dispatcher import candidate_to_thread
@@ -179,3 +180,136 @@ def test_current_owner_validation_serializes_replay_through_fake_dispatch(tmp_pa
     assert len(adapter.calls) == 1
     assert {name: store.paths[name].read_bytes() for name in before} == before
     assert next(r for r in store.read_jsonl("outbox") if r["id"] == history["id"]) == history
+
+
+def owner_args(thread):
+    return dict(thread_id=thread['id'], request_type='THINK', surface='discord',
+                delivery_mode='discord_channel_thread', target={'channel_id': 'fictional-channel'},
+                message_preview='Fictional owner summary', config=DIRECT)
+
+
+def delivery_bytes(store):
+    """Include content sidecars and every retained ledger, not lock/index files."""
+    return {str(path.relative_to(store.root)): path.read_bytes()
+            for path in store.root.rglob('*') if path.is_file()
+            and (path.suffix == '.jsonl' or 'content' in path.parts)}
+
+
+@pytest.mark.parametrize('bad', [None, False, 0, [], {}])
+@pytest.mark.parametrize('override', ['default', 'matching', 'valid'])
+def test_malformed_canonical_owner_denies_preparation(tmp_path, bad, override):
+    store, _, root = seed(tmp_path)
+    thread = candidate_to_thread(root)
+    thread['origin_candidate_id'] = bad
+    store.append_jsonl('threads', thread)
+    root['allowed_surfaces'] = []
+    store.rewrite_jsonl('candidates', [root])
+    args = owner_args(thread)
+    if override != 'default':
+        args['origin_candidate_id'] = bad if override == 'matching' else root['id']
+    before = delivery_bytes(store)
+    result = prepare_outbox_request(store, **args)
+    assert result['error'] == 'current_owner_not_allowed', result
+    assert delivery_bytes(store) == before
+    assert FakeDiscordAdapter().calls == []
+
+
+@pytest.mark.parametrize('bad', [None, False, 0, [], {}])
+def test_malformed_override_is_not_defaulted(tmp_path, bad):
+    store, _, root = seed(tmp_path)
+    thread = candidate_to_thread(root)
+    store.append_jsonl('threads', thread)
+    before = delivery_bytes(store)
+    result = prepare_outbox_request(store, **dict(owner_args(thread), origin_candidate_id=bad))
+    assert result['error'] == 'current_owner_not_allowed', result
+    assert delivery_bytes(store) == before
+
+
+@pytest.mark.parametrize('bad', [None, False, 0, [], {}])
+@pytest.mark.parametrize('mutation', ['canonical', 'matching', 'candidate', 'selector'])
+@pytest.mark.parametrize('hidden', [False, True])
+def test_retained_malformed_owner_denies_fake_effect(tmp_path, bad, mutation, hidden):
+    store, _, root = seed(tmp_path)
+    thread = candidate_to_thread(root)
+    store.append_jsonl('threads', thread)
+    prepared = prepare_outbox_request(store, **owner_args(thread))
+    assert prepared['success'], prepared
+    request = prepared['data']
+    if mutation in ('canonical', 'matching'):
+        threads = store.read_jsonl('threads')
+        threads[0]['origin_candidate_id'] = bad
+        store.rewrite_jsonl('threads', threads)
+    if mutation in ('matching', 'candidate'):
+        request['origin_candidate_id'] = bad
+    if mutation == 'selector':
+        request['origin_thread_id'] = bad
+    store.rewrite_jsonl('outbox', [request])
+    if hidden:
+        root['allowed_surfaces'] = []
+        store.rewrite_jsonl('candidates', [root])
+    before = delivery_bytes(store)
+    adapter = FakeDiscordAdapter()
+    result = dispatch_outbox_request(store, outbox_id=request['id'], adapter=adapter,
+                                    config=DIRECT, execute=True)
+    assert result['error'] == 'current_owner_not_allowed', result
+    assert adapter.calls == []
+    assert delivery_bytes(store) == before
+    assert store.read_jsonl('outbox')[0] == request
+
+
+@pytest.mark.parametrize('origin', ['current', 'absent', 'empty'])
+@pytest.mark.parametrize('absent_request', [False, True])
+def test_historical_owner_absence_and_current_inverse(tmp_path, origin, absent_request):
+    store, _, root = seed(tmp_path)
+    thread = candidate_to_thread(root)
+    if origin == 'absent':
+        thread.pop('origin_candidate_id')
+    elif origin == 'empty':
+        thread['origin_candidate_id'] = ''
+    store.append_jsonl('threads', thread)
+    prepared = prepare_outbox_request(store, **owner_args(thread))
+    assert prepared['success'], prepared
+    request = prepared['data']
+    if absent_request and origin != 'current':
+        request.pop('origin_candidate_id')
+        store.rewrite_jsonl('outbox', [request])
+    if origin != 'current':
+        root['allowed_surfaces'] = []
+        store.rewrite_jsonl('candidates', [root])
+    history = delivery_bytes(store)
+    adapter = FakeDiscordAdapter()
+    result = dispatch_outbox_request(store, outbox_id=request['id'], adapter=adapter,
+                                    config=DIRECT, execute=True)
+    assert result['success'], result
+    assert len(adapter.calls) == 1
+    after = delivery_bytes(store)
+    assert all(after[key].startswith(value) for key, value in history.items()
+               if key.endswith('decisions.jsonl'))
+    frozen = delivery_bytes(store)
+    assert not dispatch_outbox_request(store, outbox_id=request['id'], adapter=adapter,
+                                      config=DIRECT, execute=True)['success']
+    assert delivery_bytes(store) == frozen
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.parametrize('absent_selector', [False, True])
+def test_valid_candidate_only_retained_request_inverse(tmp_path, absent_selector):
+    from agent_sensorium.outbox import prepare_local_outbox_request, _current_delivery_owner
+
+    store, _, root = seed(tmp_path)
+    prepared = prepare_local_outbox_request(
+        store, origin_candidate_id=root['id'], request_type='THINK', surface='local',
+        delivery_mode='context_pointer', target={}, sensitivity='public_safe',
+        message_preview='Fictional candidate-only summary')
+    assert prepared['success'], prepared
+    request = prepared['data']
+    if absent_selector:
+        request.pop('origin_thread_id')
+    before = delivery_bytes(store)
+    assert _current_delivery_owner(store, request)
+    assert delivery_bytes(store) == before
+    root['allowed_surfaces'] = []
+    store.rewrite_jsonl('candidates', [root])
+    before = delivery_bytes(store)
+    assert not _current_delivery_owner(store, request)
+    assert delivery_bytes(store) == before
