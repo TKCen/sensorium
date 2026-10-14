@@ -831,7 +831,13 @@ class DisclosureVisibility:
         self.surface = surface
         self.config = config
 
-    def subject(self, kind: str, identifier: object, trail: frozenset = frozenset()) -> bool:
+    def subject(self, kind: str, identifier: object, trail: frozenset = frozenset(),
+                *, _depth=0, _budget=None) -> bool:
+        if _budget is None:
+            _budget = [4096]
+        if _depth >= 64 or _budget[0] <= 0:
+            return False
+        _budget[0] -= 1
         found = lookup_record(self.indexes[kind], identifier)
         if found.state != "unique":
             return False
@@ -839,16 +845,42 @@ class DisclosureVisibility:
         if key in trail:
             return False
         return (visible_on_surface(found.row, self.surface, self.config)
-                and self.linked(found.row, trail | {key}, owner=key))
+                and self._linked(found.row, trail | {key}, owner=key,
+                                 _depth=_depth + 1, _budget=_budget)[0])
 
     def linked(self, record: object, trail: frozenset = frozenset(), *, owner=None) -> bool:
         return self._linked(record, trail, owner=owner)[0]
 
     def _linked(self, record: object, trail: frozenset = frozenset(), *, owner=None,
-                source_refs=False) -> tuple[bool, bool]:
+                source_refs=False, _depth=0, _budget=None) -> tuple[bool, bool]:
         """Return validity and resolved linkage from the same traversal."""
+        if _budget is None:
+            _budget = [4096]
+        if _depth >= 64 or _budget[0] <= 0:
+            return False, False
+        _budget[0] -= 1
+        if isinstance(record, list):
+            linked = False
+            for child in record:
+                if isinstance(child, (dict, list)):
+                    valid, resolved = self._linked(child, trail, owner=owner,
+                                                   _depth=_depth + 1, _budget=_budget)
+                    if not valid:
+                        return False, False
+                    linked = linked or resolved
+            return True, linked
         if not isinstance(record, dict):
             return False, False
+        if record.get("kind") == "subconscious_advisory":
+            metadata = record.get("advisory_meta")
+            nested_binding = metadata.get("admission_binding") if isinstance(metadata, dict) else None
+            # The canonical producer declares its source at top level and in
+            # advisory metadata. Derived prose cannot become standalone when
+            # those declarations disappear; fingerprint text is not authority.
+            if not (record.get("source_candidate_ids")
+                    or isinstance(record.get("admission_binding"), dict)
+                    or isinstance(nested_binding, dict)):
+                return False, False
         linked = False
         for field, kind in (("candidate_id", "candidate"), ("origin_candidate_id", "candidate"),
                             ("thread_id", "thread")):
@@ -868,7 +900,7 @@ class DisclosureVisibility:
             # cycles; source bindings and origin links remain dependencies.
             if field in {"candidate_id", "thread_id"} and (kind, identifier) == owner:
                 continue
-            if not self.subject(kind, identifier, trail):
+            if not self.subject(kind, identifier, trail, _depth=_depth + 1, _budget=_budget):
                 return False, False
         if "source_candidate_ids" in record:
             identifiers = record["source_candidate_ids"]
@@ -876,21 +908,24 @@ class DisclosureVisibility:
                 return False, False
             for identifier in identifiers:
                 linked = True
-                if not self.subject("candidate", identifier, trail):
+                if not self.subject("candidate", identifier, trail, _depth=_depth + 1, _budget=_budget):
                     return False, False
         binding = record.get("admission_binding")
         if binding is not None:
             linked = True
-            if not isinstance(binding, dict) or not self.subject("candidate", binding.get("source_candidate_id"), trail):
+            if not isinstance(binding, dict) or not self.subject(
+                    "candidate", binding.get("source_candidate_id"), trail,
+                    _depth=_depth + 1, _budget=_budget):
                 return False, False
         for field, value in record.items():
             if field in {"admission_binding", "source_candidate_ids"}:
                 continue
-            children = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+            children = [value] if isinstance(value, (dict, list)) else []
             for child in children:
-                if isinstance(child, dict):
+                if isinstance(child, (dict, list)):
                     valid, resolved = self._linked(child, trail, owner=owner,
-                                                   source_refs=field == "source_refs" and isinstance(value, dict))
+                                                   source_refs=field == "source_refs" and isinstance(value, dict),
+                                                   _depth=_depth + 1, _budget=_budget)
                     if not valid:
                         return False, False
                     linked = linked or resolved

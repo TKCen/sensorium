@@ -19,6 +19,8 @@ def state_dir(tmp_path):
 def store(state_dir):
     s = SensoriumStore(instance="test", state_dir=state_dir)
     s.ensure_dirs()
+    s.append_jsonl("candidates", {"id": "cand_1", "kind": "creative_pull",
+                                 "sensitivity": "private", "allowed_surfaces": ["local", "discord"]})
     return s
 
 

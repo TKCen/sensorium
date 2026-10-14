@@ -8,7 +8,9 @@ from agent_sensorium import config, tools
 from agent_sensorium.artifacts import store_artifact
 from agent_sensorium.dispatcher import dispatch_once
 from agent_sensorium.volunteer_cards import build_volunteer_cards
-from tests.test_closed_visibility import _consumer_rows, _consumer_snapshot, _prepare_consumers
+from tests.test_closed_visibility import (
+    _consumer_rows, _consumer_snapshot, _prepare_consumers, _retain_consumer_source,
+)
 from tests.test_core_material_replay import store_at
 
 
@@ -84,6 +86,7 @@ def test_config_presence_controls_real_disclosure(tmp_path, monkeypatch, mode):
     store = store_at(tmp_path)
     marker = "Synthetic retained subject"
     candidate, thread = _consumer_rows(marker)
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     path = store.root / "instance.config.json"
@@ -118,6 +121,7 @@ def test_real_candidate_artifact_preserves_placeholders(tmp_path, monkeypatch, p
     if parent == "hidden":
         candidate["allowed_surfaces"] = []
     if parent != "missing":
+        _retain_consumer_source(store, candidate)
         store.append_jsonl("candidates", candidate)
     if parent == "duplicate":
         store.append_jsonl("candidates", copy.deepcopy(candidate))
@@ -135,7 +139,7 @@ def test_real_candidate_artifact_preserves_placeholders(tmp_path, monkeypatch, p
 
 @pytest.mark.parametrize("bad", [None, False, 0, [], {}, "nonexistent", ""])
 def test_arbitrary_thread_identifiers_are_not_placeholders(tmp_path, bad):
-    candidate, _ = _consumer_rows("Synthetic parent")
+    candidate, _ = _consumer_rows("Synthetic parent", standalone=True)
     disclosure = config.DisclosureVisibility([candidate], [], "local", config._validate_config({}))
     if bad is not None:
         assert not disclosure.linked({"candidate_id": candidate["id"], "thread_id": bad})
@@ -159,6 +163,7 @@ def test_dispatcher_produces_only_disclosable_threads(tmp_path, mode):
         candidate.pop("id")
     elif mode == "missing_sensitivity":
         candidate.pop("sensitivity")
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     if mode == "duplicate":
         store.append_jsonl("candidates", {**candidate, "status": "archived"})
@@ -183,10 +188,11 @@ def test_dispatcher_produces_only_disclosable_threads(tmp_path, mode):
         assert "Synthetic production source" in json.dumps(opened)
         retained = store.read_jsonl("threads")[0]
         assert retained["origin_candidate_id"] == candidate["id"]
-        store.rewrite_jsonl("candidates", [{**candidate, "status": "archived"}])
+        source = next(row for row in before if row["id"] == "consumer-source")
+        store.rewrite_jsonl("candidates", [source, {**candidate, "status": "archived"}])
         assert json.loads(tools.handle_sensorium_thread_open(
             thread_id=result["thread_id"], instance=store.instance, state_dir=str(store.root)))["success"]
-        store.rewrite_jsonl("candidates", [{k: v for k, v in candidate.items() if k != "sensitivity"}])
+        store.rewrite_jsonl("candidates", [source, {k: v for k, v in candidate.items() if k != "sensitivity"}])
         assert not json.loads(tools.handle_sensorium_thread_open(
             thread_id=result["thread_id"], instance=store.instance, state_dir=str(store.root)))["success"]
         assert store.read_jsonl("threads")[0] == retained
@@ -198,6 +204,7 @@ def test_dispatcher_skips_ineligible_pressure_and_cannot_broaden_source(tmp_path
     candidate.update(status="candidate", pressure=0.7, allowed_surfaces=["local"])
     high = {**candidate, "id": "candidate-high", "pressure": 0.99, "allowed_surfaces": []}
     store.append_jsonl("candidates", high)
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     before = store.read_jsonl("candidates")
     result = dispatch_once(store, dry_run=False, config={

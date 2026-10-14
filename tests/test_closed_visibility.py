@@ -125,15 +125,30 @@ def test_duplicate_subject_withholds_full_serialized_prose(tmp_path, monkeypatch
             for p in store.root.rglob("*") if p.is_file()} == before
 
 
-def _consumer_rows(marker):
+def _consumer_rows(marker, *, standalone=False):
     from tests.test_conscious_aperture import _candidate
     from agent_sensorium.dispatcher import candidate_to_thread
     candidate = _candidate("candidate-visible")
     candidate.update(summary=marker)
+    if standalone:
+        candidate["kind"] = "creative_pull"
+    else:
+        candidate["source_candidate_ids"] = ["consumer-source"]
     candidate["conscious_task"].update(title=marker, why=marker)
     thread = candidate_to_thread(candidate)
     thread["id"] = "thread-visible"
     return candidate, thread
+
+
+def _retain_consumer_source(store, candidate):
+    """Retain a separate inert synthetic canonical owner for derived fixtures."""
+    if candidate.get("kind") == "subconscious_advisory":
+        store.append_jsonl("candidates", {
+            "id": "consumer-source", "kind": "design_decision", "status": "archived",
+            "pressure": 0, "summary": "Synthetic canonical consumer source",
+            "sensitivity": candidate.get("sensitivity", "private"),
+            "allowed_surfaces": candidate.get("allowed_surfaces", ["local"]),
+        })
 
 
 def _consumer_snapshot(store):
@@ -220,6 +235,7 @@ def test_all_read_consumers_retained_shape_denial(tmp_path, monkeypatch, stream,
         target.pop(field)
     else:
         target[field] = value
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     _prepare_consumers(store, monkeypatch, _validate_config({}))
@@ -251,6 +267,7 @@ def test_full_stream_duplicate_permutations_all_consumers(tmp_path, monkeypatch,
     rows = [target, duplicate]
     if reverse:
         rows.reverse()
+    _retain_consumer_source(store, candidate)
     for name, row in [("candidates", candidate), ("threads", thread)]:
         for retained in rows if name == stream else [row]:
             store.append_jsonl(name, retained)
@@ -275,6 +292,7 @@ def test_policy_shape_denies_all_consumers(tmp_path, monkeypatch, field, value):
     store = store_at(tmp_path)
     marker = "Fictional malformed policy marker"
     candidate, thread = _consumer_rows(marker)
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     policy = _validate_config({})
@@ -295,6 +313,7 @@ def test_invalid_falsy_request_never_becomes_local(tmp_path, monkeypatch, surfac
     store = store_at(tmp_path)
     marker = "Fictional invalid request marker"
     candidate, thread = _consumer_rows(marker)
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     _prepare_consumers(store, monkeypatch, _validate_config({}))
@@ -333,6 +352,7 @@ def test_nested_current_and_historical_links_all_consumers(tmp_path, monkeypatch
     else:
         declared = {link: identifier}
     candidate.update(declared)
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     receipt = {"type": "subconscious.advisory", "output_action": "SAVE", "reason": marker, **declared}
@@ -360,6 +380,7 @@ def test_closed_rank_and_custom_positive_inverses(tmp_path, monkeypatch, sensiti
     candidate, thread = _consumer_rows(marker)
     for row in (candidate, thread):
         row.update(sensitivity=sensitivity, allowed_surfaces=[surface])
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     policy = {"allowed_surfaces": [surface] if configured else ["local"], "max_sensitivity": maximum}
@@ -392,7 +413,7 @@ def test_cycles_own_identity_and_exact_missing_do_not_fallback(tmp_path, monkeyp
     import json
     from agent_sensorium.config import DisclosureVisibility
     store = store_at(tmp_path)
-    candidate, thread = _consumer_rows("Fictional own identity marker")
+    candidate, thread = _consumer_rows("Fictional own identity marker", standalone=True)
     candidate["candidate_id"] = candidate["id"]
     policy = _validate_config({})
     assert DisclosureVisibility([candidate], [thread], "local", policy).subject("candidate", candidate["id"])
@@ -413,7 +434,7 @@ def test_saved_positive_and_actual_cycle_consumers(tmp_path, monkeypatch, state)
     import json
     store = store_at(tmp_path)
     marker = "Fictional saved cycle boundary marker"
-    candidate, thread = _consumer_rows(marker)
+    candidate, thread = _consumer_rows(marker, standalone=state != "valid_saved")
     candidate.update(status="archived", kanban_settlement={"decision": "SAVE", "intake_task_id": "intake-fiction"})
     if state == "self_cycle":
         candidate["source_candidate_ids"] = [candidate["id"]]
@@ -423,6 +444,7 @@ def test_saved_positive_and_actual_cycle_consumers(tmp_path, monkeypatch, state)
         store.append_jsonl("candidates", peer)
     elif state == "bad_nested_binding":
         candidate["advisory_meta"] = {"admission_binding": {"source_candidate_id": []}}
+    _retain_consumer_source(store, candidate)
     store.append_jsonl("candidates", candidate)
     store.append_jsonl("threads", thread)
     _prepare_consumers(store, monkeypatch, _validate_config({}))

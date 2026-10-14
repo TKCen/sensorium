@@ -11,6 +11,7 @@ from agent_sensorium.conscious_reachout import (
 )
 from agent_sensorium.outbox import FakeDiscordAdapter
 from agent_sensorium.store import SensoriumStore
+from tests.test_source_closure_contract import retain_candidate_parent
 
 
 @pytest.fixture
@@ -74,6 +75,8 @@ def test_subconscious_cannot_prepare_or_deliver(store):
 
 def test_conscious_can_prepare_message_without_direct_delivery(store):
     store.append_jsonl("threads", _thread())
+    retain_candidate_parent(store, "cand_reach")
+    parent = store.read_jsonl("candidates")[0]
 
     result = apply_conscious_reachout_decision(
         store,
@@ -96,6 +99,8 @@ def test_conscious_can_prepare_message_without_direct_delivery(store):
     assert receipt["message_chars"] > 0
     assert "bounded message" not in str(receipt)
     assert store.read_jsonl("outbox")[0]["request_type"] == "REACH_OUT"
+    assert store.read_jsonl("candidates") == [parent]
+    assert parent["status"] == "archived" and parent["pressure"] == 0
 
 
 def test_direct_reachout_requires_policy_and_adapter(store):
@@ -221,6 +226,8 @@ def test_conscious_reachout_metrics_hash_unknown_breakdown_keys(store):
 
 def test_deliver_prepared_dispatches_existing_outbox_and_marks_it_dispatched(store):
     store.append_jsonl("threads", _thread())
+    retain_candidate_parent(store, "cand_reach")
+    parent = store.read_jsonl("candidates")[0]
     prepared = apply_conscious_reachout_decision(
         store,
         decision="reach_out",
@@ -256,3 +263,5 @@ def test_deliver_prepared_dispatches_existing_outbox_and_marks_it_dispatched(sto
     assert receipt["type"] == CONSCIOUS_REACHOUT_DELIVERED_TYPE
     assert receipt["outbox_id"] == outbox_id
     assert "Prepared direct message" not in str(receipt)
+    assert store.read_jsonl("candidates") == [parent]
+    assert parent["status"] == "archived" and parent["pressure"] == 0

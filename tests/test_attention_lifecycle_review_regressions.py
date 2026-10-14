@@ -20,6 +20,7 @@ from agent_sensorium.conscious_doorway import (
 from agent_sensorium.plugin import register
 from agent_sensorium.settlement import _derived_stale_aperture_ids, apply_kanban_settlement
 from agent_sensorium.store import SensoriumStore
+from tests.test_conscious_doorway import _assert_sources_unchanged, _retain_sources
 from agent_sensorium.tools import (
     handle_sensorium_candidate_update,
     handle_sensorium_compact,
@@ -212,6 +213,7 @@ def test_legacy_ownerless_path_is_explicit_and_batch_wrong_owner_fails_closed(tm
 def test_packet_attempt_is_all_or_none_and_host_drop_never_claims_consumption(tmp_path):
     store = SensoriumStore(instance="packet", state_dir=str(tmp_path / "packet"))
     store.rewrite_jsonl("candidates", [_candidate("alpha"), _candidate("beta")])
+    parents = _retain_sources(store, ["alpha", "beta"])
     packet = open_conscious_aperture(
         store, aperture_size=2, max_active_items=2, consumer_id="owner-a",
         dry_run=False, now="2026-06-07T12:00:00Z",
@@ -234,6 +236,7 @@ def test_packet_attempt_is_all_or_none_and_host_drop_never_claims_consumption(tm
                               "max_active_items": 1, "surfaces": ["local"]},
     }))
     doorway.append_jsonl("candidates", _candidate("host-drop"))
+    doorway_parents = _retain_sources(doorway, ["host-drop"])
     proposed = handle_conscious_doorway_pre_llm(
         instance="generic", platform="local", session_id="session-a",
         turn_id="turn-a", state_dir=str(doorway_dir),
@@ -243,6 +246,8 @@ def test_packet_attempt_is_all_or_none_and_host_drop_never_claims_consumption(tm
     attempts = [d for d in decisions if d.get("type") == "conscious.aperture.presentation_attempted"]
     assert len(attempts) == 1 and attempts[0]["host_consumption_confirmed"] is False
     assert not [d for d in decisions if d.get("type") == "conscious.aperture.consumed"]
+    _assert_sources_unchanged(store, parents)
+    _assert_sources_unchanged(doorway, doorway_parents)
 
 
 def test_prepared_external_work_requires_validated_core_spec(tmp_path):
@@ -409,6 +414,7 @@ def test_fixed_clock_reopen_yields_incumbent_and_serves_due_without_settlement(t
 def test_same_owner_yield_dry_run_ineligible_and_no_contender_are_nonmutating(tmp_path):
     store = SensoriumStore(instance="test", state_dir=str(tmp_path / "state"))
     store.append_jsonl("candidates", _candidate("incumbent"))
+    parents = _retain_sources(store, ["incumbent"])
     first = open_conscious_aperture(
         store, aperture_size=1, max_active_sessions=1, consumer_id="same-owner",
         lease_minutes=5, dry_run=False, now="2026-06-07T12:00:00Z",
@@ -425,6 +431,7 @@ def test_same_owner_yield_dry_run_ineligible_and_no_contender_are_nonmutating(tm
     rows = store.read_jsonl("candidates")
     rows.append(hidden)
     store.rewrite_jsonl("candidates", rows)
+    hidden_parents = _retain_sources(store, ["hidden"])
     before = {name: store.read_jsonl(name) for name in ("candidates", "decisions")}
     preview = open_conscious_aperture(
         store, aperture_size=1, max_active_items=1, consumer_id="same-owner",
@@ -436,6 +443,7 @@ def test_same_owner_yield_dry_run_ineligible_and_no_contender_are_nonmutating(tm
     assert not [row for row in store.read_jsonl("decisions")
                 if row.get("type") == "conscious.aperture.yielded"]
     assert first["aperture_id"] == renewed["aperture_id"]
+    _assert_sources_unchanged(store, parents + hidden_parents)
 
 
 def test_same_owner_yield_never_preempts_third_party_and_old_token_cannot_mutate(tmp_path):
@@ -1173,6 +1181,7 @@ def test_conscious_doorway_is_local_only_and_local_desktop_surface_still_works(t
     candidate = _candidate("local-only")
     candidate["allowed_surfaces"] = ["local", "discord"]
     store.append_jsonl("candidates", candidate)
+    parents = _retain_sources(store, ["local-only"])
 
     remote = handle_conscious_doorway_pre_llm(
         instance="test",
@@ -1192,6 +1201,7 @@ def test_conscious_doorway_is_local_only_and_local_desktop_surface_still_works(t
     assert local is not None
     assert "[Sensorium Conscious Aperture]" in local["context"]
     assert store.read_jsonl("candidates")[0]["status"] == "in_conscious_aperture"
+    _assert_sources_unchanged(store, parents)
 
 
 def test_liveness_prefers_explicit_lease_expiry_with_legacy_fallback():
