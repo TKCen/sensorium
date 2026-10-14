@@ -19,7 +19,7 @@ from pathlib import Path
 from .gate import is_feedback_self_loop
 from .config import DisclosureVisibility, load_instance_config
 from .actuator_contracts import mediated_artifact_review_contract
-from .schemas import new_id, truncate_text, utc_now_iso
+from .schemas import SENSITIVITY_RANK, decode_visibility, new_id, truncate_text, utc_now_iso
 from .store import SensoriumStore
 
 STATE_VERSION = 1
@@ -75,6 +75,25 @@ def _merged_config(config: dict | None = None) -> dict:
         else:
             cfg[key] = value
     return cfg
+
+
+def _disclosure_policy(retained: dict, overlay: dict | None) -> dict:
+    """Execution overrides can restrict, never replace retained authority."""
+    policy = {key: retained[key] for key in ("allowed_surfaces", "max_sensitivity")}
+    canonical = decode_visibility(retained, sensitivity_key="max_sensitivity")
+    restricted = decode_visibility(
+        {**policy, **{key: value for key, value in (overlay or {}).items()
+                     if key in ("allowed_surfaces", "max_sensitivity", "_visibility_invalid")}},
+        sensitivity_key="max_sensitivity",
+    )
+    if canonical is None or restricted is None:
+        policy["_visibility_invalid"] = True
+        return policy
+    maximum, surfaces = canonical
+    overlay_maximum, overlay_surfaces = restricted
+    policy["allowed_surfaces"] = [surface for surface in surfaces if surface in overlay_surfaces]
+    policy["max_sensitivity"] = min((maximum, overlay_maximum), key=SENSITIVITY_RANK.__getitem__)
+    return policy
 
 
 def _parse_utc(ts: str | None) -> datetime | None:
@@ -396,6 +415,7 @@ def _dispatch_core(
     *,
     dry_run: bool,
     cfg: dict,
+    disclosure_policy: dict,
     budgets: dict,
 ) -> dict:
     candidates = store.read_jsonl("candidates")
@@ -403,9 +423,9 @@ def _dispatch_core(
     eligible = candidates
     if not dry_run and cfg.get("legacy_thread_dispatch_enabled"):
         # Keep the full canonical view for uniqueness, including terminal rows.
-        surfaces = cfg.get("allowed_surfaces")
+        surfaces = disclosure_policy.get("allowed_surfaces")
         surfaces = surfaces if isinstance(surfaces, list) else []
-        disclosures = [DisclosureVisibility(candidates, existing_threads, surface, cfg)
+        disclosures = [DisclosureVisibility(candidates, existing_threads, surface, disclosure_policy)
                        for surface in surfaces]
         eligible = [c for c in candidates if any(
             disclosure.subject("candidate", c.get("id")) for disclosure in disclosures
@@ -413,7 +433,7 @@ def _dispatch_core(
         usable = []
         for candidate in eligible:
             preview = candidate_to_thread(candidate, cfg)
-            if any(DisclosureVisibility(candidates, [*existing_threads, preview], surface, cfg)
+            if any(DisclosureVisibility(candidates, [*existing_threads, preview], surface, disclosure_policy)
                    .subject("thread", preview["id"]) for surface in surfaces):
                 usable.append(candidate)
         eligible = usable
@@ -497,12 +517,14 @@ def dispatch_once(
     config: dict | None = None,
 ) -> dict:
     instance_config, _ = load_instance_config(state_dir=str(store.root))
+    disclosure_policy = _disclosure_policy(instance_config, config)
     cfg = _merged_config({**instance_config, **(config or {})})
     store.ensure_dirs()
     budgets = _budget_state(store, cfg)
 
     if dry_run:
-        result = _dispatch_core(store, dry_run=True, cfg=cfg, budgets=budgets)
+        result = _dispatch_core(store, dry_run=True, cfg=cfg,
+                                disclosure_policy=disclosure_policy, budgets=budgets)
         _write_latest(
             store,
             result=result,
@@ -512,7 +534,8 @@ def dispatch_once(
         return result
 
     if not cfg.get("legacy_thread_dispatch_enabled"):
-        result = _dispatch_core(store, dry_run=False, cfg=cfg, budgets=budgets)
+        result = _dispatch_core(store, dry_run=False, cfg=cfg,
+                                disclosure_policy=disclosure_policy, budgets=budgets)
         _write_latest(
             store,
             result=result,
@@ -533,7 +556,8 @@ def dispatch_once(
         return result
 
     try:
-        result = _dispatch_core(store, dry_run=False, cfg=cfg, budgets=budgets)
+        result = _dispatch_core(store, dry_run=False, cfg=cfg,
+                                disclosure_policy=disclosure_policy, budgets=budgets)
     finally:
         _release_dispatch_lock(store, lock.get("owner", ""))
 
